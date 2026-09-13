@@ -17,6 +17,10 @@ class AppConfig {
     this.connectTimeout = const Duration(seconds: 10),
     this.sendTimeout = const Duration(seconds: 15),
     this.receiveTimeout = const Duration(seconds: 15),
+    this.realtimeConnectTimeout = const Duration(seconds: 10),
+    this.realtimeReconnectionDelay = const Duration(seconds: 2),
+    this.realtimeReconnectionDelayMax = const Duration(seconds: 20),
+    this.realtimeReauthRetryDelay = const Duration(seconds: 15),
   });
 
   /// Builds the configuration from the compile-time environment.
@@ -30,6 +34,10 @@ class AppConfig {
     defaultValue: defaultBackendBaseUrl,
   );
 
+  /// Socket.IO namespace this client is allowed to use, per `REALTIME.md`.
+  /// `/technicians` belongs to `remote_control_web` and is never opened here.
+  static const String deviceRealtimeNamespace = '/devices';
+
   /// Root of the `remote_control_backend` HTTP server.
   ///
   /// The backend registers no global prefix, so routes hang directly off this
@@ -39,4 +47,33 @@ class AppConfig {
   final Duration connectTimeout;
   final Duration sendTimeout;
   final Duration receiveTimeout;
+
+  /// How long a single Socket.IO connection attempt may take before it is
+  /// treated as failed.
+  final Duration realtimeConnectTimeout;
+
+  /// Delay before the first reconnection attempt. Each further attempt doubles
+  /// it, up to [realtimeReconnectionDelayMax]. Kept in the seconds range on
+  /// purpose: a tablet with no network must not hammer the radio.
+  final Duration realtimeReconnectionDelay;
+
+  final Duration realtimeReconnectionDelayMax;
+
+  /// Delay before retrying a Device JWT renewal that could not be completed
+  /// because the backend was unreachable.
+  final Duration realtimeReauthRetryDelay;
+
+  /// URL of the `/devices` namespace, in the form `socket_io_client` expects.
+  ///
+  /// That package derives the namespace from the *path* of the URL it is given,
+  /// so the namespace is appended to the same base URL the HTTP client uses
+  /// rather than configured separately. This is the only place the two are
+  /// joined; the realtime infrastructure never builds a URL of its own.
+  ///
+  /// It follows that the base URL must be the server root — which it is, since
+  /// the backend registers no global prefix. A base URL carrying a path would
+  /// make `socket_io_client` read that path as part of the namespace.
+  String get deviceRealtimeUrl =>
+      '${backendBaseUrl.replaceAll(RegExp(r'/+$'), '')}'
+      '$deviceRealtimeNamespace';
 }

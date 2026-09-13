@@ -1,5 +1,6 @@
 import 'package:remote_control_device/core/error/failures.dart';
 import 'package:remote_control_device/core/result/result.dart';
+import 'package:remote_control_device/core/session/device_token_store.dart';
 import 'package:remote_control_device/features/device/domain/entities/device_activation.dart';
 import 'package:remote_control_device/features/device/domain/entities/device_credentials.dart';
 import 'package:remote_control_device/features/device/domain/entities/device_identity.dart';
@@ -122,10 +123,16 @@ class FakeDeviceAuthRepository implements DeviceAuthRepository {
   FakeDeviceAuthRepository({
     this.loginResult = const Ok(testSession),
     this.checkStatusResult = const Ok(testIdentity),
+    this.tokenStore,
   });
 
   Result<DeviceSession> loginResult;
   Result<DeviceIdentity> checkStatusResult;
+
+  /// Mirrors `DeviceAuthRepositoryImpl`, which installs the issued token as the
+  /// current session token. Tests that care about *which* JWT the next call
+  /// uses need that side effect.
+  final DeviceTokenStore? tokenStore;
 
   DeviceCredentials? lastLoginCredentials;
   int loginCount = 0;
@@ -136,6 +143,9 @@ class FakeDeviceAuthRepository implements DeviceAuthRepository {
   Future<Result<DeviceSession>> login(DeviceCredentials credentials) async {
     loginCount++;
     lastLoginCredentials = credentials;
+    if (loginResult case Ok<DeviceSession>(:final value)) {
+      tokenStore?.save(value.token);
+    }
     return loginResult;
   }
 
@@ -146,7 +156,10 @@ class FakeDeviceAuthRepository implements DeviceAuthRepository {
   }
 
   @override
-  void endSession() => endSessionCount++;
+  void endSession() {
+    endSessionCount++;
+    tokenStore?.clear();
+  }
 }
 
 /// Shorthands for the failure values the backend contract can produce.
@@ -161,4 +174,13 @@ const Err<DeviceActivation> activationUnauthorized = Err<DeviceActivation>(
 );
 const Err<DeviceActivation> activationUnreachable = Err<DeviceActivation>(
   NetworkFailure(),
+);
+
+/// A second, distinct Device JWT: renewal tests have to prove the *new* token
+/// reached the handshake, which a single fixture could not show.
+const String testRenewedDeviceJwt = 'header.renewed-payload.signature';
+
+const DeviceSession testRenewedSession = DeviceSession(
+  device: testIdentity,
+  token: testRenewedDeviceJwt,
 );
