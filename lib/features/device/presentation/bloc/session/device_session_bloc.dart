@@ -47,6 +47,7 @@ class DeviceSessionBloc extends Bloc<DeviceSessionEvent, DeviceSessionState> {
     on<DeviceSessionStarted>(_onStartupRequested);
     on<DeviceSessionRetryRequested>(_onStartupRequested);
     on<DeviceSessionEnrollmentCompleted>(_onStartupRequested);
+    on<DeviceSessionCredentialRejected>(_onCredentialRejected);
   }
 
   final LoadDeviceCredentials _loadDeviceCredentials;
@@ -92,6 +93,22 @@ class DeviceSessionBloc extends Bloc<DeviceSessionEvent, DeviceSessionState> {
       case Err<DeviceIdentity>(:final failure):
         await _emitFailure(failure, emit);
     }
+  }
+
+  /// The realtime channel found out what the startup sequence could not: the
+  /// permanent credential is gone. The consequence is the same as a `401` at
+  /// login, and it is applied here because this bloc owns the local
+  /// installation identity — the realtime layer only reports the fact.
+  Future<void> _onCredentialRejected(
+    DeviceSessionCredentialRejected event,
+    Emitter<DeviceSessionState> emit,
+  ) async {
+    if (state is DeviceSessionReEnrollmentRequired ||
+        state is DeviceSessionNotEnrolled) {
+      return;
+    }
+    await _clearDeviceCredentials();
+    emit(const DeviceSessionReEnrollmentRequired());
   }
 
   /// Only an outright rejection by the backend destroys the local credential.

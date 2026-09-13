@@ -21,3 +21,9 @@ final class DeviceSessionRetryRequested extends DeviceSessionEvent {
 final class DeviceSessionEnrollmentCompleted extends DeviceSessionEvent {
   const DeviceSessionEnrollmentCompleted();
 }
+
+/// The realtime layer established that the permanent credential is no longer
+/// accepted by the backend. Same consequence as a rejected login at startup.
+final class DeviceSessionCredentialRejected extends DeviceSessionEvent {
+  const DeviceSessionCredentialRejected();
+}

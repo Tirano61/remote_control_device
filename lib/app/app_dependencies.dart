@@ -5,8 +5,10 @@ import 'package:remote_control_device/features/device/data/datasources/device_au
 import 'package:remote_control_device/features/device/data/datasources/device_enrollment_remote_data_source.dart';
 import 'package:remote_control_device/features/device/data/datasources/platform_device_info_provider.dart';
 import 'package:remote_control_device/features/device/data/repositories/device_auth_repository_impl.dart';
+import 'package:remote_control_device/features/device/data/realtime/socket_io_device_realtime_client.dart';
 import 'package:remote_control_device/features/device/data/repositories/device_enrollment_repository_impl.dart';
 import 'package:remote_control_device/features/device/data/storage/secure_device_credentials_storage.dart';
+import 'package:remote_control_device/features/device/domain/realtime/device_realtime_client.dart';
 import 'package:remote_control_device/features/device/domain/repositories/device_auth_repository.dart';
 import 'package:remote_control_device/features/device/domain/repositories/device_enrollment_repository.dart';
 import 'package:remote_control_device/features/device/domain/services/device_info_provider.dart';
@@ -16,6 +18,7 @@ import 'package:remote_control_device/features/device/domain/usecases/check_devi
 import 'package:remote_control_device/features/device/domain/usecases/clear_device_credentials.dart';
 import 'package:remote_control_device/features/device/domain/usecases/enroll_device.dart';
 import 'package:remote_control_device/features/device/domain/usecases/load_device_credentials.dart';
+import 'package:remote_control_device/features/device/domain/usecases/renew_device_token.dart';
 
 /// Composition root. Wiring lives here so that no layer has to reach for a
 /// global service locator, and so tests can build the same graph with fakes.
@@ -29,12 +32,15 @@ class AppDependencies {
     required this.clearDeviceCredentials,
     required this.authenticateDevice,
     required this.checkDeviceStatus,
+    required this.renewDeviceToken,
+    required this.realtimeClient,
   });
 
   factory AppDependencies.bootstrap({
     AppConfig? config,
     DeviceCredentialsStorage? credentialsStorage,
     DeviceInfoProvider? deviceInfoProvider,
+    DeviceRealtimeClient? realtimeClient,
   }) {
     final resolvedConfig = config ?? AppConfig.fromEnvironment();
     final tokenStore = InMemoryDeviceTokenStore();
@@ -52,6 +58,9 @@ class AppDependencies {
       tokenStore: tokenStore,
     );
 
+    final loadDeviceCredentials = LoadDeviceCredentials(storage);
+    final authenticateDevice = AuthenticateDevice(authRepository);
+
     return AppDependencies._(
       config: resolvedConfig,
       tokenStore: tokenStore,
@@ -61,13 +70,20 @@ class AppDependencies {
         credentialsStorage: storage,
         deviceInfoProvider: infoProvider,
       ),
-      loadDeviceCredentials: LoadDeviceCredentials(storage),
+      loadDeviceCredentials: loadDeviceCredentials,
       clearDeviceCredentials: ClearDeviceCredentials(
         credentialsStorage: storage,
         authRepository: authRepository,
       ),
-      authenticateDevice: AuthenticateDevice(authRepository),
+      authenticateDevice: authenticateDevice,
       checkDeviceStatus: CheckDeviceStatus(authRepository),
+      renewDeviceToken: RenewDeviceToken(
+        loadDeviceCredentials: loadDeviceCredentials,
+        authenticateDevice: authenticateDevice,
+      ),
+      // Constructing it opens nothing: the socket is only built on connect().
+      realtimeClient:
+          realtimeClient ?? SocketIoDeviceRealtimeClient(config: resolvedConfig),
     );
   }
 
@@ -80,4 +96,8 @@ class AppDependencies {
   final ClearDeviceCredentials clearDeviceCredentials;
   final AuthenticateDevice authenticateDevice;
   final CheckDeviceStatus checkDeviceStatus;
+  final RenewDeviceToken renewDeviceToken;
+
+  /// Owned by `DeviceRealtimeBloc`, which disposes it when it closes.
+  final DeviceRealtimeClient realtimeClient;
 }

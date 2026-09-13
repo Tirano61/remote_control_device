@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:remote_control_device/features/device/domain/entities/device_identity.dart';
+import 'package:remote_control_device/features/device/presentation/bloc/realtime/device_realtime_bloc.dart';
 
 /// Minimal operational screen.
 ///
@@ -29,7 +31,9 @@ class ReadyPage extends StatelessWidget {
                   Text(
                     'ASISTENCIA REMOTA',
                     textAlign: TextAlign.center,
-                    style: theme.textTheme.titleMedium?.copyWith(letterSpacing: 2),
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      letterSpacing: 2,
+                    ),
                   ),
                   const SizedBox(height: 40),
                   _Field(label: 'Dispositivo', value: device.publicId),
@@ -37,25 +41,68 @@ class ReadyPage extends StatelessWidget {
                   _Field(label: 'Nombre', value: device.name),
                   const SizedBox(height: 24),
                   const _Field(label: 'Estado', value: 'Listo'),
-                  const SizedBox(height: 40),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(
-                        Icons.check_circle,
-                        color: theme.colorScheme.primary,
-                        size: 20,
-                      ),
-                      const SizedBox(width: 8),
-                      Text('Dispositivo listo', style: theme.textTheme.bodyLarge),
-                    ],
-                  ),
+                  const SizedBox(height: 24),
+                  const _ConnectionField(),
                 ],
               ),
             ),
           ),
         ),
       ),
+    );
+  }
+}
+
+/// Realtime channel state, in the plainest words available.
+///
+/// The distinction the user needs is "can the technician reach me right now",
+/// so the five internal states collapse into four sentences. Nothing technical
+/// crosses this boundary: no error code, no exception, and never a hint that
+/// the reason was an expired token.
+class _ConnectionField extends StatelessWidget {
+  const _ConnectionField();
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return BlocBuilder<DeviceRealtimeBloc, DeviceRealtimeState>(
+      builder: (context, state) {
+        final (label, connected) = switch (state) {
+          DeviceRealtimeConnected() => ('Conectado', true),
+          DeviceRealtimeConnecting() => ('Conectando...', false),
+          DeviceRealtimeReconnecting() => ('Reconectando...', false),
+          DeviceRealtimeDisconnected() ||
+          DeviceRealtimeConnectionError() => ('Sin conexión', false),
+        };
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'CONEXIÓN',
+              style: theme.textTheme.labelSmall?.copyWith(
+                letterSpacing: 1.2,
+                color: theme.colorScheme.outline,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Row(
+              children: [
+                Icon(
+                  Icons.circle,
+                  size: 12,
+                  color: connected
+                      ? theme.colorScheme.primary
+                      : theme.colorScheme.outline,
+                ),
+                const SizedBox(width: 8),
+                Text(label, style: theme.textTheme.titleMedium),
+              ],
+            ),
+          ],
+        );
+      },
     );
   }
 }
