@@ -1,5 +1,5 @@
 name: remote_control_device
-description: "A new Flutter project."
+description: "Flutter Android client for assisted remote support (remote_control_device)."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
@@ -34,6 +34,12 @@ dependencies:
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
+  flutter_bloc: ^9.1.1
+  equatable: ^2.1.0
+  dio: ^5.11.1
+  flutter_secure_storage: ^11.1.1
+  device_info_plus: ^13.2.0
+  package_info_plus: ^10.2.1
 
 dev_dependencies:
   flutter_test:
@@ -45,6 +51,7 @@ dev_dependencies:
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
+  bloc_test: ^10.0.0
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
