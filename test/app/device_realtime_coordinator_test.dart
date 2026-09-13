@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:remote_control_device/app/device_realtime_coordinator.dart';
 import 'package:remote_control_device/core/result/result.dart';
+import 'package:remote_control_device/core/session/device_credential_revocation.dart';
 import 'package:remote_control_device/core/session/device_token_store.dart';
 import 'package:remote_control_device/features/device/domain/realtime/device_realtime_signal.dart';
 import 'package:remote_control_device/features/device/domain/usecases/authenticate_device.dart';
@@ -23,6 +24,7 @@ void main() {
   late DeviceTokenStore tokenStore;
   late DeviceSessionBloc sessionBloc;
   late DeviceRealtimeBloc realtimeBloc;
+  late DeviceCredentialRevocation credentialRevocation;
   late DeviceRealtimeCoordinator coordinator;
 
   setUp(() {
@@ -30,6 +32,7 @@ void main() {
     storage = FakeDeviceCredentialsStorage(testCredentials);
     tokenStore = InMemoryDeviceTokenStore();
     authRepository = FakeDeviceAuthRepository(tokenStore: tokenStore);
+    credentialRevocation = DeviceCredentialRevocation();
 
     final loadDeviceCredentials = LoadDeviceCredentials(storage);
     final authenticateDevice = AuthenticateDevice(authRepository);
@@ -55,11 +58,13 @@ void main() {
     coordinator = DeviceRealtimeCoordinator(
       sessionBloc: sessionBloc,
       realtimeBloc: realtimeBloc,
+      credentialRevocation: credentialRevocation,
     )..start();
   });
 
   tearDown(() async {
     await coordinator.dispose();
+    await credentialRevocation.dispose();
     await realtimeBloc.close();
     await sessionBloc.close();
   });
@@ -152,6 +157,25 @@ void main() {
     expect(storage.credentials, testCredentials);
     expect(client.connectedWithTokens, [testDeviceJwt, testRenewedDeviceJwt]);
     expect(realtimeBloc.state, const DeviceRealtimeConnected());
+  });
+
+  test('a REST call that discovers the revoked credential reaches the same '
+      'place as the socket does', () async {
+    await reachReady();
+    await client.emit(const RealtimeConnected());
+
+    // What an authenticated support call does after POST /device-auth/login
+    // answered 401: it reports the fact and nothing else.
+    credentialRevocation.report();
+    await FakeDeviceRealtimeClient.pump();
+    await FakeDeviceRealtimeClient.pump();
+
+    expect(sessionBloc.state, const DeviceSessionReEnrollmentRequired());
+    expect(storage.credentials, isNull);
+    expect(tokenStore.hasToken, isFalse);
+    expect(realtimeBloc.state, const DeviceRealtimeDisconnected());
+    // No second login was attempted: the REST side had already established it.
+    expect(authRepository.loginCount, 1);
   });
 
   test('the coordinator stops driving the blocs once disposed', () async {

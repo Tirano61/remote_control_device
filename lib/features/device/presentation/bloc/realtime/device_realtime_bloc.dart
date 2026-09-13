@@ -137,6 +137,12 @@ class DeviceRealtimeBloc
         if (state is! DeviceRealtimeConnected) return;
         emit(DeviceRealtimeConnected(confirmation: confirmation));
 
+      case RealtimeSupportAssigned():
+        // Not this bloc's business. It owns whether the channel is up, not what
+        // travels over it; the support feature subscribes to the same broadcast
+        // signal stream and answers by re-reading REST.
+        return;
+
       case RealtimeDisconnected():
       case RealtimeConnectFailed():
         emit(_failureState());

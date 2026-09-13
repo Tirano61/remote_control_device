@@ -33,6 +33,20 @@ final class ValidationFailure extends Failure {
   const ValidationFailure({super.debugDetail});
 }
 
+/// HTTP 404. The resource does not exist for this device — typically a locally
+/// held id that the backend no longer recognises. The client re-synchronises
+/// instead of treating it as a hard error.
+final class NotFoundFailure extends Failure {
+  const NotFoundFailure({super.debugDetail});
+}
+
+/// HTTP 409. The backend state no longer matches what the client assumed. The
+/// contract shares this status between several causes on purpose, so the only
+/// correct reaction is to re-read state rather than to interpret a message.
+final class ConflictFailure extends Failure {
+  const ConflictFailure({super.debugDetail});
+}
+
 /// HTTP 5xx, or any response the client could not interpret.
 final class ServerFailure extends Failure {
   const ServerFailure({super.debugDetail});

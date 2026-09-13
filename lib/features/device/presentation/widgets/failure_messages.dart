@@ -17,6 +17,10 @@ abstract final class FailureMessages {
       'No se pudo contactar al servidor. Verificá la conexión e intentá de nuevo.',
     StorageFailure() =>
       'No se pudo guardar la activación en este dispositivo. Intentá de nuevo.',
+    NotFoundFailure() =>
+      'El identificador no corresponde a ningún dispositivo registrado.',
+    ConflictFailure() =>
+      'Este dispositivo ya fue activado. Solicitá un código nuevo al técnico.',
     ServerFailure() => 'El servidor no pudo procesar la activación. Intentá más tarde.',
   };
 
@@ -29,5 +33,22 @@ abstract final class FailureMessages {
     ServerFailure() => 'El servidor respondió con un error. Intentá de nuevo.',
     ValidationFailure() => 'El servidor rechazó la solicitud. Intentá de nuevo.',
     AuthFailure() => 'El dispositivo debe volver a activarse.',
+    NotFoundFailure() || ConflictFailure() =>
+      'El servidor respondió de forma inesperada. Intentá de nuevo.',
+  };
+
+  /// Assistance flow. The two "stale state" answers get their own wording
+  /// because they are not errors the user caused: the backend simply moved on,
+  /// and the screen has already re-read the real state by the time this shows.
+  static String forSupport(Failure failure) => switch (failure) {
+    NetworkFailure() =>
+      'No se pudo contactar al servidor. Verificá la conexión e intentá de nuevo.',
+    ConflictFailure() || NotFoundFailure() =>
+      'La solicitud cambió de estado. Se actualizó la información.',
+    AuthFailure() => 'El dispositivo debe volver a activarse.',
+    ValidationFailure() => 'El servidor rechazó la solicitud.',
+    StorageFailure() =>
+      'No se pudieron leer los datos de activación de este dispositivo.',
+    ServerFailure() => 'El servidor respondió con un error. Intentá de nuevo.',
   };
 }

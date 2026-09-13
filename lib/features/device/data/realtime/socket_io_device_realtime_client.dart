@@ -82,6 +82,16 @@ class SocketIoDeviceRealtimeClient implements DeviceRealtimeClient {
         _log('$deviceConnectedEvent for ${confirmation.publicId}');
         _emit(RealtimeIdentityConfirmed(confirmation));
       }),
+      socket.on(supportAssignedEvent, (Object? payload) {
+        final assigned = parseSupportAssignedPayload(payload);
+        if (assigned == null) {
+          _log('$supportAssignedEvent ignored: unexpected payload');
+          return;
+        }
+        // A support request id is an operational identifier, not a credential.
+        _log('$supportAssignedEvent for ${assigned.supportRequestId}');
+        _emit(assigned);
+      }),
       socket.onDisconnect((_) {
         _log('disconnected');
         _emit(const RealtimeDisconnected());

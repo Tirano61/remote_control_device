@@ -1,4 +1,5 @@
 import 'package:remote_control_device/features/device/domain/entities/device_realtime_confirmation.dart';
+import 'package:remote_control_device/features/device/domain/realtime/device_realtime_signal.dart';
 
 /// Reads the `device:connected` payload documented in `REALTIME.md`:
 ///
@@ -19,6 +20,44 @@ DeviceRealtimeConfirmation? parseDeviceConnectedPayload(Object? payload) {
   if (publicId is! String || publicId.isEmpty) return null;
 
   return DeviceRealtimeConfirmation(deviceId: deviceId, publicId: publicId);
+}
+
+/// Reads the `support:assigned` payload documented in `REALTIME.md`:
+///
+/// ```json
+/// {
+///   "supportRequestId": "8f14e45f-...",
+///   "technician": { "id": "7c9e6679-...", "name": "Ana Torres" }
+/// }
+/// ```
+///
+/// The whole documented shape is required — a payload missing the technician
+/// block is not the event this client knows about — but only the identifiers
+/// travel onwards. The technician's name is deliberately dropped here: what is
+/// shown to the user comes from `GET /support-requests/current`, so carrying a
+/// name off the socket could only tempt a screen into trusting it.
+///
+/// Returns `null` for anything that does not match. Realtime payloads are
+/// untrusted input, and a malformed one must produce no signal at all rather
+/// than a half-built one.
+RealtimeSupportAssigned? parseSupportAssignedPayload(Object? payload) {
+  if (payload is! Map) return null;
+
+  final supportRequestId = payload['supportRequestId'];
+  if (supportRequestId is! String || supportRequestId.isEmpty) return null;
+
+  final technician = payload['technician'];
+  if (technician is! Map) return null;
+
+  final technicianId = technician['id'];
+  final technicianName = technician['name'];
+  if (technicianId is! String || technicianId.isEmpty) return null;
+  if (technicianName is! String || technicianName.isEmpty) return null;
+
+  return RealtimeSupportAssigned(
+    supportRequestId: supportRequestId,
+    technicianId: technicianId,
+  );
 }
 
 /// Whether a `connect_error` is the namespace middleware refusing the token.
