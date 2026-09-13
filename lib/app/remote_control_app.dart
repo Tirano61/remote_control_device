@@ -3,14 +3,16 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:remote_control_device/app/app_dependencies.dart';
 import 'package:remote_control_device/app/device_gate.dart';
 import 'package:remote_control_device/app/device_realtime_coordinator.dart';
+import 'package:remote_control_device/app/support_coordinator.dart';
 import 'package:remote_control_device/features/device/presentation/bloc/realtime/device_realtime_bloc.dart';
 import 'package:remote_control_device/features/device/presentation/bloc/session/device_session_bloc.dart';
+import 'package:remote_control_device/features/support/presentation/bloc/support/support_bloc.dart';
 
-/// Holds the two application-wide blocs and the coordinator that keeps them in
+/// Holds the application-wide blocs and the coordinators that keep them in
 /// step.
 ///
-/// They are created here rather than by `BlocProvider.create` because the
-/// coordinator needs both of them at once, and because closing them in
+/// They are created here rather than by `BlocProvider.create` because each
+/// coordinator needs several of them at once, and because closing them in
 /// [State.dispose] is what releases the socket when the app goes away.
 class RemoteControlApp extends StatefulWidget {
   const RemoteControlApp({required this.dependencies, super.key});
@@ -24,7 +26,9 @@ class RemoteControlApp extends StatefulWidget {
 class _RemoteControlAppState extends State<RemoteControlApp> {
   late final DeviceSessionBloc _sessionBloc;
   late final DeviceRealtimeBloc _realtimeBloc;
-  late final DeviceRealtimeCoordinator _coordinator;
+  late final SupportBloc _supportBloc;
+  late final DeviceRealtimeCoordinator _realtimeCoordinator;
+  late final SupportCoordinator _supportCoordinator;
 
   @override
   void initState() {
@@ -43,9 +47,24 @@ class _RemoteControlAppState extends State<RemoteControlApp> {
       renewDeviceToken: dependencies.renewDeviceToken,
       reauthRetryDelay: dependencies.config.realtimeReauthRetryDelay,
     );
-    _coordinator = DeviceRealtimeCoordinator(
+    _supportBloc = SupportBloc(
+      requestSupport: dependencies.requestSupport,
+      loadCurrentSupportRequest: dependencies.loadCurrentSupportRequest,
+      acceptSupportRequest: dependencies.acceptSupportRequest,
+      rejectSupportRequest: dependencies.rejectSupportRequest,
+      cancelSupportRequest: dependencies.cancelSupportRequest,
+    );
+
+    _realtimeCoordinator = DeviceRealtimeCoordinator(
       sessionBloc: _sessionBloc,
       realtimeBloc: _realtimeBloc,
+      credentialRevocation: dependencies.credentialRevocation,
+    )..start();
+    _supportCoordinator = SupportCoordinator(
+      realtimeClient: dependencies.realtimeClient,
+      realtimeBloc: _realtimeBloc,
+      sessionBloc: _sessionBloc,
+      supportBloc: _supportBloc,
     )..start();
 
     _sessionBloc.add(const DeviceSessionStarted());
@@ -53,11 +72,14 @@ class _RemoteControlAppState extends State<RemoteControlApp> {
 
   @override
   void dispose() {
-    _coordinator.dispose();
+    _supportCoordinator.dispose();
+    _realtimeCoordinator.dispose();
     // Closing the realtime bloc also disposes the socket, so no connection
     // outlives the session it belonged to.
     _realtimeBloc.close();
+    _supportBloc.close();
     _sessionBloc.close();
+    widget.dependencies.credentialRevocation.dispose();
     super.dispose();
   }
 
@@ -67,6 +89,7 @@ class _RemoteControlAppState extends State<RemoteControlApp> {
       providers: [
         BlocProvider<DeviceSessionBloc>.value(value: _sessionBloc),
         BlocProvider<DeviceRealtimeBloc>.value(value: _realtimeBloc),
+        BlocProvider<SupportBloc>.value(value: _supportBloc),
       ],
       child: MaterialApp(
         title: 'Asistencia remota',

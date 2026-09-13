@@ -67,6 +67,8 @@ class ApiClient {
   static ApiException _mapStatusCode(int? statusCode) => switch (statusCode) {
     400 => const BadRequestApiException(debugDetail: '400'),
     401 => const UnauthorizedApiException(debugDetail: '401'),
+    404 => const NotFoundApiException(debugDetail: '404'),
+    409 => const ConflictApiException(debugDetail: '409'),
     _ => ServerApiException(debugDetail: '${statusCode ?? 'no status'}'),
   };
 }

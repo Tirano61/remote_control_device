@@ -28,6 +28,32 @@ final class RealtimeIdentityConfirmed extends DeviceRealtimeSignal {
   List<Object?> get props => [confirmation];
 }
 
+/// `support:assigned` arrived with a payload that passed validation: a
+/// technician took the support request this device is waiting on.
+///
+/// It lives with the transport signals rather than in the support feature
+/// because the `/devices` namespace is a single device-wide channel that
+/// carries notices for several features; the feature that cares interprets it.
+///
+/// It carries **identifiers only, and no authority**. The contract states that
+/// delivery is best-effort and the assignment is recovered with
+/// `GET /support-requests/current` regardless, so the persistent representation
+/// is what decides that a request is assigned and who the technician is. These
+/// ids are here to match the notice against the state the client already holds
+/// and to be logged safely — never to populate a screen.
+final class RealtimeSupportAssigned extends DeviceRealtimeSignal {
+  const RealtimeSupportAssigned({
+    required this.supportRequestId,
+    required this.technicianId,
+  });
+
+  final String supportRequestId;
+  final String technicianId;
+
+  @override
+  List<Object?> get props => [supportRequestId, technicianId];
+}
+
 /// An established connection dropped. The transport retries on its own.
 final class RealtimeDisconnected extends DeviceRealtimeSignal {
   const RealtimeDisconnected();

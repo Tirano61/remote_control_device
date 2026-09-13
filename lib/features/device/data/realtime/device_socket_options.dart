@@ -4,6 +4,10 @@ import 'package:remote_control_device/core/config/app_config.dart';
 /// Event the backend emits to a socket right after a successful handshake.
 const String deviceConnectedEvent = 'device:connected';
 
+/// Event the backend emits when a technician takes this device's support
+/// request. It carries no authority of its own: see `RealtimeSupportAssigned`.
+const String supportAssignedEvent = 'support:assigned';
+
 /// Handshake options for the `/devices` namespace.
 ///
 /// Everything that decides *who* the connection is comes from a single place:

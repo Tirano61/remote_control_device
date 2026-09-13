@@ -4,6 +4,7 @@ import 'package:remote_control_device/features/device/data/realtime/device_realt
 import 'package:remote_control_device/features/device/data/realtime/device_socket_options.dart';
 
 import '../../../fakes/device_fakes.dart';
+import '../../../fakes/support_fakes.dart';
 
 /// Guards the parts of `docs/backend/REALTIME.md` a unit test can actually
 /// check: the namespace, what the handshake carries, and how the one event this
@@ -131,6 +132,77 @@ void main() {
         }),
         isNotNull,
       );
+    });
+  });
+
+  group('support:assigned payload', () {
+    Map<String, dynamic> payload() => <String, dynamic>{
+      'supportRequestId': testSupportRequestId,
+      'technician': <String, dynamic>{
+        'id': testTechnicianId,
+        'name': testTechnicianName,
+      },
+    };
+
+    test('is read as documented, identifiers only', () {
+      final signal = parseSupportAssignedPayload(payload());
+
+      expect(signal, isNotNull);
+      expect(signal!.supportRequestId, testSupportRequestId);
+      expect(signal.technicianId, testTechnicianId);
+      // The name is validated and then deliberately dropped: what the user is
+      // shown comes from GET /support-requests/current, never from the socket.
+      expect(signal.props, isNot(contains(testTechnicianName)));
+    });
+
+    test('the event name matches the contract', () {
+      expect(supportAssignedEvent, 'support:assigned');
+    });
+
+    test('unexpected shapes produce no signal at all', () {
+      expect(parseSupportAssignedPayload(null), isNull);
+      expect(parseSupportAssignedPayload('support:assigned'), isNull);
+      expect(parseSupportAssignedPayload(const []), isNull);
+      expect(
+        parseSupportAssignedPayload({'supportRequestId': testSupportRequestId}),
+        isNull,
+      );
+      expect(
+        parseSupportAssignedPayload({
+          'supportRequestId': testSupportRequestId,
+          'technician': {'id': testTechnicianId},
+        }),
+        isNull,
+      );
+      expect(
+        parseSupportAssignedPayload({
+          'supportRequestId': '',
+          'technician': {'id': testTechnicianId, 'name': testTechnicianName},
+        }),
+        isNull,
+      );
+      expect(
+        parseSupportAssignedPayload({
+          'supportRequestId': testSupportRequestId,
+          'technician': {'id': 42, 'name': testTechnicianName},
+        }),
+        isNull,
+      );
+    });
+
+    test('carries nothing that could be mistaken for a credential', () {
+      final withExtras = payload()
+        ..['technician'] = <String, dynamic>{
+          'id': testTechnicianId,
+          'name': testTechnicianName,
+          'email': 'ana@example.test',
+          'token': 'should-never-be-read',
+        };
+
+      final signal = parseSupportAssignedPayload(withExtras);
+
+      expect(signal, isNotNull);
+      expect(signal!.props, [testSupportRequestId, testTechnicianId]);
     });
   });
 

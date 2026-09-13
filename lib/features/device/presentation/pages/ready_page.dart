@@ -2,12 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:remote_control_device/features/device/domain/entities/device_identity.dart';
 import 'package:remote_control_device/features/device/presentation/bloc/realtime/device_realtime_bloc.dart';
+import 'package:remote_control_device/features/support/presentation/widgets/support_panel.dart';
 
-/// Minimal operational screen.
+/// The operational screen: who this device is, whether it is reachable, and the
+/// assistance flow.
 ///
-/// Deliberately shows no "request assistance" action: that belongs to a later
-/// prompt. Only public information is rendered — never the `deviceSecret` nor
-/// the Device JWT.
+/// Only public information is rendered — never the `deviceSecret`, the Device
+/// JWT, or any identifier used as proof of anything.
 class ReadyPage extends StatelessWidget {
   const ReadyPage({required this.device, super.key});
 
@@ -22,7 +23,7 @@ class ReadyPage extends StatelessWidget {
         child: Center(
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 420),
-            child: Padding(
+            child: SingleChildScrollView(
               padding: const EdgeInsets.all(24),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
@@ -35,14 +36,16 @@ class ReadyPage extends StatelessWidget {
                       letterSpacing: 2,
                     ),
                   ),
-                  const SizedBox(height: 40),
+                  const SizedBox(height: 32),
                   _Field(label: 'Dispositivo', value: device.publicId),
-                  const SizedBox(height: 24),
+                  const SizedBox(height: 20),
                   _Field(label: 'Nombre', value: device.name),
-                  const SizedBox(height: 24),
-                  const _Field(label: 'Estado', value: 'Listo'),
-                  const SizedBox(height: 24),
+                  const SizedBox(height: 20),
                   const _ConnectionField(),
+                  const SizedBox(height: 28),
+                  const Divider(),
+                  const SizedBox(height: 20),
+                  const SupportPanel(),
                 ],
               ),
             ),
