@@ -43,7 +43,7 @@ void main() {
           config: config,
           credentialsStorage: FakeDeviceCredentialsStorage(),
           deviceInfoProvider: FakeDeviceInfoProvider(),
-          realtimeClient: realtimeClient,
+          realtimeChannel: realtimeClient,
         ),
       ),
     );

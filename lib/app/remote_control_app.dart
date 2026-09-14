@@ -4,10 +4,12 @@ import 'package:remote_control_device/app/app_dependencies.dart';
 import 'package:remote_control_device/app/device_gate.dart';
 import 'package:remote_control_device/app/device_realtime_coordinator.dart';
 import 'package:remote_control_device/app/remote_session_coordinator.dart';
+import 'package:remote_control_device/app/signaling_coordinator.dart';
 import 'package:remote_control_device/app/support_coordinator.dart';
 import 'package:remote_control_device/features/device/presentation/bloc/realtime/device_realtime_bloc.dart';
 import 'package:remote_control_device/features/device/presentation/bloc/session/device_session_bloc.dart';
 import 'package:remote_control_device/features/remote_session/presentation/bloc/remote_session/remote_session_bloc.dart';
+import 'package:remote_control_device/features/signaling/presentation/bloc/signaling/signaling_bloc.dart';
 import 'package:remote_control_device/features/support/presentation/bloc/support/support_bloc.dart';
 
 /// Holds the application-wide blocs and the coordinators that keep them in
@@ -30,9 +32,11 @@ class _RemoteControlAppState extends State<RemoteControlApp> {
   late final DeviceRealtimeBloc _realtimeBloc;
   late final SupportBloc _supportBloc;
   late final RemoteSessionBloc _remoteSessionBloc;
+  late final SignalingBloc _signalingBloc;
   late final DeviceRealtimeCoordinator _realtimeCoordinator;
   late final SupportCoordinator _supportCoordinator;
   late final RemoteSessionCoordinator _remoteSessionCoordinator;
+  late final SignalingCoordinator _signalingCoordinator;
 
   @override
   void initState() {
@@ -62,6 +66,10 @@ class _RemoteControlAppState extends State<RemoteControlApp> {
       loadCurrentRemoteSession: dependencies.loadCurrentRemoteSession,
       closeRemoteSession: dependencies.closeRemoteSession,
     );
+    // The signaling half of the same socket the realtime bloc holds. It is
+    // handed only that port, so it can neither open, close nor observe the
+    // connection — it can only join and relay over one that already exists.
+    _signalingBloc = SignalingBloc(client: dependencies.signalingClient);
 
     _realtimeCoordinator = DeviceRealtimeCoordinator(
       sessionBloc: _sessionBloc,
@@ -81,17 +89,24 @@ class _RemoteControlAppState extends State<RemoteControlApp> {
       supportBloc: _supportBloc,
       remoteSessionBloc: _remoteSessionBloc,
     )..start();
+    _signalingCoordinator = SignalingCoordinator(
+      realtimeBloc: _realtimeBloc,
+      remoteSessionBloc: _remoteSessionBloc,
+      signalingBloc: _signalingBloc,
+    )..start();
 
     _sessionBloc.add(const DeviceSessionStarted());
   }
 
   @override
   void dispose() {
+    _signalingCoordinator.dispose();
     _remoteSessionCoordinator.dispose();
     _supportCoordinator.dispose();
     _realtimeCoordinator.dispose();
     // Closing the realtime bloc also disposes the socket, so no connection
     // outlives the session it belonged to.
+    _signalingBloc.close();
     _realtimeBloc.close();
     _remoteSessionBloc.close();
     _supportBloc.close();
@@ -108,6 +123,10 @@ class _RemoteControlAppState extends State<RemoteControlApp> {
         BlocProvider<DeviceRealtimeBloc>.value(value: _realtimeBloc),
         BlocProvider<SupportBloc>.value(value: _supportBloc),
         BlocProvider<RemoteSessionBloc>.value(value: _remoteSessionBloc),
+        // Provided although no widget reads it today: it is the seam the
+        // WebRTC prompt attaches to, and it must live exactly as long as the
+        // other application-wide blocs.
+        BlocProvider<SignalingBloc>.value(value: _signalingBloc),
       ],
       child: MaterialApp(
         title: 'Asistencia remota',
