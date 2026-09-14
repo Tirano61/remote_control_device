@@ -8,6 +8,16 @@ const String deviceConnectedEvent = 'device:connected';
 /// request. It carries no authority of its own: see `RealtimeSupportAssigned`.
 const String supportAssignedEvent = 'support:assigned';
 
+/// Event the backend emits, after `POST /remote-sessions` commits, to say that
+/// a remote session now exists for this device. A cue to re-read REST, never a
+/// session in itself: see `RealtimeRemoteSessionCreated`.
+const String remoteSessionCreatedEvent = 'remote-session:created';
+
+/// Event the backend emits when the *technician* closes the session. A
+/// device-initiated close emits nothing — the closing side already holds the
+/// closed session in its HTTP response.
+const String remoteSessionClosedEvent = 'remote-session:closed';
+
 /// Handshake options for the `/devices` namespace.
 ///
 /// Everything that decides *who* the connection is comes from a single place:

@@ -54,6 +54,50 @@ final class RealtimeSupportAssigned extends DeviceRealtimeSignal {
   List<Object?> get props => [supportRequestId, technicianId];
 }
 
+/// `remote-session:created` arrived with a payload that passed validation: a
+/// technician started the assistance the user had already authorised.
+///
+/// Like [RealtimeSupportAssigned], it carries **identifiers only, and no
+/// authority**. The contract is explicit that delivery is best-effort and that
+/// the session is recovered with `GET /device/remote-sessions/current`
+/// regardless, so the persisted session is what decides that one exists and
+/// what its id is. In particular, the [remoteSessionId] here is never the id
+/// this client closes: a session that can be ended is one that came back from
+/// an authenticated REST read.
+final class RealtimeRemoteSessionCreated extends DeviceRealtimeSignal {
+  const RealtimeRemoteSessionCreated({
+    required this.remoteSessionId,
+    required this.supportRequestId,
+    required this.technicianId,
+  });
+
+  final String remoteSessionId;
+  final String supportRequestId;
+  final String technicianId;
+
+  @override
+  List<Object?> get props => [remoteSessionId, supportRequestId, technicianId];
+}
+
+/// `remote-session:closed` arrived: the technician ended the assistance.
+///
+/// A cue, not a verdict. The tablet does not drop its session because this
+/// arrived — it re-reads `GET /device/remote-sessions/current` and finds
+/// nothing, which is what actually ends the session on screen. The event is
+/// never emitted for a device-initiated close.
+///
+/// `endedBy` travels in the payload and is deliberately not carried: nothing in
+/// this client branches on who closed a session, and a value it does not act on
+/// has no business crossing into the domain.
+final class RealtimeRemoteSessionClosed extends DeviceRealtimeSignal {
+  const RealtimeRemoteSessionClosed(this.remoteSessionId);
+
+  final String remoteSessionId;
+
+  @override
+  List<Object?> get props => [remoteSessionId];
+}
+
 /// An established connection dropped. The transport retries on its own.
 final class RealtimeDisconnected extends DeviceRealtimeSignal {
   const RealtimeDisconnected();

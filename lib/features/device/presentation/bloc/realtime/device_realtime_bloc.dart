@@ -138,9 +138,11 @@ class DeviceRealtimeBloc
         emit(DeviceRealtimeConnected(confirmation: confirmation));
 
       case RealtimeSupportAssigned():
+      case RealtimeRemoteSessionCreated():
+      case RealtimeRemoteSessionClosed():
         // Not this bloc's business. It owns whether the channel is up, not what
-        // travels over it; the support feature subscribes to the same broadcast
-        // signal stream and answers by re-reading REST.
+        // travels over it; the support and remote-session features subscribe to
+        // the same broadcast signal stream and answer by re-reading REST.
         return;
 
       case RealtimeDisconnected():

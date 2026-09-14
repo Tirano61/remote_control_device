@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:remote_control_device/features/device/domain/entities/device_identity.dart';
 import 'package:remote_control_device/features/device/presentation/bloc/realtime/device_realtime_bloc.dart';
+import 'package:remote_control_device/features/remote_session/presentation/bloc/remote_session/remote_session_bloc.dart';
+import 'package:remote_control_device/features/remote_session/presentation/widgets/remote_session_panel.dart';
 import 'package:remote_control_device/features/support/presentation/widgets/support_panel.dart';
 
 /// The operational screen: who this device is, whether it is reachable, and the
@@ -45,13 +47,47 @@ class ReadyPage extends StatelessWidget {
                   const SizedBox(height: 28),
                   const Divider(),
                   const SizedBox(height: 20),
-                  const SupportPanel(),
+                  const _AssistanceSection(),
                 ],
               ),
             ),
           ),
         ),
       ),
+    );
+  }
+}
+
+/// Chooses which half of the assistance flow the user is looking at.
+///
+/// A live remote session wins over the support request, and it wins on purpose:
+/// the two are closed in a single backend transaction, so there is a moment
+/// after either side ends the assistance in which one of the two reads is still
+/// the old one. Letting the session decide means the screen never offers
+/// "request assistance" while a technician is connected — the error that would
+/// actually matter. The opposite staleness is harmless: a session that has just
+/// ended drops straight to the support panel, which is re-read immediately
+/// afterwards.
+///
+/// This is also why the composition lives in the page rather than inside either
+/// panel: neither feature has to know the other exists.
+class _AssistanceSection extends StatelessWidget {
+  const _AssistanceSection();
+
+  @override
+  Widget build(BuildContext context) {
+    return BlocBuilder<RemoteSessionBloc, RemoteSessionState>(
+      builder: (context, state) => switch (state) {
+        RemoteSessionLive() => RemoteSessionPanel(state: state),
+        // Unknown is not the same as none: while it is unknown whether a
+        // technician is connected, the screen says so and offers to ask again
+        // rather than offering to request assistance.
+        RemoteSessionUnavailable(:final failure) =>
+          RemoteSessionUnavailablePanel(failure: failure),
+        // No session, or not asked yet: the support request is what the user
+        // can act on.
+        _ => const SupportPanel(),
+      },
     );
   }
 }
