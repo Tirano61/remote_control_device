@@ -12,6 +12,9 @@ import 'package:remote_control_device/features/device/domain/usecases/load_devic
 import 'package:remote_control_device/features/device/domain/usecases/renew_device_token.dart';
 import 'package:remote_control_device/features/device/presentation/bloc/realtime/device_realtime_bloc.dart';
 import 'package:remote_control_device/features/device/presentation/pages/ready_page.dart';
+import 'package:remote_control_device/features/remote_session/domain/usecases/close_remote_session.dart';
+import 'package:remote_control_device/features/remote_session/domain/usecases/load_current_remote_session.dart';
+import 'package:remote_control_device/features/remote_session/presentation/bloc/remote_session/remote_session_bloc.dart';
 import 'package:remote_control_device/features/support/domain/usecases/accept_support_request.dart';
 import 'package:remote_control_device/features/support/domain/usecases/cancel_support_request.dart';
 import 'package:remote_control_device/features/support/domain/usecases/load_current_support_request.dart';
@@ -22,6 +25,7 @@ import 'package:remote_control_device/features/support/presentation/widgets/supp
 
 import 'fakes/device_fakes.dart';
 import 'fakes/realtime_fakes.dart';
+import 'fakes/remote_session_fakes.dart';
 import 'fakes/support_fakes.dart';
 
 void main() {
@@ -56,12 +60,14 @@ void main() {
     late FakeDeviceRealtimeClient client;
     late DeviceRealtimeBloc realtimeBloc;
     late SupportBloc supportBloc;
+    late RemoteSessionBloc remoteSessionBloc;
 
     setUp(() => client = FakeDeviceRealtimeClient());
 
     tearDown(() async {
       await realtimeBloc.close();
       await supportBloc.close();
+      await remoteSessionBloc.close();
     });
 
     // The blocs are built here rather than in setUp so that they live inside
@@ -86,17 +92,28 @@ void main() {
         rejectSupportRequest: RejectSupportRequest(supportRepository),
         cancelSupportRequest: CancelSupportRequest(supportRepository),
       );
+      // Answers "no live session": this group is about the screen a device
+      // with no assistance under way shows.
+      final remoteSessionRepository = FakeRemoteSessionRepository();
+      remoteSessionBloc = RemoteSessionBloc(
+        loadCurrentRemoteSession: LoadCurrentRemoteSession(
+          remoteSessionRepository,
+        ),
+        closeRemoteSession: CloseRemoteSession(remoteSessionRepository),
+      );
 
       await tester.pumpWidget(
         MultiBlocProvider(
           providers: [
             BlocProvider<DeviceRealtimeBloc>.value(value: realtimeBloc),
             BlocProvider<SupportBloc>.value(value: supportBloc),
+            BlocProvider<RemoteSessionBloc>.value(value: remoteSessionBloc),
           ],
           child: const MaterialApp(home: ReadyPage(device: testIdentity)),
         ),
       );
       supportBloc.add(const SupportSyncRequested());
+      remoteSessionBloc.add(const RemoteSessionSyncRequested());
       await tester.pump(Duration.zero);
       await tester.pump(Duration.zero);
     }

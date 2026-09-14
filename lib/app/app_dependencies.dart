@@ -21,6 +21,11 @@ import 'package:remote_control_device/features/device/domain/usecases/clear_devi
 import 'package:remote_control_device/features/device/domain/usecases/enroll_device.dart';
 import 'package:remote_control_device/features/device/domain/usecases/load_device_credentials.dart';
 import 'package:remote_control_device/features/device/domain/usecases/renew_device_token.dart';
+import 'package:remote_control_device/features/remote_session/data/datasources/remote_session_remote_data_source.dart';
+import 'package:remote_control_device/features/remote_session/data/repositories/remote_session_repository_impl.dart';
+import 'package:remote_control_device/features/remote_session/domain/repositories/remote_session_repository.dart';
+import 'package:remote_control_device/features/remote_session/domain/usecases/close_remote_session.dart';
+import 'package:remote_control_device/features/remote_session/domain/usecases/load_current_remote_session.dart';
 import 'package:remote_control_device/features/support/data/datasources/support_remote_data_source.dart';
 import 'package:remote_control_device/features/support/data/repositories/support_repository_impl.dart';
 import 'package:remote_control_device/features/support/domain/repositories/support_repository.dart';
@@ -50,6 +55,8 @@ class AppDependencies {
     required this.acceptSupportRequest,
     required this.rejectSupportRequest,
     required this.cancelSupportRequest,
+    required this.loadCurrentRemoteSession,
+    required this.closeRemoteSession,
   });
 
   factory AppDependencies.bootstrap({
@@ -87,10 +94,18 @@ class AppDependencies {
       renewDeviceToken: renewDeviceToken,
       revocation: credentialRevocation,
     );
+    // One [AuthenticatedDeviceRequest] for both features, so that several
+    // endpoints hitting an expired Device JWT at the same moment share a single
+    // login instead of starting one each.
     final SupportRepository supportRepository = SupportRepositoryImpl(
       remoteDataSource: SupportRemoteDataSourceImpl(apiClient),
       authenticatedRequest: authenticatedRequest,
     );
+    final RemoteSessionRepository remoteSessionRepository =
+        RemoteSessionRepositoryImpl(
+          remoteDataSource: RemoteSessionRemoteDataSourceImpl(apiClient),
+          authenticatedRequest: authenticatedRequest,
+        );
 
     return AppDependencies._(
       config: resolvedConfig,
@@ -118,6 +133,10 @@ class AppDependencies {
       acceptSupportRequest: AcceptSupportRequest(supportRepository),
       rejectSupportRequest: RejectSupportRequest(supportRepository),
       cancelSupportRequest: CancelSupportRequest(supportRepository),
+      loadCurrentRemoteSession: LoadCurrentRemoteSession(
+        remoteSessionRepository,
+      ),
+      closeRemoteSession: CloseRemoteSession(remoteSessionRepository),
     );
   }
 
@@ -144,4 +163,7 @@ class AppDependencies {
   final AcceptSupportRequest acceptSupportRequest;
   final RejectSupportRequest rejectSupportRequest;
   final CancelSupportRequest cancelSupportRequest;
+
+  final LoadCurrentRemoteSession loadCurrentRemoteSession;
+  final CloseRemoteSession closeRemoteSession;
 }

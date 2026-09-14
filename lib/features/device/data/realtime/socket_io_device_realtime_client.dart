@@ -92,6 +92,25 @@ class SocketIoDeviceRealtimeClient implements DeviceRealtimeClient {
         _log('$supportAssignedEvent for ${assigned.supportRequestId}');
         _emit(assigned);
       }),
+      socket.on(remoteSessionCreatedEvent, (Object? payload) {
+        final created = parseRemoteSessionCreatedPayload(payload);
+        if (created == null) {
+          _log('$remoteSessionCreatedEvent ignored: unexpected payload');
+          return;
+        }
+        // A remote session id is an operational identifier, not a credential.
+        _log('$remoteSessionCreatedEvent for ${created.remoteSessionId}');
+        _emit(created);
+      }),
+      socket.on(remoteSessionClosedEvent, (Object? payload) {
+        final closed = parseRemoteSessionClosedPayload(payload);
+        if (closed == null) {
+          _log('$remoteSessionClosedEvent ignored: unexpected payload');
+          return;
+        }
+        _log('$remoteSessionClosedEvent for ${closed.remoteSessionId}');
+        _emit(closed);
+      }),
       socket.onDisconnect((_) {
         _log('disconnected');
         _emit(const RealtimeDisconnected());

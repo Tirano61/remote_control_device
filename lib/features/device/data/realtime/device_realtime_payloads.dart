@@ -60,6 +60,72 @@ RealtimeSupportAssigned? parseSupportAssignedPayload(Object? payload) {
   );
 }
 
+/// Reads the `remote-session:created` payload documented in `REALTIME.md`:
+///
+/// ```json
+/// {
+///   "remoteSessionId": "3d1b9e64-...",
+///   "supportRequestId": "8f14e45f-...",
+///   "technician": { "id": "7c9e6679-...", "name": "Ana Torres" }
+/// }
+/// ```
+///
+/// The whole documented shape is required — a payload missing the technician
+/// block is not the event this client knows about — but only the identifiers
+/// travel onwards, and not even those are used to build a session: what the
+/// user is shown comes from `GET /device/remote-sessions/current`. Carrying the
+/// name off the socket could only tempt a screen into trusting it.
+///
+/// Returns `null` for anything that does not match. Realtime payloads are
+/// untrusted input shaped by whatever is on the other end of the socket, and a
+/// malformed one must produce no signal at all rather than a half-built one.
+RealtimeRemoteSessionCreated? parseRemoteSessionCreatedPayload(Object? payload) {
+  if (payload is! Map) return null;
+
+  final remoteSessionId = payload['remoteSessionId'];
+  if (remoteSessionId is! String || remoteSessionId.isEmpty) return null;
+
+  final supportRequestId = payload['supportRequestId'];
+  if (supportRequestId is! String || supportRequestId.isEmpty) return null;
+
+  final technician = payload['technician'];
+  if (technician is! Map) return null;
+
+  final technicianId = technician['id'];
+  final technicianName = technician['name'];
+  if (technicianId is! String || technicianId.isEmpty) return null;
+  if (technicianName is! String || technicianName.isEmpty) return null;
+
+  return RealtimeRemoteSessionCreated(
+    remoteSessionId: remoteSessionId,
+    supportRequestId: supportRequestId,
+    technicianId: technicianId,
+  );
+}
+
+/// Reads the `remote-session:closed` payload documented in `REALTIME.md`:
+///
+/// ```json
+/// { "remoteSessionId": "3d1b9e64-...", "endedBy": "TECHNICIAN" }
+/// ```
+///
+/// Only `remoteSessionId` is required. `endedBy` is documented, is read by
+/// nothing in this client, and — being a `RemoteSessionEndedBy` — may grow
+/// values this build has never heard of; refusing the event over a field that
+/// changes nothing would turn a contract extension into a tablet stuck on
+/// "assistance in progress". What the event means is "ask again", and the
+/// answer to that comes from REST.
+///
+/// Returns `null` for anything that does not carry a usable session id.
+RealtimeRemoteSessionClosed? parseRemoteSessionClosedPayload(Object? payload) {
+  if (payload is! Map) return null;
+
+  final remoteSessionId = payload['remoteSessionId'];
+  if (remoteSessionId is! String || remoteSessionId.isEmpty) return null;
+
+  return RealtimeRemoteSessionClosed(remoteSessionId);
+}
+
 /// Whether a `connect_error` is the namespace middleware refusing the token.
 ///
 /// The backend answers a single generic `Unauthorized` for every rejection

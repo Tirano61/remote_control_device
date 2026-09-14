@@ -4,6 +4,7 @@ import 'package:remote_control_device/features/device/data/realtime/device_realt
 import 'package:remote_control_device/features/device/data/realtime/device_socket_options.dart';
 
 import '../../../fakes/device_fakes.dart';
+import '../../../fakes/remote_session_fakes.dart';
 import '../../../fakes/support_fakes.dart';
 
 /// Guards the parts of `docs/backend/REALTIME.md` a unit test can actually
@@ -203,6 +204,146 @@ void main() {
 
       expect(signal, isNotNull);
       expect(signal!.props, [testSupportRequestId, testTechnicianId]);
+    });
+  });
+
+  group('remote-session:created payload', () {
+    Map<String, dynamic> payload() => <String, dynamic>{
+      'remoteSessionId': testRemoteSessionId,
+      'supportRequestId': testSupportRequestId,
+      'technician': <String, dynamic>{
+        'id': testTechnicianId,
+        'name': testTechnicianName,
+      },
+    };
+
+    test('is read as documented, identifiers only', () {
+      final signal = parseRemoteSessionCreatedPayload(payload());
+
+      expect(signal, isNotNull);
+      expect(signal!.remoteSessionId, testRemoteSessionId);
+      expect(signal.supportRequestId, testSupportRequestId);
+      expect(signal.technicianId, testTechnicianId);
+      // The name is validated and then deliberately dropped: what the user is
+      // shown comes from GET /device/remote-sessions/current, never from the
+      // socket.
+      expect(signal.props, isNot(contains(testTechnicianName)));
+    });
+
+    test('the event name matches the contract', () {
+      expect(remoteSessionCreatedEvent, 'remote-session:created');
+    });
+
+    test('unexpected shapes produce no signal at all', () {
+      expect(parseRemoteSessionCreatedPayload(null), isNull);
+      expect(parseRemoteSessionCreatedPayload('remote-session:created'), isNull);
+      expect(parseRemoteSessionCreatedPayload(const []), isNull);
+      expect(
+        parseRemoteSessionCreatedPayload({
+          'remoteSessionId': testRemoteSessionId,
+        }),
+        isNull,
+      );
+      expect(
+        parseRemoteSessionCreatedPayload(
+          payload()..remove('supportRequestId'),
+        ),
+        isNull,
+      );
+      expect(
+        parseRemoteSessionCreatedPayload(payload()..remove('technician')),
+        isNull,
+      );
+      expect(
+        parseRemoteSessionCreatedPayload(
+          payload()..['remoteSessionId'] = '',
+        ),
+        isNull,
+      );
+      expect(
+        parseRemoteSessionCreatedPayload(
+          payload()..['remoteSessionId'] = 42,
+        ),
+        isNull,
+      );
+      expect(
+        parseRemoteSessionCreatedPayload(
+          payload()
+            ..['technician'] = <String, dynamic>{'id': testTechnicianId},
+        ),
+        isNull,
+      );
+    });
+
+    test('extra properties do not prevent reading the documented ones', () {
+      final withExtras = payload()..['somethingAddedLater'] = true;
+      expect(parseRemoteSessionCreatedPayload(withExtras), isNotNull);
+    });
+
+    test('carries nothing that could be mistaken for a credential', () {
+      final withExtras = payload()
+        ..['technician'] = <String, dynamic>{
+          'id': testTechnicianId,
+          'name': testTechnicianName,
+          'email': 'ana@example.test',
+          'token': 'should-never-be-read',
+        };
+
+      final signal = parseRemoteSessionCreatedPayload(withExtras);
+
+      expect(signal, isNotNull);
+      expect(signal!.props, [
+        testRemoteSessionId,
+        testSupportRequestId,
+        testTechnicianId,
+      ]);
+    });
+  });
+
+  group('remote-session:closed payload', () {
+    test('is read as documented', () {
+      final signal = parseRemoteSessionClosedPayload({
+        'remoteSessionId': testRemoteSessionId,
+        'endedBy': 'TECHNICIAN',
+      });
+
+      expect(signal, isNotNull);
+      expect(signal!.remoteSessionId, testRemoteSessionId);
+      // endedBy is documented, read by nothing here, and deliberately not
+      // carried: a value this client does not act on has no business crossing
+      // into the domain.
+      expect(signal.props, [testRemoteSessionId]);
+    });
+
+    test('the event name matches the contract', () {
+      expect(remoteSessionClosedEvent, 'remote-session:closed');
+    });
+
+    test('an endedBy this build has never seen does not void the event', () {
+      // RemoteSessionEndedBy may grow values; refusing the event over a field
+      // that changes nothing would leave the tablet stuck on "in progress".
+      expect(
+        parseRemoteSessionClosedPayload({
+          'remoteSessionId': testRemoteSessionId,
+          'endedBy': 'SOMETHING_NEW',
+        }),
+        isNotNull,
+      );
+      expect(
+        parseRemoteSessionClosedPayload({
+          'remoteSessionId': testRemoteSessionId,
+        }),
+        isNotNull,
+      );
+    });
+
+    test('a payload with no usable session id produces no signal', () {
+      expect(parseRemoteSessionClosedPayload(null), isNull);
+      expect(parseRemoteSessionClosedPayload('remote-session:closed'), isNull);
+      expect(parseRemoteSessionClosedPayload(const []), isNull);
+      expect(parseRemoteSessionClosedPayload({'endedBy': 'TECHNICIAN'}), isNull);
+      expect(parseRemoteSessionClosedPayload({'remoteSessionId': ''}), isNull);
+      expect(parseRemoteSessionClosedPayload({'remoteSessionId': 42}), isNull);
     });
   });
 

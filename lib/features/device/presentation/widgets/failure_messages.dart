@@ -37,6 +37,21 @@ abstract final class FailureMessages {
       'El servidor respondió de forma inesperada. Intentá de nuevo.',
   };
 
+  /// Remote session. Wording is deliberately calmer than the support one: at
+  /// this point a technician is on the other end, so a failed call is a hiccup
+  /// in an ongoing conversation rather than a request that went nowhere.
+  static String forRemoteSession(Failure failure) => switch (failure) {
+    NetworkFailure() =>
+      'Se perdió la conexión con el servidor. Reintentando...',
+    ConflictFailure() || NotFoundFailure() =>
+      'La asistencia cambió de estado. Se actualizó la información.',
+    AuthFailure() => 'El dispositivo debe volver a activarse.',
+    ValidationFailure() => 'El servidor rechazó la solicitud.',
+    StorageFailure() =>
+      'No se pudieron leer los datos de activación de este dispositivo.',
+    ServerFailure() => 'El servidor respondió con un error. Intentá de nuevo.',
+  };
+
   /// Assistance flow. The two "stale state" answers get their own wording
   /// because they are not errors the user caused: the backend simply moved on,
   /// and the screen has already re-read the real state by the time this shows.
