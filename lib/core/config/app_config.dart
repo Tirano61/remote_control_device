@@ -21,6 +21,7 @@ class AppConfig {
     this.realtimeReconnectionDelay = const Duration(seconds: 2),
     this.realtimeReconnectionDelayMax = const Duration(seconds: 20),
     this.realtimeReauthRetryDelay = const Duration(seconds: 15),
+    this.signalingAckTimeout = const Duration(seconds: 10),
   });
 
   /// Builds the configuration from the compile-time environment.
@@ -62,6 +63,15 @@ class AppConfig {
   /// Delay before retrying a Device JWT renewal that could not be completed
   /// because the backend was unreachable.
   final Duration realtimeReauthRetryDelay;
+
+  /// How long to wait for a signaling ACK before treating it as unanswered.
+  ///
+  /// `REALTIME.md` guarantees that every signaling handler answers its ACK,
+  /// including on rejection, so a silence is never the backend deciding not to
+  /// reply — it is the connection having died between the emit and the answer.
+  /// The timeout exists so that a join awaiting a reply that can no longer come
+  /// does not stall the signaling state machine for the rest of the session.
+  final Duration signalingAckTimeout;
 
   /// URL of the `/devices` namespace, in the form `socket_io_client` expects.
   ///

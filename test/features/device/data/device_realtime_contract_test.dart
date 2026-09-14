@@ -2,16 +2,71 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:remote_control_device/core/config/app_config.dart';
 import 'package:remote_control_device/features/device/data/realtime/device_realtime_payloads.dart';
 import 'package:remote_control_device/features/device/data/realtime/device_socket_options.dart';
+import 'package:remote_control_device/features/signaling/data/signaling_events.dart';
 
 import '../../../fakes/device_fakes.dart';
 import '../../../fakes/remote_session_fakes.dart';
 import '../../../fakes/support_fakes.dart';
 
 /// Guards the parts of `docs/backend/REALTIME.md` a unit test can actually
-/// check: the namespace, what the handshake carries, and how the one event this
-/// prompt handles is read.
+/// check: the namespace, what the handshake carries, and how every event on
+/// the `/devices` socket is read.
+///
+/// The signaling payloads, ACK shapes and error codes have their own file,
+/// `test/features/signaling/data/signaling_contract_test.dart`; what is
+/// checked here is the event vocabulary of the namespace as a whole.
 void main() {
   const config = AppConfig(backendBaseUrl: 'http://backend.test:3000');
+
+  group('the /devices event vocabulary', () {
+    test('is exactly what the contract lists, spelled as it spells them', () {
+      // Received by the device.
+      expect(
+        const [
+          deviceConnectedEvent,
+          supportAssignedEvent,
+          remoteSessionCreatedEvent,
+          remoteSessionClosedEvent,
+          webRtcOfferEvent,
+          webRtcAnswerEvent,
+          webRtcIceCandidateEvent,
+        ],
+        [
+          'device:connected',
+          'support:assigned',
+          'remote-session:created',
+          'remote-session:closed',
+          'webrtc:offer',
+          'webrtc:answer',
+          'webrtc:ice-candidate',
+        ],
+      );
+
+      // Sent by the device. "There is no other event the device may send."
+      expect(
+        const [
+          remoteSessionJoinEvent,
+          webRtcOfferEvent,
+          webRtcAnswerEvent,
+          webRtcIceCandidateEvent,
+        ],
+        [
+          'remote-session:join',
+          'webrtc:offer',
+          'webrtc:answer',
+          'webrtc:ice-candidate',
+        ],
+      );
+    });
+
+    test('the three signaling events are shared by both directions', () {
+      // The relay is bidirectional and the payload rules are identical either
+      // way; only `from`, added by the server, distinguishes them.
+      const outbound = [webRtcOfferEvent, webRtcAnswerEvent];
+      expect(outbound.toSet().length, outbound.length);
+      expect(webRtcOfferEvent, isNot(webRtcAnswerEvent));
+    });
+  });
 
   group('namespace URL', () {
     test('is the configured backend URL plus /devices', () {

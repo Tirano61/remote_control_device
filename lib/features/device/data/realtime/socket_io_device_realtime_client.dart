@@ -6,20 +6,37 @@ import 'package:socket_io_client/socket_io_client.dart' as io;
 import 'package:remote_control_device/core/config/app_config.dart';
 import 'package:remote_control_device/features/device/data/realtime/device_realtime_payloads.dart';
 import 'package:remote_control_device/features/device/data/realtime/device_socket_options.dart';
-import 'package:remote_control_device/features/device/domain/realtime/device_realtime_client.dart';
+import 'package:remote_control_device/features/device/domain/realtime/device_realtime_channel.dart';
 import 'package:remote_control_device/features/device/domain/realtime/device_realtime_signal.dart';
+import 'package:remote_control_device/features/signaling/data/signaling_events.dart';
+import 'package:remote_control_device/features/signaling/data/signaling_payloads.dart';
+import 'package:remote_control_device/features/signaling/domain/entities/join_remote_session_result.dart';
+import 'package:remote_control_device/features/signaling/domain/entities/remote_signaling_message.dart';
+import 'package:remote_control_device/features/signaling/domain/entities/signaling_error_code.dart';
+import 'package:remote_control_device/features/signaling/domain/entities/signaling_relay_result.dart';
+import 'package:remote_control_device/features/signaling/domain/entities/webrtc_answer.dart';
+import 'package:remote_control_device/features/signaling/domain/entities/webrtc_ice_candidate.dart';
+import 'package:remote_control_device/features/signaling/domain/entities/webrtc_offer.dart';
 
 /// The only place in the application that knows Socket.IO exists.
 ///
-/// It translates the package's callbacks into [DeviceRealtimeSignal]s and keeps
-/// every decision about *what they mean* out of here: this class never renews a
-/// token, never touches credentials and never decides to give up.
+/// It translates the package's callbacks into [DeviceRealtimeSignal]s and
+/// [RemoteSignalingMessage]s and keeps every decision about *what they mean*
+/// out of here: this class never renews a token, never touches credentials,
+/// never decides when to join and never decides to give up.
 ///
 /// One socket per token. [connect] always builds a fresh socket rather than
 /// re-opening the existing one, because the `auth` map is captured when the
 /// socket is created — re-opening would re-present the token it was built with,
 /// which is precisely the token that was just refused.
-class SocketIoDeviceRealtimeClient implements DeviceRealtimeClient {
+///
+/// It serves two ports over that one socket, which is what `REALTIME.md`
+/// describes: a device has a single authenticated `/devices` connection, and
+/// presence, the server-to-device notices and the WebRTC signaling relay all
+/// ride on it. `DeviceRealtimeBloc` sees only [DeviceRealtimeClient] and
+/// `SignalingBloc` sees only [DeviceSignalingClient]; the fact that they are
+/// the same object is known to the composition root alone.
+class SocketIoDeviceRealtimeClient implements DeviceRealtimeChannel {
   SocketIoDeviceRealtimeClient({required AppConfig config}) : _config = config;
 
   static const String _loggerName = 'realtime';
@@ -27,6 +44,11 @@ class SocketIoDeviceRealtimeClient implements DeviceRealtimeClient {
   final AppConfig _config;
   final StreamController<DeviceRealtimeSignal> _signals =
       StreamController<DeviceRealtimeSignal>.broadcast();
+
+  /// Kept apart from [_signals] so that the signaling consumer never has to
+  /// see — or filter out — connection events it has no business reading.
+  final StreamController<RemoteSignalingMessage> _signalingMessages =
+      StreamController<RemoteSignalingMessage>.broadcast();
 
   io.Socket? _socket;
 
@@ -36,6 +58,10 @@ class SocketIoDeviceRealtimeClient implements DeviceRealtimeClient {
 
   @override
   Stream<DeviceRealtimeSignal> get signals => _signals.stream;
+
+  @override
+  Stream<RemoteSignalingMessage> get signalingMessages =>
+      _signalingMessages.stream;
 
   @override
   void connect(String deviceToken) {
@@ -64,6 +90,7 @@ class SocketIoDeviceRealtimeClient implements DeviceRealtimeClient {
   Future<void> dispose() async {
     _releaseSocket();
     if (!_signals.isClosed) await _signals.close();
+    if (!_signalingMessages.isClosed) await _signalingMessages.close();
   }
 
   void _bindListeners(io.Socket socket) {
@@ -111,6 +138,34 @@ class SocketIoDeviceRealtimeClient implements DeviceRealtimeClient {
         _log('$remoteSessionClosedEvent for ${closed.remoteSessionId}');
         _emit(closed);
       }),
+      socket.on(webRtcOfferEvent, (Object? payload) {
+        final message = parseWebRtcOfferPayload(payload);
+        if (message == null) {
+          _log('$webRtcOfferEvent ignored: unexpected payload');
+          return;
+        }
+        // The session id is an operational identifier; the SDP never is.
+        _log('$webRtcOfferEvent received for ${message.remoteSessionId}');
+        _emitSignaling(message);
+      }),
+      socket.on(webRtcAnswerEvent, (Object? payload) {
+        final message = parseWebRtcAnswerPayload(payload);
+        if (message == null) {
+          _log('$webRtcAnswerEvent ignored: unexpected payload');
+          return;
+        }
+        _log('$webRtcAnswerEvent received for ${message.remoteSessionId}');
+        _emitSignaling(message);
+      }),
+      socket.on(webRtcIceCandidateEvent, (Object? payload) {
+        final message = parseWebRtcIceCandidatePayload(payload);
+        if (message == null) {
+          _log('$webRtcIceCandidateEvent ignored: unexpected payload');
+          return;
+        }
+        _log('$webRtcIceCandidateEvent received for ${message.remoteSessionId}');
+        _emitSignaling(message);
+      }),
       socket.onDisconnect((_) {
         _log('disconnected');
         _emit(const RealtimeDisconnected());
@@ -145,9 +200,137 @@ class SocketIoDeviceRealtimeClient implements DeviceRealtimeClient {
     socket?.dispose();
   }
 
+  // ------------------------------------------------------------- signaling
+
+  @override
+  Future<JoinRemoteSessionResult> joinRemoteSession(
+    String remoteSessionId,
+  ) async {
+    final payload = buildRemoteSessionJoinPayload(remoteSessionId);
+    if (payload == null) {
+      // Only reachable if an id were built locally instead of read from an
+      // authenticated backend answer, which is a programming error, not a
+      // transient one — so it is reported as the contract error it would be.
+      _log('$remoteSessionJoinEvent not sent: the session id is not a UUID');
+      return const RemoteSessionJoinRefused(SignalingErrorCode.invalidPayload);
+    }
+
+    _log('$remoteSessionJoinEvent requested for $remoteSessionId');
+    final result = parseJoinRemoteSessionAck(
+      await _emitWithAck(remoteSessionJoinEvent, payload),
+    );
+
+    if (result is RemoteSessionJoined &&
+        result.remoteSessionId != remoteSessionId) {
+      // An answer about another session is not an answer to this request.
+      _log('$remoteSessionJoinEvent answered about a different session');
+      return const RemoteSessionJoinUnanswered();
+    }
+    _log(switch (result) {
+      RemoteSessionJoined() => 'signaling joined: $remoteSessionId',
+      // The code is the stable part of the contract and carries no secret.
+      RemoteSessionJoinRefused(:final error) =>
+        'signaling join refused (${error.name}): $remoteSessionId',
+      RemoteSessionJoinUnanswered() =>
+        'signaling join unanswered: $remoteSessionId',
+    });
+    return result;
+  }
+
+  @override
+  Future<SignalingRelayResult> sendOffer(WebRtcOffer offer) => _relay(
+    event: webRtcOfferEvent,
+    remoteSessionId: offer.remoteSessionId,
+    payload: buildWebRtcOfferPayload(offer),
+  );
+
+  @override
+  Future<SignalingRelayResult> sendAnswer(WebRtcAnswer answer) => _relay(
+    event: webRtcAnswerEvent,
+    remoteSessionId: answer.remoteSessionId,
+    payload: buildWebRtcAnswerPayload(answer),
+  );
+
+  @override
+  Future<SignalingRelayResult> sendIceCandidate(
+    WebRtcIceCandidate candidate,
+  ) => _relay(
+    event: webRtcIceCandidateEvent,
+    remoteSessionId: candidate.remoteSessionId,
+    payload: buildWebRtcIceCandidatePayload(candidate),
+  );
+
+  /// The one path every `webrtc:*` takes out.
+  ///
+  /// A `null` [payload] means the builder refused it against the documented
+  /// DTO, so it is never put on the wire: emitting it could only earn an
+  /// `INVALID_PAYLOAD`, and the client already knows that.
+  Future<SignalingRelayResult> _relay({
+    required String event,
+    required String remoteSessionId,
+    required Map<String, dynamic>? payload,
+  }) async {
+    if (payload == null) {
+      _log('$event not sent: the payload is outside the documented limits');
+      return const SignalingRelayNotSent(SignalingNotSentReason.invalidPayload);
+    }
+
+    final result = parseSignalingRelayAck(await _emitWithAck(event, payload));
+    _log(switch (result) {
+      SignalingRelayDelivered() => '$event delivered: $remoteSessionId',
+      SignalingRelayRefused(:final error) =>
+        '$event refused (${error.name}): $remoteSessionId',
+      SignalingRelayUnanswered() => '$event unanswered: $remoteSessionId',
+      SignalingRelayNotSent() => '$event not sent: $remoteSessionId',
+    });
+    return result;
+  }
+
+  /// Emits and waits for the ACK, with two guards the package does not give.
+  ///
+  /// Without a live socket it answers `null` immediately instead of emitting:
+  /// `socket_io_client` buffers a packet sent while disconnected and delivers
+  /// it on the next connection, which for a join means joining a session the
+  /// client may no longer be in — exactly the stale join this must never make.
+  ///
+  /// And it gives up after [AppConfig.signalingAckTimeout]. The backend always
+  /// answers its ACKs, so a silence means the connection died between the emit
+  /// and the answer; a caller left awaiting it forever would stall the join
+  /// state machine for the rest of the session.
+  Future<Object?> _emitWithAck(String event, Map<String, dynamic> payload) {
+    final socket = _socket;
+    if (socket == null || !socket.connected) {
+      _log('$event not sent: no live connection');
+      return Future<Object?>.value();
+    }
+
+    final completer = Completer<Object?>();
+    final timeout = Timer(_config.signalingAckTimeout, () {
+      if (!completer.isCompleted) completer.complete();
+    });
+    // Optional positional: the package applies the ACK with whatever the
+    // server sent, which may be no argument at all.
+    socket.emitWithAck(
+      event,
+      payload,
+      ack: ([Object? data]) {
+        timeout.cancel();
+        if (!completer.isCompleted) completer.complete(data);
+      },
+    );
+    return completer.future;
+  }
+
+  // -------------------------------------------------------------- plumbing
+
   void _emit(DeviceRealtimeSignal signal) {
     if (_signals.isClosed) return;
     _signals.add(signal);
+  }
+
+  void _emitSignaling(RemoteSignalingMessage message) {
+    if (_signalingMessages.isClosed) return;
+    _signalingMessages.add(message);
   }
 
   void _log(String message) {
