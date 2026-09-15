@@ -5,6 +5,7 @@ import 'package:equatable/equatable.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:remote_control_device/features/signaling/domain/entities/join_remote_session_result.dart';
+import 'package:remote_control_device/features/signaling/domain/entities/remote_session_peer_readiness.dart';
 import 'package:remote_control_device/features/signaling/domain/entities/remote_signaling_message.dart';
 import 'package:remote_control_device/features/signaling/domain/entities/signaling_error_code.dart';
 import 'package:remote_control_device/features/signaling/domain/entities/signaling_relay_result.dart';
@@ -12,6 +13,7 @@ import 'package:remote_control_device/features/signaling/domain/entities/webrtc_
 import 'package:remote_control_device/features/signaling/domain/entities/webrtc_ice_candidate.dart';
 import 'package:remote_control_device/features/signaling/domain/entities/webrtc_offer.dart';
 import 'package:remote_control_device/features/signaling/domain/signaling_client.dart';
+import 'package:remote_control_device/features/webrtc/domain/webrtc_signaling_gateway.dart';
 
 part 'signaling_event.dart';
 part 'signaling_state.dart';
@@ -45,11 +47,18 @@ part 'signaling_state.dart';
 /// session to `ACTIVE`. Signaling changes no backend row — the contract is
 /// explicit — so a joined room means exactly one thing: this socket may relay.
 ///
-/// It is also where the WebRTC prompt plugs in. [incoming], [sendOffer],
+/// It is also where the WebRTC layer plugs in. [incoming], [sendOffer],
 /// [sendAnswer] and [sendIceCandidate] are the whole surface a peer connection
-/// will need; none of them exposes Socket.IO, an ACK shape or
+/// needs; none of them exposes Socket.IO, an ACK shape or
 /// `DeviceRealtimeClient`.
-class SignalingBloc extends Bloc<SignalingEvent, SignalingState> {
+///
+/// Two of those four are declared by [WebRtcSignalingGateway], which this bloc
+/// satisfies as it stands. The peer connection is an answerer and sends exactly
+/// an answer and its candidates, so the port it depends on names those two and
+/// nothing else — `sendOffer` stays available to this bloc's own API and out of
+/// reach of the WebRTC feature, which has no business creating an offer.
+class SignalingBloc extends Bloc<SignalingEvent, SignalingState>
+    implements WebRtcSignalingGateway {
   SignalingBloc({required DeviceSignalingClient client})
     : _client = client,
       super(const SignalingIdle()) {
@@ -58,9 +67,11 @@ class SignalingBloc extends Bloc<SignalingEvent, SignalingState> {
     on<SignalingSessionEnded>(_onSessionEnded);
     on<SignalingJoinLost>(_onJoinLost);
     on<SignalingRelayDenied>(_onRelayDenied);
+    on<SignalingPeerReady>(_onPeerReady);
     on<SignalingRetryRequested>(_onRetryRequested);
 
     _messages = _client.signalingMessages.listen(_onMessageReceived);
+    _readiness = _client.peerReadiness.listen(_onPeerReadinessReceived);
   }
 
   static const String _loggerName = 'signaling';
@@ -68,6 +79,7 @@ class SignalingBloc extends Bloc<SignalingEvent, SignalingState> {
   final DeviceSignalingClient _client;
 
   late final StreamSubscription<RemoteSignalingMessage> _messages;
+  late final StreamSubscription<RemoteSessionPeerReady> _readiness;
 
   /// Messages that survived the session filter. A separate controller rather
   /// than a filtered view of the client's stream, so that a late subscriber —
@@ -88,6 +100,13 @@ class SignalingBloc extends Bloc<SignalingEvent, SignalingState> {
   String? get joinedRemoteSessionId => switch (state) {
     SignalingJoined(:final remoteSessionId) => remoteSessionId,
     _ => null,
+  };
+
+  /// Whether the technician was last seen in the same session room. `false`
+  /// while not joined, because readiness is a property of a join.
+  bool get peerJoined => switch (state) {
+    SignalingJoined(:final peerJoined) => peerJoined,
+    _ => false,
   };
 
   /// Every `webrtc:*` that arrived for the session this client is joined to.
@@ -135,7 +154,10 @@ class SignalingBloc extends Bloc<SignalingEvent, SignalingState> {
     if (generation != _generation) return;
 
     emit(switch (result) {
-      RemoteSessionJoined() => SignalingJoined(remoteSessionId),
+      RemoteSessionJoined(:final peerJoined) => SignalingJoined(
+        remoteSessionId,
+        peerJoined: peerJoined,
+      ),
       RemoteSessionJoinRefused(:final error) => SignalingUnavailable(
         remoteSessionId,
         error: error,
@@ -197,6 +219,27 @@ class SignalingBloc extends Bloc<SignalingEvent, SignalingState> {
     );
   }
 
+  /// Records that the peer arrived after this device had already joined.
+  ///
+  /// Session isolation applies here as it does to every incoming payload: a
+  /// notice naming a session this client is not joined to says nothing about
+  /// the one it is joined to, and is dropped rather than followed.
+  ///
+  /// Nothing else happens. No peer connection is created, no offer is made and
+  /// no message is sent — the state simply stops saying the room is empty.
+  Future<void> _onPeerReady(
+    SignalingPeerReady event,
+    Emitter<SignalingState> emit,
+  ) async {
+    final current = state;
+    if (current is! SignalingJoined) return;
+    if (current.remoteSessionId != event.remoteSessionId) return;
+    if (current.peerJoined) return;
+
+    _log('peer ready for ${event.remoteSessionId}');
+    emit(SignalingJoined(current.remoteSessionId, peerJoined: true));
+  }
+
   Future<void> _onRetryRequested(
     SignalingRetryRequested event,
     Emitter<SignalingState> emit,
@@ -222,10 +265,12 @@ class SignalingBloc extends Bloc<SignalingEvent, SignalingState> {
       _relay(offer.remoteSessionId, () => _client.sendOffer(offer));
 
   /// Emits `webrtc:answer` for the joined session.
+  @override
   Future<SignalingRelayResult> sendAnswer(WebRtcAnswer answer) =>
       _relay(answer.remoteSessionId, () => _client.sendAnswer(answer));
 
   /// Emits `webrtc:ice-candidate` for the joined session.
+  @override
   Future<SignalingRelayResult> sendIceCandidate(WebRtcIceCandidate candidate) =>
       _relay(
         candidate.remoteSessionId,
@@ -300,6 +345,9 @@ class SignalingBloc extends Bloc<SignalingEvent, SignalingState> {
     _accepted.add(message);
   }
 
+  void _onPeerReadinessReceived(RemoteSessionPeerReady ready) =>
+      add(SignalingPeerReady(ready.remoteSessionId));
+
   static String _describe(RemoteSignalingMessage message) => switch (message) {
     OfferReceived() => 'offer received',
     AnswerReceived() => 'answer received',
@@ -313,6 +361,7 @@ class SignalingBloc extends Bloc<SignalingEvent, SignalingState> {
   @override
   Future<void> close() async {
     await _messages.cancel();
+    await _readiness.cancel();
     await _accepted.close();
     // The socket is not disposed here: it belongs to `DeviceRealtimeBloc`, and
     // this bloc only ever had a second view of it.

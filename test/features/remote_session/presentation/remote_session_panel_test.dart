@@ -22,12 +22,17 @@ import 'package:remote_control_device/features/support/domain/usecases/reject_su
 import 'package:remote_control_device/features/support/domain/usecases/request_support.dart';
 import 'package:remote_control_device/features/support/presentation/bloc/support/support_bloc.dart';
 import 'package:remote_control_device/features/support/presentation/widgets/support_panel.dart';
+import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_connection_state.dart';
+import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_data_channel_state.dart';
+import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_ice_configuration.dart';
+import 'package:remote_control_device/features/webrtc/presentation/bloc/webrtc_session/webrtc_session_bloc.dart';
 import 'package:remote_control_device/core/result/result.dart';
 
 import '../../../fakes/device_fakes.dart';
 import '../../../fakes/realtime_fakes.dart';
 import '../../../fakes/remote_session_fakes.dart';
 import '../../../fakes/support_fakes.dart';
+import '../../../fakes/webrtc_fakes.dart';
 
 /// Drives the real screen — `ReadyPage`, both panels, all three blocs — with
 /// faked HTTP and a faked socket. What is under test is what the user sees at
@@ -40,6 +45,9 @@ void main() {
   late SupportBloc supportBloc;
   late RemoteSessionBloc remoteSessionBloc;
   late DeviceRealtimeBloc realtimeBloc;
+  late WebRtcSessionBloc webRtcBloc;
+  late FakeWebRtcPeerConnectionFactory peerFactory;
+  late FakeWebRtcSignalingGateway webRtcSignaling;
 
   /// Built inside the test body on purpose: a bloc created in `setUp` lives in
   /// a different zone from the one `testWidgets` drives, and `pump` would never
@@ -75,9 +83,17 @@ void main() {
         ),
       ),
     );
+    peerFactory = FakeWebRtcPeerConnectionFactory();
+    webRtcSignaling = FakeWebRtcSignalingGateway();
+    webRtcBloc = WebRtcSessionBloc(
+      peerConnectionFactory: peerFactory,
+      signaling: webRtcSignaling,
+      iceConfiguration: const WebRtcIceConfiguration.none(),
+    );
     addTearDown(supportBloc.close);
     addTearDown(remoteSessionBloc.close);
     addTearDown(realtimeBloc.close);
+    addTearDown(webRtcBloc.close);
   }
 
   Widget harness() => MultiBlocProvider(
@@ -85,6 +101,7 @@ void main() {
       BlocProvider<SupportBloc>.value(value: supportBloc),
       BlocProvider<RemoteSessionBloc>.value(value: remoteSessionBloc),
       BlocProvider<DeviceRealtimeBloc>.value(value: realtimeBloc),
+      BlocProvider<WebRtcSessionBloc>.value(value: webRtcBloc),
     ],
     child: const MaterialApp(home: ReadyPage(device: testIdentity)),
   );
@@ -141,6 +158,87 @@ void main() {
     // Nothing this build cannot actually do is announced.
     expect(find.textContaining('pantalla'), findsNothing);
     expect(find.textContaining('control'), findsNothing);
+  });
+
+  /// Negotiates a peer connection the way the coordinator would, and pushes it
+  /// all the way to the success condition: connection connected, control
+  /// channel open.
+  Future<void> establishPeerConnection(WidgetTester tester) async {
+    webRtcBloc.add(
+      const WebRtcSignalingAvailabilityChanged(testRemoteSessionId),
+    );
+    webRtcBloc.add(const WebRtcRemoteSessionChanged(testRemoteSessionId));
+    webRtcBloc.add(WebRtcOfferReceived(offerFor()));
+    await settle(tester);
+
+    final peer = peerFactory.last;
+    peer.pushConnectionState(WebRtcConnectionState.connected);
+    final channel = peer.pushDataChannel();
+    await settle(tester);
+    channel.pushState(WebRtcDataChannelState.open);
+    await settle(tester);
+  }
+
+  testWidgets('a connected peer with an open control channel says so',
+      (tester) async {
+    await pumpAccepted(tester);
+    remoteSessionRepository.currentResult = connectingRemoteSession;
+    remoteSessionBloc.add(const RemoteSessionAnnounced(testRemoteSessionId));
+    await settle(tester);
+    expect(find.text('Conectando con el técnico...'), findsOneWidget);
+
+    await establishPeerConnection(tester);
+
+    // The backend row is still CONNECTING — nothing moves it to ACTIVE — and
+    // the screen tells the user the truth anyway.
+    expect(remoteSessionBloc.state, isA<RemoteSessionConnecting>());
+    expect(find.text('Conexión remota establecida'), findsOneWidget);
+    expect(find.text('Conectando con el técnico...'), findsNothing);
+    // Ending the assistance stays available; it matters most right here.
+    expect(find.byKey(RemoteSessionPanel.closeButtonKey), findsOneWidget);
+    // And still nothing this build cannot do is claimed.
+    expect(find.textContaining('pantalla'), findsNothing);
+  });
+
+  testWidgets('half a connection is still connecting', (tester) async {
+    await pumpAccepted(tester);
+    remoteSessionRepository.currentResult = connectingRemoteSession;
+    remoteSessionBloc.add(const RemoteSessionAnnounced(testRemoteSessionId));
+    await settle(tester);
+
+    webRtcBloc.add(
+      const WebRtcSignalingAvailabilityChanged(testRemoteSessionId),
+    );
+    webRtcBloc.add(const WebRtcRemoteSessionChanged(testRemoteSessionId));
+    webRtcBloc.add(WebRtcOfferReceived(offerFor()));
+    await settle(tester);
+    // Connected, but the control channel has not opened.
+    peerFactory.last.pushConnectionState(WebRtcConnectionState.connected);
+    await settle(tester);
+
+    expect(find.text('Conectando con el técnico...'), findsOneWidget);
+    expect(find.text('Conexión remota establecida'), findsNothing);
+  });
+
+  testWidgets('a lost socket outranks an established peer connection',
+      (tester) async {
+    await pumpAccepted(tester);
+    remoteSessionRepository.currentResult = connectingRemoteSession;
+    remoteSessionBloc.add(const RemoteSessionAnnounced(testRemoteSessionId));
+    await settle(tester);
+    await establishPeerConnection(tester);
+
+    client.push(const RealtimeDisconnected());
+    await settle(tester);
+
+    // The peer connection may well still be up, but the tablet cannot be
+    // reached by the backend, and that is what the user needs to know. Both the
+    // connection field and the panel headline say it.
+    expect(find.text('Reconectando...'), findsNWidgets(2));
+    expect(find.text('Conexión remota establecida'), findsNothing);
+    // Nothing was torn down: WebRTC is peer to peer and does not need the
+    // socket that introduced the two ends.
+    expect(webRtcBloc.state.isRemoteConnectionEstablished, isTrue);
   });
 
   testWidgets('ACTIVE says the assistance is under way, and nothing more',

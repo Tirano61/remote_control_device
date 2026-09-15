@@ -11,6 +11,7 @@ import 'package:remote_control_device/features/device/domain/realtime/device_rea
 import 'package:remote_control_device/features/signaling/data/signaling_events.dart';
 import 'package:remote_control_device/features/signaling/data/signaling_payloads.dart';
 import 'package:remote_control_device/features/signaling/domain/entities/join_remote_session_result.dart';
+import 'package:remote_control_device/features/signaling/domain/entities/remote_session_peer_readiness.dart';
 import 'package:remote_control_device/features/signaling/domain/entities/remote_signaling_message.dart';
 import 'package:remote_control_device/features/signaling/domain/entities/signaling_error_code.dart';
 import 'package:remote_control_device/features/signaling/domain/entities/signaling_relay_result.dart';
@@ -50,6 +51,13 @@ class SocketIoDeviceRealtimeClient implements DeviceRealtimeChannel {
   final StreamController<RemoteSignalingMessage> _signalingMessages =
       StreamController<RemoteSignalingMessage>.broadcast();
 
+  /// Readiness notices. A third controller rather than a third kind of signal
+  /// on one of the other two: `remote-session:peer-joined` is neither a
+  /// connection event nor a relayed `webrtc:*`, and folding it into either
+  /// would make a consumer filter out something it should never have seen.
+  final StreamController<RemoteSessionPeerReady> _peerReadiness =
+      StreamController<RemoteSessionPeerReady>.broadcast();
+
   io.Socket? _socket;
 
   /// Removers returned by every registered listener, so teardown is explicit
@@ -62,6 +70,9 @@ class SocketIoDeviceRealtimeClient implements DeviceRealtimeChannel {
   @override
   Stream<RemoteSignalingMessage> get signalingMessages =>
       _signalingMessages.stream;
+
+  @override
+  Stream<RemoteSessionPeerReady> get peerReadiness => _peerReadiness.stream;
 
   @override
   void connect(String deviceToken) {
@@ -91,6 +102,7 @@ class SocketIoDeviceRealtimeClient implements DeviceRealtimeChannel {
     _releaseSocket();
     if (!_signals.isClosed) await _signals.close();
     if (!_signalingMessages.isClosed) await _signalingMessages.close();
+    if (!_peerReadiness.isClosed) await _peerReadiness.close();
   }
 
   void _bindListeners(io.Socket socket) {
@@ -137,6 +149,16 @@ class SocketIoDeviceRealtimeClient implements DeviceRealtimeChannel {
         }
         _log('$remoteSessionClosedEvent for ${closed.remoteSessionId}');
         _emit(closed);
+      }),
+      socket.on(remoteSessionPeerJoinedEvent, (Object? payload) {
+        final ready = parseRemoteSessionPeerJoinedPayload(payload);
+        if (ready == null) {
+          _log('$remoteSessionPeerJoinedEvent ignored: unexpected payload');
+          return;
+        }
+        _log('$remoteSessionPeerJoinedEvent for ${ready.remoteSessionId}');
+        if (_peerReadiness.isClosed) return;
+        _peerReadiness.add(ready);
       }),
       socket.on(webRtcOfferEvent, (Object? payload) {
         final message = parseWebRtcOfferPayload(payload);
@@ -227,7 +249,10 @@ class SocketIoDeviceRealtimeClient implements DeviceRealtimeChannel {
       return const RemoteSessionJoinUnanswered();
     }
     _log(switch (result) {
-      RemoteSessionJoined() => 'signaling joined: $remoteSessionId',
+      // Readiness is an operational fact about the peer's room membership and
+      // carries nothing sensitive, so it is safe to log alongside the id.
+      RemoteSessionJoined(:final peerJoined) =>
+        'signaling joined: $remoteSessionId (peer joined: $peerJoined)',
       // The code is the stable part of the contract and carries no secret.
       RemoteSessionJoinRefused(:final error) =>
         'signaling join refused (${error.name}): $remoteSessionId',

@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:remote_control_device/features/device/domain/realtime/device_realtime_channel.dart';
 import 'package:remote_control_device/features/device/domain/realtime/device_realtime_signal.dart';
 import 'package:remote_control_device/features/signaling/domain/entities/join_remote_session_result.dart';
+import 'package:remote_control_device/features/signaling/domain/entities/remote_session_peer_readiness.dart';
 import 'package:remote_control_device/features/signaling/domain/entities/remote_signaling_message.dart';
 import 'package:remote_control_device/features/signaling/domain/entities/signaling_relay_result.dart';
 import 'package:remote_control_device/features/signaling/domain/entities/webrtc_answer.dart';
@@ -25,6 +26,8 @@ class FakeDeviceRealtimeClient implements DeviceRealtimeChannel {
       StreamController<DeviceRealtimeSignal>.broadcast();
   final StreamController<RemoteSignalingMessage> _signalingMessages =
       StreamController<RemoteSignalingMessage>.broadcast();
+  final StreamController<RemoteSessionPeerReady> _peerReadiness =
+      StreamController<RemoteSessionPeerReady>.broadcast();
 
   /// One entry per connection attempt, in order. The last one is the token the
   /// most recent handshake would have presented.
@@ -46,7 +49,14 @@ class FakeDeviceRealtimeClient implements DeviceRealtimeChannel {
   final List<WebRtcIceCandidate> sentIceCandidates = [];
 
   /// What the next join answers. Replaced per test; [joinQueue] wins when set.
-  JoinRemoteSessionResult joinResult = const RemoteSessionJoined('');
+  ///
+  /// A bare `RemoteSessionJoined('')` means "accepted, with this readiness":
+  /// the id is filled in from the request, the way the real transport echoes
+  /// the session it was asked about.
+  JoinRemoteSessionResult joinResult = const RemoteSessionJoined(
+    '',
+    peerJoined: false,
+  );
 
   /// Answers scripted one join at a time, consumed before [joinResult]. Lets a
   /// test say "this join is refused, the next one succeeds".
@@ -67,6 +77,9 @@ class FakeDeviceRealtimeClient implements DeviceRealtimeChannel {
       _signalingMessages.stream;
 
   @override
+  Stream<RemoteSessionPeerReady> get peerReadiness => _peerReadiness.stream;
+
+  @override
   void connect(String deviceToken) => connectedWithTokens.add(deviceToken);
 
   @override
@@ -77,6 +90,7 @@ class FakeDeviceRealtimeClient implements DeviceRealtimeChannel {
     disposeCount++;
     if (!_signals.isClosed) await _signals.close();
     if (!_signalingMessages.isClosed) await _signalingMessages.close();
+    if (!_peerReadiness.isClosed) await _peerReadiness.close();
   }
 
   @override
@@ -89,9 +103,13 @@ class FakeDeviceRealtimeClient implements DeviceRealtimeChannel {
         ? joinQueue.removeAt(0)
         : joinResult;
     // A bare `RemoteSessionJoined('')` in a test means "accepted": the real
-    // transport echoes the id it was asked about, so the fake does too.
+    // transport echoes the id it was asked about, so the fake does too. The
+    // readiness the test scripted travels with it untouched.
     return scripted is RemoteSessionJoined && scripted.remoteSessionId.isEmpty
-        ? RemoteSessionJoined(remoteSessionId)
+        ? RemoteSessionJoined(
+            remoteSessionId,
+            peerJoined: scripted.peerJoined,
+          )
         : scripted;
   }
 
@@ -144,6 +162,12 @@ class FakeDeviceRealtimeClient implements DeviceRealtimeChannel {
   /// lets the listening bloc process it.
   Future<void> deliver(RemoteSignalingMessage message) async {
     _signalingMessages.add(message);
+    await pump();
+  }
+
+  /// Pushes a `remote-session:peer-joined` as if the backend had just sent it.
+  Future<void> deliverPeerReady(String remoteSessionId) async {
+    _peerReadiness.add(RemoteSessionPeerReady(remoteSessionId));
     await pump();
   }
 

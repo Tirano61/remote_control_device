@@ -67,11 +67,17 @@ Map<String, dynamic> relayedIcePayload({
 };
 
 /// A parsed offer, as the transport would hand it to `SignalingBloc`.
-OfferReceived offerReceived({String remoteSessionId = testRemoteSessionId}) =>
-    OfferReceived(
-      offer: WebRtcOffer(remoteSessionId: remoteSessionId, sdp: testSdp),
-      from: SignalingOrigin.technician,
-    );
+///
+/// [sdp] is a parameter because a second, different offer is what a reloaded
+/// browser sends, and telling that from a repeat of the first one is a
+/// decision the WebRTC layer has to take.
+OfferReceived offerReceived({
+  String remoteSessionId = testRemoteSessionId,
+  String sdp = testSdp,
+}) => OfferReceived(
+  offer: WebRtcOffer(remoteSessionId: remoteSessionId, sdp: sdp),
+  from: SignalingOrigin.technician,
+);
 
 /// A parsed answer.
 AnswerReceived answerReceived({String remoteSessionId = testRemoteSessionId}) =>
