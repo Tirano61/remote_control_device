@@ -36,3 +36,13 @@ const int maxSdpMidLength = 64;
 /// `sdpMLineIndex`: `0-255` when present.
 const int minSdpMLineIndex = 0;
 const int maxSdpMLineIndex = 255;
+
+/// Server -> client. Announces that the *other* end of the same
+/// `RemoteSession` has joined its signaling room, so a message relayed now
+/// would land in a room that is no longer empty.
+///
+/// It is readiness, not a cue to negotiate. On this side it changes nothing
+/// about who creates the offer: `remote_control_web` is the offerer and the
+/// device answers, so the device records the fact and goes on waiting for
+/// `webrtc:offer`.
+const String remoteSessionPeerJoinedEvent = 'remote-session:peer-joined';

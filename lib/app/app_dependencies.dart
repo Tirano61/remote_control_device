@@ -35,6 +35,9 @@ import 'package:remote_control_device/features/support/domain/usecases/cancel_su
 import 'package:remote_control_device/features/support/domain/usecases/load_current_support_request.dart';
 import 'package:remote_control_device/features/support/domain/usecases/reject_support_request.dart';
 import 'package:remote_control_device/features/signaling/domain/signaling_client.dart';
+import 'package:remote_control_device/features/webrtc/data/flutter_webrtc_peer_connection_factory.dart';
+import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_ice_configuration.dart';
+import 'package:remote_control_device/features/webrtc/domain/webrtc_peer_client.dart';
 import 'package:remote_control_device/features/support/domain/usecases/request_support.dart';
 
 /// Composition root. Wiring lives here so that no layer has to reach for a
@@ -59,6 +62,8 @@ class AppDependencies {
     required this.cancelSupportRequest,
     required this.loadCurrentRemoteSession,
     required this.closeRemoteSession,
+    required this.peerConnectionFactory,
+    required this.iceConfiguration,
   });
 
   factory AppDependencies.bootstrap({
@@ -66,6 +71,7 @@ class AppDependencies {
     DeviceCredentialsStorage? credentialsStorage,
     DeviceInfoProvider? deviceInfoProvider,
     DeviceRealtimeChannel? realtimeChannel,
+    WebRtcPeerConnectionFactory? peerConnectionFactory,
   }) {
     final resolvedConfig = config ?? AppConfig.fromEnvironment();
     final tokenStore = InMemoryDeviceTokenStore();
@@ -140,6 +146,14 @@ class AppDependencies {
         remoteSessionRepository,
       ),
       closeRemoteSession: CloseRemoteSession(remoteSessionRepository),
+      // Constructing it opens nothing either: no peer connection exists until
+      // an offer arrives, and no media permission is involved at any point —
+      // this build captures neither camera, microphone nor screen.
+      peerConnectionFactory:
+          peerConnectionFactory ?? const FlutterWebRtcPeerConnectionFactory(),
+      iceConfiguration: WebRtcIceConfiguration.fromStunUrl(
+        resolvedConfig.webRtcStunUrl,
+      ),
     );
   }
 
@@ -183,4 +197,14 @@ class AppDependencies {
 
   final LoadCurrentRemoteSession loadCurrentRemoteSession;
   final CloseRemoteSession closeRemoteSession;
+
+  /// Builds the peer connection that answers `remote_control_web`. The only
+  /// reference to `flutter_webrtc` outside the WebRTC feature's data layer, and
+  /// injectable so that tests exercise the negotiation without a native
+  /// library no unit test can start.
+  final WebRtcPeerConnectionFactory peerConnectionFactory;
+
+  /// The ICE servers every peer connection is built with, read once from the
+  /// compile-time environment. Empty means host candidates only.
+  final WebRtcIceConfiguration iceConfiguration;
 }

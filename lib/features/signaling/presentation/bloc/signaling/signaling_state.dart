@@ -54,14 +54,27 @@ final class SignalingJoining extends SignalingState {
 /// authorises every relayed message against it, so anything else would be
 /// answered `NOT_JOINED`.
 final class SignalingJoined extends SignalingState {
-  const SignalingJoined(this.remoteSessionId);
+  const SignalingJoined(this.remoteSessionId, {required this.peerJoined});
 
   /// Echoed by the backend and checked against what was asked for. It is also
   /// the filter applied to every incoming message.
   final String remoteSessionId;
 
+  /// Whether the technician's socket is in the same session room.
+  ///
+  /// Starts as whatever the join ACK said and turns `true` on
+  /// `remote-session:peer-joined`. It never turns back: the contract has no
+  /// peer-left notice, so `true` here means "was seen to be there", which is
+  /// the honest reading and the only one the backend supports.
+  ///
+  /// Nothing in this application *acts* on it. The device is the answerer, and
+  /// creating a peer connection because the technician is ready would make both
+  /// ends offer at once. It is readiness for the user and for diagnostics; the
+  /// negotiation still starts at `webrtc:offer` and nowhere else.
+  final bool peerJoined;
+
   @override
-  List<Object?> get props => [remoteSessionId];
+  List<Object?> get props => [remoteSessionId, peerJoined];
 }
 
 /// Signaling is not usable for this session, and is not being retried on its

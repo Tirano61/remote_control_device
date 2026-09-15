@@ -81,6 +81,22 @@ final class SignalingRelayDenied extends SignalingEvent {
   List<Object?> get props => [remoteSessionId];
 }
 
+/// `remote-session:peer-joined` arrived: the technician's socket is now in the
+/// same session room.
+///
+/// Recorded, and nothing else. It is deliberately *not* a cue to negotiate —
+/// `remote_control_web` creates the offer and this device answers it, so a
+/// device that built a peer connection here would be the second end offering.
+/// What the WebRTC layer waits for is `webrtc:offer`.
+final class SignalingPeerReady extends SignalingEvent {
+  const SignalingPeerReady(this.remoteSessionId);
+
+  final String remoteSessionId;
+
+  @override
+  List<Object?> get props => [remoteSessionId];
+}
+
 /// Try the join again although nothing about the socket or the session has
 /// changed.
 ///

@@ -1,4 +1,5 @@
 import 'package:remote_control_device/features/signaling/domain/entities/join_remote_session_result.dart';
+import 'package:remote_control_device/features/signaling/domain/entities/remote_session_peer_readiness.dart';
 import 'package:remote_control_device/features/signaling/domain/entities/remote_signaling_message.dart';
 import 'package:remote_control_device/features/signaling/domain/entities/signaling_relay_result.dart';
 import 'package:remote_control_device/features/signaling/domain/entities/webrtc_answer.dart';
@@ -29,6 +30,17 @@ abstract interface class DeviceSignalingClient {
   /// joined to still appears here. Filtering by the joined session is a
   /// decision, and decisions live above the transport.
   Stream<RemoteSignalingMessage> get signalingMessages;
+
+  /// Every `remote-session:peer-joined` that arrived with a readable payload.
+  ///
+  /// Broadcast, and unfiltered for the same reason [signalingMessages] is:
+  /// deciding whether a notice concerns the session this client is joined to is
+  /// a decision, and decisions live above the transport.
+  ///
+  /// Kept apart from [signalingMessages] because it is not one: nothing here
+  /// carries SDP, nothing here is relayed from the peer, and nothing here is
+  /// ever applied to a peer connection.
+  Stream<RemoteSessionPeerReady> get peerReadiness;
 
   /// Emits `remote-session:join` and waits for its `JoinRemoteSessionAck`.
   ///

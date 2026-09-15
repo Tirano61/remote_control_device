@@ -6,11 +6,13 @@ import 'package:remote_control_device/app/device_realtime_coordinator.dart';
 import 'package:remote_control_device/app/remote_session_coordinator.dart';
 import 'package:remote_control_device/app/signaling_coordinator.dart';
 import 'package:remote_control_device/app/support_coordinator.dart';
+import 'package:remote_control_device/app/webrtc_coordinator.dart';
 import 'package:remote_control_device/features/device/presentation/bloc/realtime/device_realtime_bloc.dart';
 import 'package:remote_control_device/features/device/presentation/bloc/session/device_session_bloc.dart';
 import 'package:remote_control_device/features/remote_session/presentation/bloc/remote_session/remote_session_bloc.dart';
 import 'package:remote_control_device/features/signaling/presentation/bloc/signaling/signaling_bloc.dart';
 import 'package:remote_control_device/features/support/presentation/bloc/support/support_bloc.dart';
+import 'package:remote_control_device/features/webrtc/presentation/bloc/webrtc_session/webrtc_session_bloc.dart';
 
 /// Holds the application-wide blocs and the coordinators that keep them in
 /// step.
@@ -33,10 +35,12 @@ class _RemoteControlAppState extends State<RemoteControlApp> {
   late final SupportBloc _supportBloc;
   late final RemoteSessionBloc _remoteSessionBloc;
   late final SignalingBloc _signalingBloc;
+  late final WebRtcSessionBloc _webRtcBloc;
   late final DeviceRealtimeCoordinator _realtimeCoordinator;
   late final SupportCoordinator _supportCoordinator;
   late final RemoteSessionCoordinator _remoteSessionCoordinator;
   late final SignalingCoordinator _signalingCoordinator;
+  late final WebRtcCoordinator _webRtcCoordinator;
 
   @override
   void initState() {
@@ -70,6 +74,14 @@ class _RemoteControlAppState extends State<RemoteControlApp> {
     // handed only that port, so it can neither open, close nor observe the
     // connection — it can only join and relay over one that already exists.
     _signalingBloc = SignalingBloc(client: dependencies.signalingClient);
+    // The answering end of the peer connection. It is given the signaling bloc
+    // as a gateway — two methods, `sendAnswer` and `sendIceCandidate` — and
+    // cannot reach the socket, the join, or anything that would let it offer.
+    _webRtcBloc = WebRtcSessionBloc(
+      peerConnectionFactory: dependencies.peerConnectionFactory,
+      signaling: _signalingBloc,
+      iceConfiguration: dependencies.iceConfiguration,
+    );
 
     _realtimeCoordinator = DeviceRealtimeCoordinator(
       sessionBloc: _sessionBloc,
@@ -94,18 +106,27 @@ class _RemoteControlAppState extends State<RemoteControlApp> {
       remoteSessionBloc: _remoteSessionBloc,
       signalingBloc: _signalingBloc,
     )..start();
+    _webRtcCoordinator = WebRtcCoordinator(
+      signalingBloc: _signalingBloc,
+      remoteSessionBloc: _remoteSessionBloc,
+      webRtcBloc: _webRtcBloc,
+    )..start();
 
     _sessionBloc.add(const DeviceSessionStarted());
   }
 
   @override
   void dispose() {
+    _webRtcCoordinator.dispose();
     _signalingCoordinator.dispose();
     _remoteSessionCoordinator.dispose();
     _supportCoordinator.dispose();
     _realtimeCoordinator.dispose();
     // Closing the realtime bloc also disposes the socket, so no connection
-    // outlives the session it belonged to.
+    // outlives the session it belonged to. The WebRTC bloc goes first for the
+    // same reason applied to the peer connection: it closes its channel and
+    // its connection on the way out, so no P2P link outlives the application.
+    _webRtcBloc.close();
     _signalingBloc.close();
     _realtimeBloc.close();
     _remoteSessionBloc.close();
@@ -123,10 +144,11 @@ class _RemoteControlAppState extends State<RemoteControlApp> {
         BlocProvider<DeviceRealtimeBloc>.value(value: _realtimeBloc),
         BlocProvider<SupportBloc>.value(value: _supportBloc),
         BlocProvider<RemoteSessionBloc>.value(value: _remoteSessionBloc),
-        // Provided although no widget reads it today: it is the seam the
-        // WebRTC prompt attaches to, and it must live exactly as long as the
-        // other application-wide blocs.
+        // Provided although no widget reads it: it is the seam the WebRTC
+        // layer attaches to, and it must live exactly as long as the other
+        // application-wide blocs.
         BlocProvider<SignalingBloc>.value(value: _signalingBloc),
+        BlocProvider<WebRtcSessionBloc>.value(value: _webRtcBloc),
       ],
       child: MaterialApp(
         title: 'Asistencia remota',

@@ -42,12 +42,86 @@ void main() {
     await settle();
   }
 
+  group('peer readiness', () {
+    test('the ACK carries whether the technician was already there', () async {
+      client.joinResult = const RemoteSessionJoined('', peerJoined: true);
+      await join();
+
+      expect(
+        bloc.state,
+        const SignalingJoined(testRemoteSessionId, peerJoined: true),
+      );
+      expect(bloc.peerJoined, isTrue);
+    });
+
+    test('a peer arriving later turns readiness on', () async {
+      await join();
+      expect(bloc.peerJoined, isFalse);
+
+      await client.deliverPeerReady(testRemoteSessionId);
+      await settle();
+
+      expect(
+        bloc.state,
+        const SignalingJoined(testRemoteSessionId, peerJoined: true),
+      );
+    });
+
+    test('readiness never starts anything on this side', () async {
+      // The device is the answerer. Learning that the technician is in the room
+      // must not make it relay — it has nothing to relay until an offer
+      // arrives, and a device that acted here would be the second end
+      // offering.
+      client.joinResult = const RemoteSessionJoined('', peerJoined: true);
+      await join();
+      await client.deliverPeerReady(testRemoteSessionId);
+      await settle();
+
+      expect(client.relayCount, 0);
+      expect(client.sentOffers, isEmpty);
+    });
+
+    test('a notice about another session is not believed', () async {
+      await join();
+
+      await client.deliverPeerReady(testOtherRemoteSessionId);
+      await settle();
+
+      expect(
+        bloc.state,
+        const SignalingJoined(testRemoteSessionId, peerJoined: false),
+      );
+    });
+
+    test('a notice arriving while not joined changes nothing', () async {
+      await client.deliverPeerReady(testRemoteSessionId);
+      await settle();
+
+      expect(bloc.state, const SignalingIdle());
+      expect(bloc.peerJoined, isFalse);
+    });
+
+    test('readiness does not survive the join it described', () async {
+      client.joinResult = const RemoteSessionJoined('', peerJoined: true);
+      await join();
+      expect(bloc.peerJoined, isTrue);
+
+      // A Socket.IO room does not survive its socket, and neither does anything
+      // that was true about it.
+      bloc.add(const SignalingConnectionLost());
+      await settle();
+
+      expect(bloc.state, const SignalingIdle());
+      expect(bloc.peerJoined, isFalse);
+    });
+  });
+
   group('joining', () {
     test('a join that is accepted leaves the client able to relay', () async {
       await join();
 
       expect(client.joinedSessionIds, [testRemoteSessionId]);
-      expect(bloc.state, const SignalingJoined(testRemoteSessionId));
+      expect(bloc.state, const SignalingJoined(testRemoteSessionId, peerJoined: false));
       expect(bloc.joinedRemoteSessionId, testRemoteSessionId);
     });
 
@@ -63,7 +137,7 @@ void main() {
 
       gate.complete();
       await settle();
-      expect(bloc.state, const SignalingJoined(testRemoteSessionId));
+      expect(bloc.state, const SignalingJoined(testRemoteSessionId, peerJoined: false));
     });
 
     test('repeating the same announcement does not join twice', () async {
@@ -90,7 +164,7 @@ void main() {
       expect(client.joinedSessionIds, [testRemoteSessionId]);
       gate.complete();
       await settle();
-      expect(bloc.state, const SignalingJoined(testRemoteSessionId));
+      expect(bloc.state, const SignalingJoined(testRemoteSessionId, peerJoined: false));
     });
 
     test('a different session replaces the old membership', () async {
@@ -101,7 +175,7 @@ void main() {
         testRemoteSessionId,
         testOtherRemoteSessionId,
       ]);
-      expect(bloc.state, const SignalingJoined(testOtherRemoteSessionId));
+      expect(bloc.state, const SignalingJoined(testOtherRemoteSessionId, peerJoined: false));
     });
 
     test('a late ACK for an abandoned join is discarded', () async {
@@ -147,7 +221,7 @@ void main() {
         testRemoteSessionId,
         testRemoteSessionId,
       ]);
-      expect(bloc.state, const SignalingJoined(testRemoteSessionId));
+      expect(bloc.state, const SignalingJoined(testRemoteSessionId, peerJoined: false));
     });
 
     test('a session that ended clears the membership', () async {
@@ -234,7 +308,7 @@ void main() {
       await join();
 
       expect(client.joinedSessionIds, hasLength(2));
-      expect(bloc.state, const SignalingJoined(testRemoteSessionId));
+      expect(bloc.state, const SignalingJoined(testRemoteSessionId, peerJoined: false));
     });
 
     test('a different session is a real change too', () async {
@@ -245,7 +319,7 @@ void main() {
 
       await join(testOtherRemoteSessionId);
 
-      expect(bloc.state, const SignalingJoined(testOtherRemoteSessionId));
+      expect(bloc.state, const SignalingJoined(testOtherRemoteSessionId, peerJoined: false));
     });
 
     test('an explicit retry is the deliberate way out', () async {
@@ -258,7 +332,7 @@ void main() {
       await settle();
 
       expect(client.joinedSessionIds, hasLength(2));
-      expect(bloc.state, const SignalingJoined(testRemoteSessionId));
+      expect(bloc.state, const SignalingJoined(testRemoteSessionId, peerJoined: false));
     });
 
     test('a retry with nothing to retry does nothing', () async {
@@ -354,7 +428,7 @@ void main() {
       );
       // A transient server-side condition says nothing about the join, so it
       // touches nothing — and the message is not resent on its own.
-      expect(bloc.state, const SignalingJoined(testRemoteSessionId));
+      expect(bloc.state, const SignalingJoined(testRemoteSessionId, peerJoined: false));
       expect(client.sentOffers, hasLength(1));
     });
 
@@ -398,7 +472,7 @@ void main() {
       expect(result, isA<SignalingRelayDelivered>());
       // Deliberately no "the technician has the offer" state anywhere: if the
       // other end has not joined, the room is empty and the message is dropped.
-      expect(bloc.state, const SignalingJoined(testRemoteSessionId));
+      expect(bloc.state, const SignalingJoined(testRemoteSessionId, peerJoined: false));
     });
 
     test('NOT_JOINED sends the client back through the join, not through a '
@@ -420,7 +494,7 @@ void main() {
         testRemoteSessionId,
         testRemoteSessionId,
       ]);
-      expect(bloc.state, const SignalingJoined(testRemoteSessionId));
+      expect(bloc.state, const SignalingJoined(testRemoteSessionId, peerJoined: false));
       // ...and the refused offer was not put on the wire a second time.
       expect(client.sentOffers, hasLength(1));
     });
@@ -478,7 +552,7 @@ void main() {
 
       expect(received, isEmpty);
       // And above all the client did not switch to the session it named.
-      expect(bloc.state, const SignalingJoined(testRemoteSessionId));
+      expect(bloc.state, const SignalingJoined(testRemoteSessionId, peerJoined: false));
       await subscription.cancel();
     });
 

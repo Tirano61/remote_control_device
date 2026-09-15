@@ -14,6 +14,7 @@
 class AppConfig {
   const AppConfig({
     required this.backendBaseUrl,
+    this.webRtcStunUrl = '',
     this.connectTimeout = const Duration(seconds: 10),
     this.sendTimeout = const Duration(seconds: 15),
     this.receiveTimeout = const Duration(seconds: 15),
@@ -25,14 +26,22 @@ class AppConfig {
   });
 
   /// Builds the configuration from the compile-time environment.
-  factory AppConfig.fromEnvironment() =>
-      const AppConfig(backendBaseUrl: _backendBaseUrlFromEnvironment);
+  factory AppConfig.fromEnvironment() => const AppConfig(
+    backendBaseUrl: _backendBaseUrlFromEnvironment,
+    webRtcStunUrl: _webRtcStunUrlFromEnvironment,
+  );
 
   static const String defaultBackendBaseUrl = 'http://10.0.2.2:3000';
 
   static const String _backendBaseUrlFromEnvironment = String.fromEnvironment(
     'BACKEND_BASE_URL',
     defaultValue: defaultBackendBaseUrl,
+  );
+
+  /// Empty unless the define is given, which is what "no ICE servers" is
+  /// spelled as here. `String.fromEnvironment` cannot be null.
+  static const String _webRtcStunUrlFromEnvironment = String.fromEnvironment(
+    'WEBRTC_STUN_URL',
   );
 
   /// Socket.IO namespace this client is allowed to use, per `REALTIME.md`.
@@ -44,6 +53,25 @@ class AppConfig {
   /// The backend registers no global prefix, so routes hang directly off this
   /// URL (`<baseUrl>/device-auth/login`).
   final String backendBaseUrl;
+
+  /// The single STUN server the peer connection is built with, injected the
+  /// same way and under the same name as in `remote_control_web`:
+  ///
+  /// ```text
+  /// flutter run --dart-define=WEBRTC_STUN_URL=stun:stun.l.google.com:19302
+  /// ```
+  ///
+  /// Empty by default, which means no ICE servers at all — host candidates
+  /// only. That is the right default for the LAN test this stage aims at, where
+  /// a public STUN server adds a round trip and discovers an address neither
+  /// end needs.
+  ///
+  /// Both clients must be configured alike for a real test, and STUN is not a
+  /// guarantee: it discovers a public address, it does not relay, so two peers
+  /// behind restrictive NATs still will not connect. That is what TURN is for,
+  /// and TURN is deliberately not configured here — it needs a server and
+  /// credentials, and a credential compiled into an APK is not a credential.
+  final String webRtcStunUrl;
 
   final Duration connectTimeout;
   final Duration sendTimeout;

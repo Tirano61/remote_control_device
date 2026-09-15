@@ -1,5 +1,6 @@
 import 'package:remote_control_device/features/signaling/data/signaling_events.dart';
 import 'package:remote_control_device/features/signaling/domain/entities/join_remote_session_result.dart';
+import 'package:remote_control_device/features/signaling/domain/entities/remote_session_peer_readiness.dart';
 import 'package:remote_control_device/features/signaling/domain/entities/remote_signaling_message.dart';
 import 'package:remote_control_device/features/signaling/domain/entities/signaling_error_code.dart';
 import 'package:remote_control_device/features/signaling/domain/entities/signaling_origin.dart';
@@ -104,13 +105,21 @@ Map<String, dynamic>? buildWebRtcIceCandidatePayload(
 /// Reads a `JoinRemoteSessionAck`:
 ///
 /// ```json
-/// { "joined": true,  "remoteSessionId": "..." }
+/// { "joined": true,  "remoteSessionId": "...", "peerJoined": true }
 /// { "joined": false, "error": "UNAUTHORIZED" }
 /// ```
 ///
-/// Anything else — no answer, a non-object, `joined` missing, or `joined: true`
-/// without a usable id — is [RemoteSessionJoinUnanswered]. A malformed ACK is
-/// the absence of a verdict, and must not be read as one.
+/// Anything else — no answer, a non-object, `joined` missing, `joined: true`
+/// without a usable id, or `joined: true` without a boolean `peerJoined` — is
+/// [RemoteSessionJoinUnanswered]. A malformed ACK is the absence of a verdict,
+/// and must not be read as one.
+///
+/// `peerJoined` is required rather than defaulted on purpose. Defaulting it to
+/// `false` would let a build that cannot read the ACK report "the technician is
+/// not there" as though the backend had said so, and defaulting it to `true`
+/// would claim the opposite; both are this client inventing half of an answer
+/// it did not get. Refusing the whole ACK keeps one rule intact — a join is
+/// accepted only when every field the contract promises was actually read.
 JoinRemoteSessionResult parseJoinRemoteSessionAck(Object? ack) {
   if (ack is! Map) return const RemoteSessionJoinUnanswered();
 
@@ -120,12 +129,34 @@ JoinRemoteSessionResult parseJoinRemoteSessionAck(Object? ack) {
     if (remoteSessionId is! String || remoteSessionId.isEmpty) {
       return const RemoteSessionJoinUnanswered();
     }
-    return RemoteSessionJoined(remoteSessionId);
+    final peerJoined = ack['peerJoined'];
+    if (peerJoined is! bool) return const RemoteSessionJoinUnanswered();
+
+    return RemoteSessionJoined(remoteSessionId, peerJoined: peerJoined);
   }
   if (joined == false) {
     return RemoteSessionJoinRefused(parseSignalingErrorCode(ack['error']));
   }
   return const RemoteSessionJoinUnanswered();
+}
+
+/// Reads a `remote-session:peer-joined` payload:
+///
+/// ```json
+/// { "remoteSessionId": "3d1b9e64-..." }
+/// ```
+///
+/// Only the id is read, and it is only ever *compared* to the session this
+/// client already joined — never adopted. Returns `null` for anything else, so
+/// a payload this build cannot read produces no readiness at all rather than a
+/// half-built one.
+RemoteSessionPeerReady? parseRemoteSessionPeerJoinedPayload(Object? payload) {
+  if (payload is! Map) return null;
+
+  final remoteSessionId = payload['remoteSessionId'];
+  if (remoteSessionId is! String || remoteSessionId.isEmpty) return null;
+
+  return RemoteSessionPeerReady(remoteSessionId);
 }
 
 /// Reads a `SignalingRelayAck`:

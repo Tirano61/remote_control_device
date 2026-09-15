@@ -2,6 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:remote_control_device/features/signaling/data/signaling_events.dart';
 import 'package:remote_control_device/features/signaling/data/signaling_payloads.dart';
 import 'package:remote_control_device/features/signaling/domain/entities/join_remote_session_result.dart';
+import 'package:remote_control_device/features/signaling/domain/entities/remote_session_peer_readiness.dart';
 import 'package:remote_control_device/features/signaling/domain/entities/remote_signaling_message.dart';
 import 'package:remote_control_device/features/signaling/domain/entities/signaling_error_code.dart';
 import 'package:remote_control_device/features/signaling/domain/entities/signaling_origin.dart';
@@ -27,6 +28,49 @@ void main() {
       expect(webRtcOfferEvent, 'webrtc:offer');
       expect(webRtcAnswerEvent, 'webrtc:answer');
       expect(webRtcIceCandidateEvent, 'webrtc:ice-candidate');
+      expect(remoteSessionPeerJoinedEvent, 'remote-session:peer-joined');
+    });
+  });
+
+  group('remote-session:peer-joined', () {
+    test('is read as the documented payload', () {
+      expect(
+        parseRemoteSessionPeerJoinedPayload({
+          'remoteSessionId': testRemoteSessionId,
+        }),
+        const RemoteSessionPeerReady(testRemoteSessionId),
+      );
+    });
+
+    test('a session id is all it needs, and all it is read for', () {
+      // Later fields must not void a notice this build can already act on —
+      // and the only thing it acts on is comparing the id with the session it
+      // is joined to.
+      expect(
+        parseRemoteSessionPeerJoinedPayload({
+          'remoteSessionId': testRemoteSessionId,
+          'somethingAddedLater': 42,
+        }),
+        const RemoteSessionPeerReady(testRemoteSessionId),
+      );
+    });
+
+    test('malformed payloads produce no readiness at all', () {
+      expect(parseRemoteSessionPeerJoinedPayload(null), isNull);
+      expect(parseRemoteSessionPeerJoinedPayload(const []), isNull);
+      expect(parseRemoteSessionPeerJoinedPayload('peer'), isNull);
+      expect(
+        parseRemoteSessionPeerJoinedPayload(const <String, Object?>{}),
+        isNull,
+      );
+      expect(
+        parseRemoteSessionPeerJoinedPayload({'remoteSessionId': ''}),
+        isNull,
+      );
+      expect(
+        parseRemoteSessionPeerJoinedPayload({'remoteSessionId': 42}),
+        isNull,
+      );
     });
   });
 
@@ -60,12 +104,53 @@ void main() {
 
   group('JoinRemoteSessionAck', () {
     test('the accepted shape is read as documented', () {
-      final result = parseJoinRemoteSessionAck({
-        'joined': true,
-        'remoteSessionId': testRemoteSessionId,
-      });
+      // Readiness travels with the acceptance: the ACK says whether the
+      // technician's socket was already in the same session room.
+      expect(
+        parseJoinRemoteSessionAck({
+          'joined': true,
+          'remoteSessionId': testRemoteSessionId,
+          'peerJoined': true,
+        }),
+        const RemoteSessionJoined(testRemoteSessionId, peerJoined: true),
+      );
+      expect(
+        parseJoinRemoteSessionAck({
+          'joined': true,
+          'remoteSessionId': testRemoteSessionId,
+          'peerJoined': false,
+        }),
+        const RemoteSessionJoined(testRemoteSessionId, peerJoined: false),
+      );
+    });
 
-      expect(result, const RemoteSessionJoined(testRemoteSessionId));
+    test('a join without a readable peerJoined is not an acceptance', () {
+      // Never defaulted. A `false` invented here would report "the technician
+      // is not there" as though the backend had said so, and a `true` would
+      // claim the opposite; both are half an answer presented as a whole one.
+      expect(
+        parseJoinRemoteSessionAck({
+          'joined': true,
+          'remoteSessionId': testRemoteSessionId,
+        }),
+        const RemoteSessionJoinUnanswered(),
+      );
+      expect(
+        parseJoinRemoteSessionAck({
+          'joined': true,
+          'remoteSessionId': testRemoteSessionId,
+          'peerJoined': 'true',
+        }),
+        const RemoteSessionJoinUnanswered(),
+      );
+      expect(
+        parseJoinRemoteSessionAck({
+          'joined': true,
+          'remoteSessionId': testRemoteSessionId,
+          'peerJoined': null,
+        }),
+        const RemoteSessionJoinUnanswered(),
+      );
     });
 
     test('the rejected shape is read as documented', () {
@@ -110,6 +195,10 @@ void main() {
       );
       expect(
         parseJoinRemoteSessionAck({'joined': true}),
+        const RemoteSessionJoinUnanswered(),
+      );
+      expect(
+        parseJoinRemoteSessionAck({'joined': true, 'peerJoined': true}),
         const RemoteSessionJoinUnanswered(),
       );
     });

@@ -1,6 +1,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    
+    
     <!-- The device talks to remote_control_backend over HTTP(S). -->
-    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.INTERNET"/>   
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    
+    
     <application
         android:label="remote_control_device"
         android:name="${applicationName}"

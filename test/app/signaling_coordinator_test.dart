@@ -170,7 +170,7 @@ void main() {
 
     expect(remoteSessionBloc.state, isA<RemoteSessionConnecting>());
     expect(client.joinedSessionIds, [testRemoteSessionId]);
-    expect(signalingBloc.state, const SignalingJoined(testRemoteSessionId));
+    expect(signalingBloc.state, const SignalingJoined(testRemoteSessionId, peerJoined: false));
   });
 
   test('this is also the restart story', () async {
@@ -231,7 +231,7 @@ void main() {
       testRemoteSessionId,
       testRemoteSessionId,
     ]);
-    expect(signalingBloc.state, const SignalingJoined(testRemoteSessionId));
+    expect(signalingBloc.state, const SignalingJoined(testRemoteSessionId, peerJoined: false));
   });
 
   test('remote-session:created leads to exactly one join', () async {
@@ -277,7 +277,7 @@ void main() {
       () async {
     remoteSessionRepository.currentResult = connectingRemoteSession;
     await reachConnected();
-    expect(signalingBloc.state, const SignalingJoined(testRemoteSessionId));
+    expect(signalingBloc.state, const SignalingJoined(testRemoteSessionId, peerJoined: false));
 
     // Session A closes and session B is created. Only B can be joined now.
     const sessionB = RemoteSession(
@@ -296,7 +296,7 @@ void main() {
     ]);
     expect(
       signalingBloc.state,
-      const SignalingJoined(testOtherRemoteSessionId),
+      const SignalingJoined(testOtherRemoteSessionId, peerJoined: false),
     );
   });
 
@@ -402,14 +402,14 @@ void main() {
       await reachConnected();
       expect(client.joinedSessionIds, hasLength(1));
 
-      client.joinResult = const RemoteSessionJoined('');
+      client.joinResult = const RemoteSessionJoined('', peerJoined: false);
       await client.emit(const RealtimeDisconnected());
       await settle();
       await client.emit(const RealtimeConnected());
       await settle();
 
       expect(client.joinedSessionIds, hasLength(2));
-      expect(signalingBloc.state, const SignalingJoined(testRemoteSessionId));
+      expect(signalingBloc.state, const SignalingJoined(testRemoteSessionId, peerJoined: false));
     });
   });
 
@@ -472,13 +472,13 @@ void main() {
     await reachConnected();
     expect(signalingBloc.state, const SignalingUnavailable(testRemoteSessionId));
 
-    client.joinResult = const RemoteSessionJoined('');
+    client.joinResult = const RemoteSessionJoined('', peerJoined: false);
     await client.emit(const RealtimeDisconnected());
     await client.emit(const RealtimeConnected());
     await settle();
 
     expect(client.joinedSessionIds, hasLength(2));
-    expect(signalingBloc.state, const SignalingJoined(testRemoteSessionId));
+    expect(signalingBloc.state, const SignalingJoined(testRemoteSessionId, peerJoined: false));
   });
 
   test('the offer the WebRTC prompt will send reaches the wire unchanged',

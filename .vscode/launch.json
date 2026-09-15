@@ -1,0 +1,78 @@
+{
+  // Configuraciones de Run and Debug para remote_control_device.
+  //
+  // La app lee BACKEND_BASE_URL y WEBRTC_STUN_URL en tiempo de compilación con
+  // String.fromEnvironment (lib/core/config/app_config.dart). Cada configuración
+  // inyecta esos valores con --dart-define mediante "toolArgs", que la extensión
+  // de Dart pasa a `flutter run`. No hay JSON de configuración en assets ni URLs
+  // en código Dart: para cambiar una URL, editar este archivo y volver a lanzar.
+  //
+  // WEBRTC_STUN_URL se deja vacío a propósito (sin servidores ICE: sólo
+  // candidatos host, suficiente para pruebas en LAN). Cuando haga falta un
+  // STUN, cambiar esa línea aquí; ambos clientes (device y web) deben coincidir.
+  "version": "0.2.0",
+  "configurations": [
+    {
+      // Backend NestJS expuesto por VS Code Dev Tunnel.
+      // Si la URL del túnel cambia, sólo hace falta actualizar esta línea.
+      "name": "remote_control_device - Dev Tunnel",
+      "type": "dart",
+      "request": "launch",
+      "program": "lib/main.dart",
+      "toolArgs": [
+        "--dart-define=BACKEND_BASE_URL=https://w4qb7jsw-3000.brs.devtunnels.ms",
+        "--dart-define=WEBRTC_STUN_URL="
+      ]
+    },
+    {
+      // Tablet Android FÍSICA contra NestJS corriendo en la PC de desarrollo.
+      // Reemplazar 192.168.1.100 por la IP LAN de la PC que ejecuta
+      // remote_control_backend (ipconfig -> "Dirección IPv4"). No usar
+      // localhost, 127.0.0.1 ni 10.0.2.2: desde una tablet física esas
+      // direcciones no apuntan a la PC.
+      "name": "remote_control_device - Local Backend",
+      "type": "dart",
+      "request": "launch",
+      "program": "lib/main.dart",
+      "toolArgs": [
+        "--dart-define=BACKEND_BASE_URL=http://192.168.1.100:3000",
+        "--dart-define=WEBRTC_STUN_URL="
+      ]
+    },
+    {
+      // EMULADOR Android (no tablet física): 10.0.2.2 es el alias del
+      // localhost de la PC visto desde el emulador. Coincide con el valor por
+      // defecto de AppConfig; se declara explícito para no confundirlo con la
+      // configuración de tablet física de arriba.
+      "name": "remote_control_device - Android Emulator",
+      "type": "dart",
+      "request": "launch",
+      "program": "lib/main.dart",
+      "toolArgs": [
+        "--dart-define=BACKEND_BASE_URL=http://10.0.2.2:3000",
+        "--dart-define=WEBRTC_STUN_URL="
+      ]
+    },
+    {
+      // RELEASE en el dispositivo: ejecuta `flutter run --release` con la URL
+      // del backend productivo. Sin depurador ni hot reload; sirve para probar
+      // el comportamiento real de release (por ejemplo, el bloqueo de http://).
+      //
+      // Reemplazar api.example.com por el dominio real. Debe ser https://
+      // obligatoriamente: los builds release no permiten tráfico cleartext, y
+      // la URL del socket (wss://) se deriva de este mismo valor.
+      //
+      // Esto NO genera el APK distribuible. Para eso usar la línea de comandos:
+      //   flutter build apk --release --dart-define=BACKEND_BASE_URL=https://...
+      "name": "remote_control_device - Release",
+      "type": "dart",
+      "request": "launch",
+      "program": "lib/main.dart",
+      "flutterMode": "release",
+      "toolArgs": [
+        "--dart-define=BACKEND_BASE_URL=https://api.example.com",
+        "--dart-define=WEBRTC_STUN_URL="
+      ]
+    }
+  ]
+}

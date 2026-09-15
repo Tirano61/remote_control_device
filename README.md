@@ -40,6 +40,38 @@ BACKEND_BASE_URL + /devices
 which is the form `socket_io_client` needs, because it reads the namespace from
 the URL path.
 
+## VS Code Run/Debug
+
+[.vscode/launch.json](.vscode/launch.json) ships ready-made *Run and Debug*
+configurations so the `--dart-define`s above never have to be typed by hand.
+Pick one in the Run and Debug view and press F5; it runs `lib/main.dart` on the
+device currently selected in VS Code:
+
+```text
+remote_control_device - Dev Tunnel         backend behind a VS Code Dev Tunnel
+remote_control_device - Local Backend      physical tablet -> NestJS on the LAN
+remote_control_device - Android Emulator   emulator -> host machine via 10.0.2.2
+remote_control_device - Release            flutter run --release, production URL
+```
+
+`Release` runs a release build on the selected device with the production
+`https://` URL (placeholder `api.example.com`); there is no debugger or hot
+reload in that mode. It does not produce the distributable APK, which is still
+built from the command line as shown above.
+
+`Local Backend` carries a placeholder IP (`192.168.1.100`); replace it with the
+LAN address of the machine running `remote_control_backend`. `localhost`,
+`127.0.0.1` and `10.0.2.2` do not reach the PC from a physical tablet.
+
+When the Dev Tunnel URL changes, edit the `BACKEND_BASE_URL` line of that
+configuration in `.vscode/launch.json` and launch again. No Dart code changes,
+no configuration assets: the source of the value during debugging is still the
+`--dart-define` that VS Code injects. `WEBRTC_STUN_URL` is left empty there on
+purpose (host candidates only); it can be filled in the same way later.
+
+Only `launch.json` is versioned; the rest of `.vscode/` is personal and
+ignored.
+
 ## Current scope
 
 Implemented so far:
