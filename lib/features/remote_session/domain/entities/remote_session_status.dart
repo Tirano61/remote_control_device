@@ -8,9 +8,10 @@ enum RemoteSessionStatus {
   /// backend creates today starts — and stays — here.
   connecting,
 
-  /// Reserved by the contract. No backend path writes it today, and this client
-  /// never writes it either: it is supported so that the day the backend starts
-  /// using it, the tablet reads it instead of being surprised by it.
+  /// The remote connection is established. Written by one backend path only —
+  /// `POST /remote-sessions/:id/activate`, which the technician calls once
+  /// WebRTC is connected and the control channel is open — and never by this
+  /// client, which has no such call and only ever reads the result.
   active,
 
   /// The session ended. Terminal, and never returned by

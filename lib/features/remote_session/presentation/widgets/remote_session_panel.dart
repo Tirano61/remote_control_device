@@ -15,19 +15,26 @@ import 'package:remote_control_device/features/webrtc/presentation/bloc/webrtc_s
 /// "sharing your screen", which would be a promise the application cannot keep.
 ///
 /// It reads two states because the user's question spans both, and the two are
-/// allowed to disagree:
+/// allowed to disagree for a moment:
 ///
 /// ```text
-/// RemoteSession   the backend row. Stays CONNECTING; the current backend has
-///                 no transition to ACTIVE at all.
+/// RemoteSession   the backend row. CONNECTING until the technician reports
+///                 the connection with POST /remote-sessions/:id/activate,
+///                 then ACTIVE.
 /// WebRTC          the peer connection. Reaches connected on its own, with the
-///                 control channel open, while the row above has not moved.
+///                 control channel open, a beat before the row moves.
 /// ```
 ///
-/// So the headline prefers the WebRTC fact once it holds. "Connecting to the
-/// technician" is true until the two ends have actually found each other and
-/// false afterwards, whatever the row still says. The button is untouched
-/// either way — ending the assistance is available at every moment of this.
+/// `ACTIVE` is the same fact as the WebRTC one, confirmed by the backend and
+/// agreed by both ends, so it is the headline: *Asistencia en curso*. The local
+/// reading then becomes the supporting line, *Conexión remota establecida* —
+/// the two say one thing together instead of contradicting each other.
+///
+/// In the window before the row moves, the local reading is all there is, and
+/// it is still preferred over the row: "connecting to the technician" is false
+/// once the two ends have found each other, whatever the row has not yet said.
+/// The button is untouched throughout — ending the assistance is available at
+/// every moment of this.
 ///
 /// The connection line is the other honest bit. If the socket is down the
 /// session is *not* assumed to be over: the last state the backend gave stands,
@@ -77,6 +84,9 @@ class RemoteSessionPanel extends StatelessWidget {
     required bool connected,
     required bool established,
   }) {
+    final detail = _detail(connected: connected, established: established);
+    final connectedSince = _connectedSince(connected: connected);
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -86,6 +96,19 @@ class RemoteSessionPanel extends StatelessWidget {
           _headline(connected: connected, established: established),
           style: theme.textTheme.headlineSmall,
         ),
+        if (detail != null) ...[
+          const SizedBox(height: 8),
+          Text(detail, style: theme.textTheme.bodyMedium),
+        ],
+        if (connectedSince != null) ...[
+          const SizedBox(height: 4),
+          Text(
+            'Conectado desde: $connectedSince',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.outline,
+            ),
+          ),
+        ],
         if (technician != null) ...[
           const SizedBox(height: 8),
           Text(
@@ -120,29 +143,63 @@ class RemoteSessionPanel extends StatelessWidget {
   }
 
   /// The one line that tells the user what is happening, in this order of
-  /// precedence: an action of their own, a connection they have lost, the peer
-  /// connection actually being up, and only then the status the backend
-  /// reported.
+  /// precedence: an action of their own, a connection they have lost, and then
+  /// what the assistance actually is.
   ///
-  /// The third of those is why [established] exists. The backend leaves the
-  /// session at `CONNECTING` — no path moves it to `ACTIVE` — so a tablet that
-  /// waited for the row would say "connecting to the technician" for the whole
-  /// of a working session. What the user is being told here is whether the two
-  /// ends found each other, which is a fact this application holds and the row
-  /// does not.
+  /// That last part is the whole change `ACTIVE` brings. The backend now writes
+  /// it when the technician reports the connection, so the row is no longer
+  /// permanently behind the peer connection and there is no reason to talk
+  /// around it: `ACTIVE` is the state both ends and the backend agree on, and
+  /// it is what the user is told.
+  ///
+  /// [established] still decides the `CONNECTING` line, because there is a real
+  /// window — the peer connection comes up, and the technician's `/activate`
+  /// and its event follow — in which the local reading is the only one there
+  /// is. Saying "connecting to the technician" then would be false.
   String _headline({required bool connected, required bool established}) {
     if (state.closing) return 'Finalizando la asistencia...';
     if (!connected) return 'Reconectando...';
-    // Deliberately not "sharing your screen": nothing is captured and nothing
-    // is controlled in this build. The link exists; that is the whole claim.
-    if (established) return 'Conexión remota establecida';
 
     return switch (state) {
-      RemoteSessionConnecting() => 'Conectando con el técnico...',
-      // Reserved by the contract and not written by any backend path today.
-      // Shown without claiming that a screen is being shared or controlled.
+      // Deliberately not "sharing your screen": nothing is captured and nothing
+      // is controlled in this build.
       RemoteSessionActive() => 'Asistencia en curso',
+      RemoteSessionConnecting() => established
+          ? 'Conexión remota establecida'
+          : 'Conectando con el técnico...',
     };
+  }
+
+  /// The supporting line under the headline, or `null`.
+  ///
+  /// Only one thing is ever said here, and only while the headline is
+  /// `Asistencia en curso`: that the link this tablet holds is up. Under any
+  /// other headline it would either repeat it — the `CONNECTING` case already
+  /// says exactly this — or contradict it, which is what the "reconnecting" and
+  /// "finishing" cases are protected from by [_headline] having returned first.
+  String? _detail({required bool connected, required bool established}) {
+    if (state.closing || !connected) return null;
+    if (state is! RemoteSessionActive) return null;
+
+    return established ? 'Conexión remota establecida' : null;
+  }
+
+  /// `HH:mm` of `connectedAt`, in the tablet's local time, or `null`.
+  ///
+  /// Shown only for an `ACTIVE` session, because only an activated one has the
+  /// field at all. The instant comes from the backend and is merely rendered
+  /// here: nothing measures elapsed time, and nothing is filled in when the
+  /// field is absent.
+  String? _connectedSince({required bool connected}) {
+    if (state.closing || !connected) return null;
+    if (state is! RemoteSessionActive) return null;
+
+    final connectedAt = state.session.connectedAt?.toLocal();
+    if (connectedAt == null) return null;
+
+    final hour = connectedAt.hour.toString().padLeft(2, '0');
+    final minute = connectedAt.minute.toString().padLeft(2, '0');
+    return '$hour:$minute';
   }
 }
 

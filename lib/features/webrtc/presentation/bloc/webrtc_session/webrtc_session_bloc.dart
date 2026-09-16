@@ -59,10 +59,13 @@ part 'webrtc_session_state.dart';
 /// would tear the replacement down.
 ///
 /// Finally, this bloc never touches the `RemoteSession`. The contract is
-/// explicit that signaling changes no backend row, and the current backend has
-/// no `CONNECTING -> ACTIVE` transition at all, so a session reading
-/// `CONNECTING` while this reads [WebRtcConnected] is the expected outcome and
-/// not a discrepancy to paper over.
+/// explicit that signaling changes no backend row, and the only path to
+/// `ACTIVE` is the technician's `POST /remote-sessions/:id/activate` — so a
+/// session reading `CONNECTING` while this reads [WebRtcConnected] is the
+/// expected outcome for as long as that call takes, and not a discrepancy to
+/// paper over. When the row does move, nothing here moves with it: `ACTIVE` is
+/// a backend fact about a connection this bloc already holds, and renegotiating
+/// on it would break the very connection it reports.
 class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   WebRtcSessionBloc({
     required WebRtcPeerConnectionFactory peerConnectionFactory,

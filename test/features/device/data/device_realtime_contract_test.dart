@@ -26,6 +26,7 @@ void main() {
           deviceConnectedEvent,
           supportAssignedEvent,
           remoteSessionCreatedEvent,
+          remoteSessionActiveEvent,
           remoteSessionClosedEvent,
           webRtcOfferEvent,
           webRtcAnswerEvent,
@@ -35,6 +36,7 @@ void main() {
           'device:connected',
           'support:assigned',
           'remote-session:created',
+          'remote-session:active',
           'remote-session:closed',
           'webrtc:offer',
           'webrtc:answer',
@@ -352,6 +354,59 @@ void main() {
         testSupportRequestId,
         testTechnicianId,
       ]);
+    });
+  });
+
+  group('remote-session:active payload', () {
+    test('is read as documented: one field, and it is the session id', () {
+      final signal = parseRemoteSessionActivePayload({
+        'remoteSessionId': testRemoteSessionId,
+      });
+
+      expect(signal, isNotNull);
+      expect(signal!.remoteSessionId, testRemoteSessionId);
+      // "The payload is deliberately minimal." Nothing else is carried, and in
+      // particular no status and no connectedAt: those come from REST.
+      expect(signal.props, [testRemoteSessionId]);
+    });
+
+    test('the event name matches the contract', () {
+      expect(remoteSessionActiveEvent, 'remote-session:active');
+    });
+
+    test('the same event name serves both namespaces', () {
+      // `/devices` and `/technicians` receive the same name and the same
+      // payload — one contract for one fact — so there is no device-specific
+      // spelling to get wrong.
+      expect(remoteSessionActiveEvent, isNot(remoteSessionCreatedEvent));
+      expect(remoteSessionActiveEvent, isNot(remoteSessionClosedEvent));
+    });
+
+    test('a payload carrying more than the contract still reads only the id',
+        () {
+      // A field the contract does not document is not a reason to refuse the
+      // event, and is not a reason to believe it either.
+      final signal = parseRemoteSessionActivePayload({
+        'remoteSessionId': testRemoteSessionId,
+        'status': 'ACTIVE',
+        'connectedAt': '2026-03-11T09:34:02.000Z',
+      });
+
+      expect(signal, isNotNull);
+      expect(signal!.props, [testRemoteSessionId]);
+    });
+
+    test('a payload with no usable session id produces no signal', () {
+      expect(parseRemoteSessionActivePayload(null), isNull);
+      expect(parseRemoteSessionActivePayload('remote-session:active'), isNull);
+      expect(parseRemoteSessionActivePayload(const []), isNull);
+      expect(parseRemoteSessionActivePayload(const <String, Object?>{}), isNull);
+      expect(parseRemoteSessionActivePayload({'remoteSessionId': ''}), isNull);
+      expect(parseRemoteSessionActivePayload({'remoteSessionId': 42}), isNull);
+      expect(
+        parseRemoteSessionActivePayload({'remoteSessionId': null}),
+        isNull,
+      );
     });
   });
 

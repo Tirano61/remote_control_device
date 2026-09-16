@@ -103,6 +103,32 @@ RealtimeRemoteSessionCreated? parseRemoteSessionCreatedPayload(Object? payload) 
   );
 }
 
+/// Reads the `remote-session:active` payload documented in `REALTIME.md`:
+///
+/// ```json
+/// { "remoteSessionId": "3d1b9e64-..." }
+/// ```
+///
+/// One field, and the contract calls it "deliberately minimal": the event says
+/// *which* session moved, never what it moved to. So nothing else is read, and
+/// in particular no `status` or `connectedAt` is invented here — both come from
+/// `GET /device/remote-sessions/current`, which is the only thing this notice
+/// is allowed to cause.
+///
+/// Returns `null` for anything that does not carry a usable session id.
+/// Realtime payloads are untrusted input, and a malformed one must produce no
+/// signal at all rather than a half-built one.
+RealtimeRemoteSessionActivated? parseRemoteSessionActivePayload(
+  Object? payload,
+) {
+  if (payload is! Map) return null;
+
+  final remoteSessionId = payload['remoteSessionId'];
+  if (remoteSessionId is! String || remoteSessionId.isEmpty) return null;
+
+  return RealtimeRemoteSessionActivated(remoteSessionId);
+}
+
 /// Reads the `remote-session:closed` payload documented in `REALTIME.md`:
 ///
 /// ```json

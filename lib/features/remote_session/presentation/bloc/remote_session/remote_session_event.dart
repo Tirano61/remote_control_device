@@ -32,6 +32,29 @@ final class RemoteSessionAnnounced extends RemoteSessionEvent {
   List<Object?> get props => [remoteSessionId];
 }
 
+/// `remote-session:active` was received for [remoteSessionId]: the technician
+/// reported that the remote connection came up and the backend wrote `ACTIVE`.
+///
+/// A cue like every other one, with one difference: it is *filtered*. A
+/// creation or a closure is answered with a read whatever id it names, because
+/// either may legitimately be news about a session this client does not hold
+/// yet. An activation cannot be — it is the transition of a session that
+/// already exists — so one naming a different session than the live one on
+/// screen changes nothing here and is dropped without a call. Ownership never
+/// moves because of a realtime payload.
+///
+/// It is also dropped once the session is already `ACTIVE`: the state the event
+/// announces is the state already held, so re-reading could only spend a call
+/// to be told the same thing.
+final class RemoteSessionActivationAnnounced extends RemoteSessionEvent {
+  const RemoteSessionActivationAnnounced(this.remoteSessionId);
+
+  final String remoteSessionId;
+
+  @override
+  List<Object?> get props => [remoteSessionId];
+}
+
 /// `remote-session:closed` was received for [remoteSessionId]: the technician
 /// ended the assistance.
 ///

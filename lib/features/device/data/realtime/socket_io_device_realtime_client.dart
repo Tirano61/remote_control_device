@@ -141,6 +141,15 @@ class SocketIoDeviceRealtimeClient implements DeviceRealtimeChannel {
         _log('$remoteSessionCreatedEvent for ${created.remoteSessionId}');
         _emit(created);
       }),
+      socket.on(remoteSessionActiveEvent, (Object? payload) {
+        final activated = parseRemoteSessionActivePayload(payload);
+        if (activated == null) {
+          _log('$remoteSessionActiveEvent ignored: unexpected payload');
+          return;
+        }
+        _log('$remoteSessionActiveEvent for ${activated.remoteSessionId}');
+        _emit(activated);
+      }),
       socket.on(remoteSessionClosedEvent, (Object? payload) {
         final closed = parseRemoteSessionClosedPayload(payload);
         if (closed == null) {

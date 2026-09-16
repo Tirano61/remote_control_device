@@ -69,8 +69,8 @@ sealed class RemoteSessionLive extends RemoteSessionState {
 }
 
 /// `CONNECTING` — the session exists and both ends may start connecting. Every
-/// session the backend creates today is in this status and stays there: nothing
-/// in the current backend transitions one to `ACTIVE`.
+/// session is born here and stays until the technician reports that the remote
+/// connection came up.
 final class RemoteSessionConnecting extends RemoteSessionLive {
   const RemoteSessionConnecting(
     super.session, {
@@ -79,8 +79,18 @@ final class RemoteSessionConnecting extends RemoteSessionLive {
   });
 }
 
-/// `ACTIVE` — supported because the contract documents it, not because anything
-/// produces it yet. This client never asks for the transition; it only reads it.
+/// `ACTIVE` — the backend recorded that the remote connection is established,
+/// and `session.connectedAt` says when.
+///
+/// Reached like every other state here: a read of
+/// `GET /device/remote-sessions/current` answered `ACTIVE`. The transition
+/// itself belongs to `remote_control_web`, which calls
+/// `POST /remote-sessions/:id/activate`; this client has no such call, and
+/// `remote-session:active` only makes it read.
+///
+/// It says nothing about the peer connection, which this bloc cannot see. The
+/// two are the same fact from different ends, and neither is derived from the
+/// other.
 final class RemoteSessionActive extends RemoteSessionLive {
   const RemoteSessionActive(super.session, {super.closing, super.lastFailure});
 }

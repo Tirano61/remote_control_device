@@ -23,10 +23,25 @@ const RemoteSession connectingSession = RemoteSession(
   technician: testRemoteSessionTechnician,
 );
 
+/// `connectedAt` exactly as the backend documents it: UTC, written once by
+/// `POST /remote-sessions/:id/activate` from the server clock.
+const String testConnectedAtWire = '2026-03-11T09:34:02.000Z';
+
 const RemoteSession activeSession = RemoteSession(
   id: testRemoteSessionId,
   supportRequestId: testSupportRequestId,
   status: RemoteSessionStatus.active,
+  technician: testRemoteSessionTechnician,
+);
+
+/// The same session as [activeSession] with the activation instant the backend
+/// sends. `DateTime` cannot be `const`, which is the only reason this is a
+/// separate fixture.
+final RemoteSession activatedSession = RemoteSession(
+  id: testRemoteSessionId,
+  supportRequestId: testSupportRequestId,
+  status: RemoteSessionStatus.active,
+  connectedAt: DateTime.parse(testConnectedAtWire),
   technician: testRemoteSessionTechnician,
 );
 
@@ -44,12 +59,13 @@ Map<String, dynamic> remoteSessionJson({
   String status = 'CONNECTING',
   bool withTechnician = true,
   String? endedBy,
+  String? connectedAt,
 }) => <String, dynamic>{
   'id': id,
   'supportRequestId': testSupportRequestId,
   'status': status,
   'createdAt': '2026-03-11T09:33:41.000Z',
-  'connectedAt': null,
+  'connectedAt': connectedAt,
   'endedAt': endedBy == null ? null : '2026-03-11T09:41:02.000Z',
   'endedBy': endedBy,
   'device': <String, dynamic>{
@@ -115,6 +131,9 @@ const Ok<RemoteSession?> connectingRemoteSession = Ok<RemoteSession?>(
   connectingSession,
 );
 const Ok<RemoteSession?> activeRemoteSession = Ok<RemoteSession?>(activeSession);
+final Ok<RemoteSession?> activatedRemoteSession = Ok<RemoteSession?>(
+  activatedSession,
+);
 const Err<RemoteSession?> remoteSessionUnreachable = Err<RemoteSession?>(
   NetworkFailure(),
 );
