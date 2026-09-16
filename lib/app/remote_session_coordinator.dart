@@ -13,12 +13,19 @@ import 'package:remote_control_device/features/support/presentation/bloc/support
 /// ```text
 /// realtime channel came up (or came back) ──> sync
 /// remote-session:created arrived          ──> sync
+/// remote-session:active arrived           ──> sync, if it is the session held
 /// remote-session:closed arrived           ──> sync
 /// the support request reached ACCEPTED    ──> sync
 /// the device identity was dropped         ──> reset
 ///
 /// a live session stopped being live       ──> re-read the support request
 /// ```
+///
+/// `remote-session:active` is the one cue with a condition attached, and the
+/// condition is the bloc's to apply — this class forwards the id and decides
+/// nothing. The device never calls `POST /remote-sessions/:id/activate`: the
+/// transition belongs to `remote_control_web`, and the tablet only reads what
+/// the backend wrote.
 ///
 /// The last line is the only arrow that points the other way, and it exists
 /// because one backend transaction writes both sides: closing a session — from
@@ -93,6 +100,14 @@ class RemoteSessionCoordinator {
     switch (signal) {
       case RealtimeRemoteSessionCreated(:final remoteSessionId):
         _remoteSessionBloc.add(RemoteSessionAnnounced(remoteSessionId));
+      case RealtimeRemoteSessionActivated(:final remoteSessionId):
+        // The technician's `/activate` committed. Which session it was about
+        // is carried through so the bloc can match it against the one it holds;
+        // whether that means anything is the bloc's decision, and what the user
+        // ends up seeing is the REST read it makes.
+        _remoteSessionBloc.add(
+          RemoteSessionActivationAnnounced(remoteSessionId),
+        );
       case RealtimeRemoteSessionClosed(:final remoteSessionId):
         _remoteSessionBloc.add(RemoteSessionClosureAnnounced(remoteSessionId));
       default:

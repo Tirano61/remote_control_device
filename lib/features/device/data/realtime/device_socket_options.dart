@@ -13,6 +13,15 @@ const String supportAssignedEvent = 'support:assigned';
 /// session in itself: see `RealtimeRemoteSessionCreated`.
 const String remoteSessionCreatedEvent = 'remote-session:created';
 
+/// Event the backend emits, after `POST /remote-sessions/:id/activate` commits,
+/// to say that the session really moved `CONNECTING -> ACTIVE`. The technician
+/// reports the connection; the backend writes `ACTIVE` and `connectedAt`.
+///
+/// Emitted only on the real transition — a retried activation emits nothing —
+/// and, like every other notice here, it is a cue to re-read REST and never a
+/// state in itself: see `RealtimeRemoteSessionActivated`.
+const String remoteSessionActiveEvent = 'remote-session:active';
+
 /// Event the backend emits when the *technician* closes the session. A
 /// device-initiated close emits nothing — the closing side already holds the
 /// closed session in its HTTP response.

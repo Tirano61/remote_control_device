@@ -21,15 +21,22 @@ import 'package:remote_control_device/features/remote_session/domain/entities/re
 /// }
 /// ```
 ///
-/// Only `id`, `supportRequestId`, `status` and `technician` are read. The rest
-/// is present in the response and deliberately unused: the `device` block
-/// because this client never asserts or re-checks its own identity, the
-/// timestamps and `endedBy` because nothing displays them.
+/// Only `id`, `supportRequestId`, `status`, `connectedAt` and `technician` are
+/// read. The rest is present in the response and deliberately unused: the
+/// `device` block because this client never asserts or re-checks its own
+/// identity, `createdAt`, `endedAt` and `endedBy` because nothing displays
+/// them.
+///
+/// `connectedAt` is read because the screen shows it, and it is read *only*
+/// from here: the backend writes it once, on the real `CONNECTING -> ACTIVE`
+/// transition, from its own clock. Nothing in this client computes it, and a
+/// re-read that answers the same session answers the same instant.
 class RemoteSessionModel {
   const RemoteSessionModel({
     required this.id,
     required this.supportRequestId,
     required this.status,
+    this.connectedAt,
     this.technician,
   });
 
@@ -38,6 +45,7 @@ class RemoteSessionModel {
         id: json.requireString('id'),
         supportRequestId: json.requireString('supportRequestId'),
         status: _statusFromWire(json.requireString('status')),
+        connectedAt: _timestampFromJson(json['connectedAt']),
         technician: _technicianFromJson(json['technician']),
       );
 
@@ -63,12 +71,14 @@ class RemoteSessionModel {
   final String id;
   final String supportRequestId;
   final RemoteSessionStatus status;
+  final DateTime? connectedAt;
   final RemoteSessionTechnicianModel? technician;
 
   RemoteSession toEntity() => RemoteSession(
     id: id,
     supportRequestId: supportRequestId,
     status: status,
+    connectedAt: connectedAt,
     technician: technician?.toEntity(),
   );
 }
@@ -94,6 +104,16 @@ RemoteSessionStatus _statusFromWire(String value) => switch (value) {
   // what it means — and `unknown` is not live, so nothing is shown as running.
   _ => RemoteSessionStatus.unknown,
 };
+
+/// An ISO-8601 instant, or `null` for absent, `null` or malformed.
+///
+/// `DateTime.tryParse` rather than `parse`: a timestamp that could not be read
+/// costs the screen a line, and refusing the whole session over it would hide a
+/// live assistance from the person entitled to end it. The value is kept
+/// exactly as the backend sent it — UTC — and converted to local time only
+/// where it is displayed.
+DateTime? _timestampFromJson(Object? value) =>
+    value is String ? DateTime.tryParse(value) : null;
 
 /// Absent, `null`, or malformed all answer `null`.
 ///

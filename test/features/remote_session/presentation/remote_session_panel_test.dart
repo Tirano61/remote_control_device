@@ -250,8 +250,88 @@ void main() {
     await settle(tester);
 
     expect(find.text('Asistencia en curso'), findsOneWidget);
+    expect(find.text('Conectando con el técnico...'), findsNothing);
     expect(find.byKey(RemoteSessionPanel.closeButtonKey), findsOneWidget);
     expect(find.textContaining('Compartiendo'), findsNothing);
+    expect(find.textContaining('pantalla'), findsNothing);
+  });
+
+  testWidgets('CONNECTING becomes ACTIVE without contradicting itself',
+      (tester) async {
+    await pumpAccepted(tester);
+    remoteSessionRepository.currentResult = connectingRemoteSession;
+    remoteSessionBloc.add(const RemoteSessionSyncRequested());
+    await settle(tester);
+    expect(find.text('Conectando con el técnico...'), findsOneWidget);
+
+    // WebRTC comes up first; the row follows when the technician reports it.
+    await establishPeerConnection(tester);
+    remoteSessionRepository.currentResult = activatedRemoteSession;
+    remoteSessionBloc.add(
+      const RemoteSessionActivationAnnounced(testRemoteSessionId),
+    );
+    await settle(tester);
+
+    expect(remoteSessionBloc.state, isA<RemoteSessionActive>());
+    // The backend's word is the headline and the local reading supports it:
+    // one story, not two contradicting lines.
+    expect(find.text('Asistencia en curso'), findsOneWidget);
+    expect(find.text('Conexión remota establecida'), findsOneWidget);
+    expect(find.text('Conectando con el técnico...'), findsNothing);
+    // The one action the user has is still there, and the peer connection was
+    // not disturbed by the transition.
+    expect(find.byKey(RemoteSessionPanel.closeButtonKey), findsOneWidget);
+    expect(webRtcBloc.state.isRemoteConnectionEstablished, isTrue);
+    expect(peerFactory.createCount, 1);
+  });
+
+  testWidgets('ACTIVE shows when the backend says the connection came up',
+      (tester) async {
+    await pumpAccepted(tester);
+
+    remoteSessionRepository.currentResult = activatedRemoteSession;
+    remoteSessionBloc.add(const RemoteSessionSyncRequested());
+    await settle(tester);
+
+    // Local time of the instant the backend wrote, formatted and nothing more:
+    // no elapsed counter, and nothing shown when the field is absent.
+    final connectedAt = activatedSession.connectedAt!.toLocal();
+    final hour = connectedAt.hour.toString().padLeft(2, '0');
+    final minute = connectedAt.minute.toString().padLeft(2, '0');
+    expect(find.text('Conectado desde: $hour:$minute'), findsOneWidget);
+  });
+
+  testWidgets('a session with no connectedAt shows no connection time',
+      (tester) async {
+    await pumpAccepted(tester);
+
+    // ACTIVE without the field: nothing is invented to fill the line.
+    remoteSessionRepository.currentResult = activeRemoteSession;
+    remoteSessionBloc.add(const RemoteSessionSyncRequested());
+    await settle(tester);
+
+    expect(find.text('Asistencia en curso'), findsOneWidget);
+    expect(find.textContaining('Conectado desde'), findsNothing);
+  });
+
+  testWidgets('an ACTIVE session that loses the socket says reconnecting',
+      (tester) async {
+    await pumpAccepted(tester);
+    remoteSessionRepository.currentResult = activatedRemoteSession;
+    remoteSessionBloc.add(const RemoteSessionSyncRequested());
+    await settle(tester);
+    await establishPeerConnection(tester);
+    expect(find.text('Conexión remota establecida'), findsOneWidget);
+
+    client.push(const RealtimeDisconnected());
+    await settle(tester);
+
+    // The backend cannot reach the tablet, which outranks both the row and the
+    // peer connection — and no line claims otherwise while it holds.
+    expect(find.text('Asistencia en curso'), findsNothing);
+    expect(find.text('Conexión remota establecida'), findsNothing);
+    expect(find.textContaining('Conectado desde'), findsNothing);
+    expect(webRtcBloc.state.isRemoteConnectionEstablished, isTrue);
   });
 
   testWidgets('losing the channel says reconnecting, never that it ended',

@@ -139,6 +139,7 @@ class DeviceRealtimeBloc
 
       case RealtimeSupportAssigned():
       case RealtimeRemoteSessionCreated():
+      case RealtimeRemoteSessionActivated():
       case RealtimeRemoteSessionClosed():
         // Not this bloc's business. It owns whether the channel is up, not what
         // travels over it; the support and remote-session features subscribe to

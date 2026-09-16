@@ -42,6 +42,7 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
        super(const RemoteSessionInitial()) {
     on<RemoteSessionSyncRequested>(_onSyncRequested);
     on<RemoteSessionAnnounced>(_onAnnounced);
+    on<RemoteSessionActivationAnnounced>(_onActivationAnnounced);
     on<RemoteSessionClosureAnnounced>(_onClosureAnnounced);
     on<RemoteSessionCloseRequested>(_onCloseRequested);
     on<RemoteSessionResetRequested>(_onResetRequested);
@@ -82,6 +83,55 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
       // either way — but worth knowing: the local copy was already stale.
       _log('a session was announced other than the one held');
     }
+    await _sync(emit);
+  }
+
+  /// `remote-session:active`: the only cue this bloc filters before reading.
+  ///
+  /// ```text
+  /// it names the live session held      ──> read /current, and that decides
+  /// the session held is already ACTIVE  ──> ignored: nothing left to learn
+  /// it names another session            ──> ignored: ownership never moves
+  ///                                          because of a realtime payload
+  /// no session is held yet              ──> read /current
+  /// ```
+  ///
+  /// The third line is the isolation rule. The fourth is not a hole in it:
+  /// reading `/current` can only ever produce *this* device's session, because
+  /// the backend answers it from the Device JWT and not from anything the event
+  /// said. It covers the one case where the id cannot be matched yet — a read
+  /// that failed, or one that has not happened — and it is how a device whose
+  /// first sync came back empty still reaches `ACTIVE`.
+  ///
+  /// The second line is what keeps this from looping. The read this event
+  /// triggers ends in `ACTIVE`, and a state that is already `ACTIVE` triggers
+  /// no further read, so the chain is at most one call long.
+  Future<void> _onActivationAnnounced(
+    RemoteSessionActivationAnnounced event,
+    Emitter<RemoteSessionState> emit,
+  ) async {
+    if (_closeInFlight) return;
+
+    final known = state;
+    if (known is RemoteSessionLive) {
+      if (known.session.id != event.remoteSessionId) {
+        // An activation is, by definition, about a session that already
+        // exists — so unlike a creation or a closure it cannot be news about
+        // the one on screen, and the session on screen is the one an
+        // authenticated read produced. It is dropped without a call: the
+        // session held keeps its identity, and the cues that do reconcile a
+        // stale one — a reconnection, a refused join, a closure — are
+        // unaffected.
+        _log('an activation was announced for a session other than the one '
+            'held: ignored');
+        return;
+      }
+      if (known is RemoteSessionActive) {
+        _log('an activation was announced for a session already ACTIVE');
+        return;
+      }
+    }
+
     await _sync(emit);
   }
 

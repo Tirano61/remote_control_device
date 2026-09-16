@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:remote_control_device/core/error/failures.dart';
 import 'package:remote_control_device/core/result/result.dart';
@@ -110,13 +112,130 @@ void main() {
   });
 
   group('ACTIVE', () {
-    test('is supported even though no backend path writes it', () async {
-      repository.currentResult = activeRemoteSession;
+    test('is read from /current, with the activation instant the backend set',
+        () async {
+      repository.currentResult = activatedRemoteSession;
 
       await sync();
 
       expect(bloc.state, isA<RemoteSessionActive>());
-      expect((bloc.state as RemoteSessionActive).session, activeSession);
+      final session = (bloc.state as RemoteSessionActive).session;
+      expect(session, activatedSession);
+      expect(session.connectedAt, DateTime.parse(testConnectedAtWire));
+    });
+
+    test('is recovered on a plain sync, with no event ever received', () async {
+      // The restart story, and the lost-event story, which are the same story:
+      // the tablet was not there when `remote-session:active` was emitted, and
+      // the read every startup and every reconnection makes finds ACTIVE
+      // anyway. Realtime is a trigger, never the state.
+      repository.currentResult = activatedRemoteSession;
+
+      await sync();
+
+      expect(repository.currentCount, 1);
+      expect(bloc.state, isA<RemoteSessionActive>());
+    });
+  });
+
+  group('remote-session:active', () {
+    test('triggers a read, and the read is what moves CONNECTING to ACTIVE',
+        () async {
+      await reachConnecting();
+      repository.currentResult = activatedRemoteSession;
+
+      bloc.add(const RemoteSessionActivationAnnounced(testRemoteSessionId));
+      await settle();
+
+      expect(repository.currentCount, 2);
+      expect(bloc.state, isA<RemoteSessionActive>());
+      expect(
+        (bloc.state as RemoteSessionActive).session.connectedAt,
+        DateTime.parse(testConnectedAtWire),
+      );
+    });
+
+    test('the event alone never activates: REST decides', () async {
+      await reachConnecting();
+      // The socket said ACTIVE; `/current` still says CONNECTING. The backend
+      // wins, exactly as it does for every other notice.
+      repository.currentResult = connectingRemoteSession;
+
+      bloc.add(const RemoteSessionActivationAnnounced(testRemoteSessionId));
+      await settle();
+
+      expect(bloc.state, isA<RemoteSessionConnecting>());
+    });
+
+    test('a repeat once ACTIVE reads nothing and changes nothing', () async {
+      repository.currentResult = activatedRemoteSession;
+      await sync();
+      final reads = repository.currentCount;
+      final state = bloc.state;
+
+      bloc.add(const RemoteSessionActivationAnnounced(testRemoteSessionId));
+      bloc.add(const RemoteSessionActivationAnnounced(testRemoteSessionId));
+      await settle();
+
+      // No loop: the state the event announces is the state already held, so
+      // the chain stops here instead of reading its way around in circles.
+      expect(repository.currentCount, reads);
+      expect(bloc.state, same(state));
+    });
+
+    test('an activation for another session is ignored, not adopted', () async {
+      await reachConnecting();
+
+      bloc.add(
+        const RemoteSessionActivationAnnounced(testOtherRemoteSessionId),
+      );
+      await settle();
+
+      // Not even a read: ownership does not move because a payload named
+      // another session, and the session held is untouched.
+      expect(repository.currentCount, 1);
+      final state = bloc.state as RemoteSessionConnecting;
+      expect(state.session.id, testRemoteSessionId);
+    });
+
+    test('with nothing held yet it still reads, because REST answers for this '
+        'device only', () async {
+      // The first sync could not reach the backend, so there is no id to match
+      // against. The read is safe: `/current` answers from the Device JWT, and
+      // can only ever produce this device's own session.
+      repository.currentResult = remoteSessionUnreachable;
+      await sync();
+      expect(bloc.state, isA<RemoteSessionUnavailable>());
+
+      repository.currentResult = activatedRemoteSession;
+      bloc.add(const RemoteSessionActivationAnnounced(testRemoteSessionId));
+      await settle();
+
+      expect(bloc.state, isA<RemoteSessionActive>());
+      expect(
+        (bloc.state as RemoteSessionActive).session.id,
+        testRemoteSessionId,
+      );
+    });
+
+    test('a close in flight is not disturbed by it', () async {
+      await reachConnecting();
+      final gate = Completer<void>();
+      repository.closeGate = gate;
+      repository.currentQueue.add(noRemoteSession);
+
+      bloc.add(const RemoteSessionCloseRequested());
+      await settle();
+      bloc.add(const RemoteSessionActivationAnnounced(testRemoteSessionId));
+      await settle();
+
+      // The close settles the state with the backend's own answer; a read
+      // racing it could only overwrite that with an older one.
+      expect(repository.currentCount, 1);
+
+      gate.complete();
+      await settle();
+      expect(bloc.state, const RemoteSessionIdle());
     });
   });
 

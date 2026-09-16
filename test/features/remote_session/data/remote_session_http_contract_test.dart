@@ -168,18 +168,52 @@ void main() {
       expect((await repository.current()).failureOrNull, isA<ServerFailure>());
     });
 
-    test('ACTIVE is read, though no backend path writes it today', () async {
+    test('ACTIVE is read, with the connectedAt the backend wrote', () async {
       build([
         _Reply(
           200,
-          currentRemoteSessionEnvelope(remoteSessionJson(status: 'ACTIVE')),
+          currentRemoteSessionEnvelope(
+            remoteSessionJson(
+              status: 'ACTIVE',
+              connectedAt: testConnectedAtWire,
+            ),
+          ),
         ),
       ]);
 
-      expect(
-        (await repository.current()).valueOrNull?.status,
-        RemoteSessionStatus.active,
-      );
+      final session = (await repository.current()).valueOrNull;
+      expect(session?.status, RemoteSessionStatus.active);
+      // Taken from the payload, in UTC, exactly as sent. Nothing here computes
+      // an activation instant or adjusts the one it was given.
+      expect(session?.connectedAt, DateTime.parse(testConnectedAtWire));
+      expect(session?.connectedAt?.isUtc, isTrue);
+    });
+
+    test('a CONNECTING session has no connectedAt, and none is invented',
+        () async {
+      build([
+        _Reply(200, currentRemoteSessionEnvelope(remoteSessionJson())),
+      ]);
+
+      final session = (await repository.current()).valueOrNull;
+      expect(session?.status, RemoteSessionStatus.connecting);
+      expect(session?.connectedAt, isNull);
+    });
+
+    test('an unreadable connectedAt costs a line, never the session', () async {
+      build([
+        _Reply(
+          200,
+          currentRemoteSessionEnvelope(
+            remoteSessionJson(status: 'ACTIVE', connectedAt: 'yesterday'),
+          ),
+        ),
+      ]);
+
+      final session = (await repository.current()).valueOrNull;
+      expect(session, isNotNull);
+      expect(session?.status, RemoteSessionStatus.active);
+      expect(session?.connectedAt, isNull);
     });
 
     test('an unknown future status is named, never guessed at', () async {

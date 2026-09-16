@@ -215,6 +215,100 @@ void main() {
     expect((state as RemoteSessionConnecting).session, connectingSession);
   });
 
+  test('remote-session:active triggers the read that moves it to ACTIVE',
+      () async {
+    remoteSessionRepository.currentResult = connectingRemoteSession;
+    supportRepository.currentResult = const Ok<SupportRequest?>(acceptedRequest);
+    await reachConnected();
+    expect(remoteSessionBloc.state, isA<RemoteSessionConnecting>());
+    final supportReads = supportRepository.currentCount;
+    final reads = remoteSessionRepository.currentCount;
+
+    // The technician's browser reported the connection with
+    // POST /remote-sessions/:id/activate; the backend committed ACTIVE and
+    // announced it. The tablet never calls /activate itself.
+    remoteSessionRepository.currentResult = activatedRemoteSession;
+    await client.emit(
+      const RealtimeRemoteSessionActivated(testRemoteSessionId),
+    );
+    await settle();
+
+    expect(remoteSessionRepository.currentCount, reads + 1);
+    final state = remoteSessionBloc.state;
+    expect(state, isA<RemoteSessionActive>());
+    // Built from the REST payload, never from the event — which carries no
+    // status and no timestamp at all.
+    expect((state as RemoteSessionActive).session, activatedSession);
+    // And the assistance goes on being the same assistance: the session stayed
+    // live throughout, so the support request is not re-read and the screen
+    // never falls back to it.
+    expect(supportRepository.currentCount, supportReads);
+    expect(supportBloc.state, isA<SupportAccepted>());
+  });
+
+  test('a repeated remote-session:active on an ACTIVE session does nothing',
+      () async {
+    remoteSessionRepository.currentResult = activatedRemoteSession;
+    await reachConnected();
+    expect(remoteSessionBloc.state, isA<RemoteSessionActive>());
+    final reads = remoteSessionRepository.currentCount;
+    final state = remoteSessionBloc.state;
+
+    await client.emit(
+      const RealtimeRemoteSessionActivated(testRemoteSessionId),
+    );
+    await client.emit(
+      const RealtimeRemoteSessionActivated(testRemoteSessionId),
+    );
+    await settle();
+
+    // No read, no loop, and the state is the very same object.
+    expect(remoteSessionRepository.currentCount, reads);
+    expect(remoteSessionBloc.state, same(state));
+  });
+
+  test('an activation announced for another session is ignored', () async {
+    remoteSessionRepository.currentResult = connectingRemoteSession;
+    await reachConnected();
+
+    await client.emit(
+      const RealtimeRemoteSessionActivated(testOtherRemoteSessionId),
+    );
+    await settle();
+
+    // Not read, not adopted: a realtime payload never moves ownership, and the
+    // session on screen is still the one REST gave.
+    expect(remoteSessionRepository.currentCount, 1);
+    final state = remoteSessionBloc.state;
+    expect(state, isA<RemoteSessionConnecting>());
+    expect((state as RemoteSessionConnecting).session.id, testRemoteSessionId);
+  });
+
+  test('an activation that never arrived is recovered by reconnecting',
+      () async {
+    remoteSessionRepository.currentResult = connectingRemoteSession;
+    await reachConnected();
+    expect(remoteSessionBloc.state, isA<RemoteSessionConnecting>());
+
+    // The tablet drops off the network. While it is away the technician's
+    // /activate commits and remote-session:active is emitted to nobody:
+    // delivery is best-effort and nothing is replayed.
+    await client.emit(const RealtimeDisconnected());
+    await settle();
+    remoteSessionRepository.currentResult = activatedRemoteSession;
+
+    await client.emit(const RealtimeConnected());
+    await settle();
+
+    // The same read every reconnection makes finds ACTIVE. This is also the
+    // restart path: a fresh application reaches connected once and lands here.
+    expect(remoteSessionBloc.state, isA<RemoteSessionActive>());
+    expect(
+      (remoteSessionBloc.state as RemoteSessionActive).session.connectedAt,
+      isNotNull,
+    );
+  });
+
   test('a reconnection reads it again, which is how a lost event is recovered',
       () async {
     await reachConnected();

@@ -320,6 +320,76 @@ void main() {
     expect(peer.isClosed, isTrue);
   });
 
+  test('a session moving to ACTIVE leaves the peer connection untouched',
+      () async {
+    await reachJoined();
+    await client.deliver(offerReceived());
+    await settle();
+    final peer = peerFactory.last;
+    peer.pushConnectionState(WebRtcConnectionState.connected);
+    final channel = peer.pushDataChannel();
+    await settle();
+    channel.pushState(WebRtcDataChannelState.open);
+    await settle();
+    expect(webRtcBloc.state.isRemoteConnectionEstablished, isTrue);
+    expect(remoteSessionBloc.state, isA<RemoteSessionConnecting>());
+    final joined = signalingBloc.state;
+    final joins = client.joinedSessionIds.length;
+
+    // This is exactly what the web does next: seeing its own connection up and
+    // the control channel open, it calls POST /remote-sessions/:id/activate.
+    // The backend commits ACTIVE and announces it here.
+    remoteSessionRepository.currentResult = activatedRemoteSession;
+    await client.emit(
+      const RealtimeRemoteSessionActivated(testRemoteSessionId),
+    );
+    await settle();
+
+    expect(remoteSessionBloc.state, isA<RemoteSessionActive>());
+    // ACTIVE is a backend fact about the connection that already exists. It is
+    // not a cue to negotiate anything, and nothing here treats it as one.
+    expect(peer.isClosed, isFalse);
+    expect(channel.isClosed, isFalse);
+    expect(webRtcBloc.state, WebRtcConnected(
+      testRemoteSessionId,
+      controlChannel: WebRtcDataChannelState.open,
+    ));
+    expect(peerFactory.createCount, 1);
+    expect(client.sentAnswers, hasLength(1));
+    expect(client.sentOffers, isEmpty);
+    // And the signaling room is not re-entered: it was never left, and the
+    // contract accepts CONNECTING and ACTIVE alike as a live session.
+    expect(client.joinedSessionIds, hasLength(joins));
+    expect(signalingBloc.state, joined);
+  });
+
+  test('an ACTIVE session recovered on a restart keeps the same negotiation',
+      () async {
+    // The whole path in the order the real system produces it: the session is
+    // still CONNECTING when the offer arrives, the peer comes up, and only
+    // then does the backend row move — through a plain read, with no event at
+    // all, which is what a tablet that was offline or restarted would do.
+    await reachJoined();
+    await client.deliver(offerReceived());
+    await settle();
+    final peer = peerFactory.last;
+    peer.pushConnectionState(WebRtcConnectionState.connected);
+    final channel = peer.pushDataChannel();
+    await settle();
+    channel.pushState(WebRtcDataChannelState.open);
+    await settle();
+
+    remoteSessionRepository.currentResult = activatedRemoteSession;
+    remoteSessionBloc.add(const RemoteSessionSyncRequested());
+    await settle();
+
+    expect(remoteSessionBloc.state, isA<RemoteSessionActive>());
+    expect(peer.isClosed, isFalse);
+    expect(channel.isClosed, isFalse);
+    expect(webRtcBloc.state.isRemoteConnectionEstablished, isTrue);
+    expect(peerFactory.createCount, 1);
+  });
+
   test('a socket that drops mid-negotiation abandons it', () async {
     await reachJoined();
     await client.deliver(offerReceived());

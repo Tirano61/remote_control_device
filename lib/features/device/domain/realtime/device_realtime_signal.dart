@@ -79,6 +79,34 @@ final class RealtimeRemoteSessionCreated extends DeviceRealtimeSignal {
   List<Object?> get props => [remoteSessionId, supportRequestId, technicianId];
 }
 
+/// `remote-session:active` arrived: the technician reported that the remote
+/// connection came up, and the backend wrote `ACTIVE` and `connectedAt`.
+///
+/// The typed notice the contract's minimal payload deserves — it carries the
+/// one field the event has, and the same nothing-but-identifiers rule as its
+/// siblings. The device takes no part in the transition: `/activate` belongs to
+/// `remote_control_web` and is never called from here.
+///
+/// It is a **trigger**, not a state. `REALTIME.md` says so in as many words —
+///
+/// ```text
+/// remote-session:active  ->  GET /device/remote-sessions/current
+/// ```
+///
+/// — and that is the whole of what this signal causes. Delivery is best-effort,
+/// nothing is replayed, and the event is emitted only on the real transition,
+/// so a tablet that was offline when it fired must reach `ACTIVE` without it.
+/// It does, because the read it would have triggered is the same read every
+/// reconnection and every restart already makes.
+final class RealtimeRemoteSessionActivated extends DeviceRealtimeSignal {
+  const RealtimeRemoteSessionActivated(this.remoteSessionId);
+
+  final String remoteSessionId;
+
+  @override
+  List<Object?> get props => [remoteSessionId];
+}
+
 /// `remote-session:closed` arrived: the technician ended the assistance.
 ///
 /// A cue, not a verdict. The tablet does not drop its session because this
