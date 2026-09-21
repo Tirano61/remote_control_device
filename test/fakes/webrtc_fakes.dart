@@ -4,8 +4,10 @@ import 'package:remote_control_device/features/signaling/domain/entities/signali
 import 'package:remote_control_device/features/signaling/domain/entities/webrtc_answer.dart';
 import 'package:remote_control_device/features/signaling/domain/entities/webrtc_ice_candidate.dart';
 import 'package:remote_control_device/features/signaling/domain/entities/webrtc_offer.dart';
+import 'package:remote_control_device/features/screen_capture/domain/entities/screen_video_track.dart';
 import 'package:remote_control_device/features/webrtc/domain/control_channel.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/peer_ice_candidate.dart';
+import 'package:remote_control_device/features/webrtc/domain/entities/screen_video_attachment.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_connection_state.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_data_channel_message.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_data_channel_state.dart';
@@ -72,6 +74,10 @@ class FakeWebRtcPeerConnectionFactory implements WebRtcPeerConnectionFactory {
   /// where a test has no chance to reach it first.
   bool failSetRemoteDescription = false;
 
+  /// What every connection handed out answers when asked to attach the screen.
+  /// Here for the same reason: the attach happens inside the negotiation.
+  ScreenVideoAttachment screenVideoAttachment = ScreenVideoAttachment.attached;
+
   /// When set, [create] does not answer until the test completes it. The only
   /// way to observe what happens to an offer arriving mid-construction.
   Completer<void>? createGate;
@@ -97,7 +103,8 @@ class FakeWebRtcPeerConnectionFactory implements WebRtcPeerConnectionFactory {
     }
     final connection = FakeWebRtcPeerConnection()
       ..failSetRemoteDescription = failSetRemoteDescription
-      ..setRemoteDescriptionGate = setRemoteDescriptionGate;
+      ..setRemoteDescriptionGate = setRemoteDescriptionGate
+      ..screenVideoAttachment = screenVideoAttachment;
     created.add(connection);
     return connection;
   }
@@ -117,6 +124,15 @@ class FakeWebRtcPeerConnection implements WebRtcPeerConnection {
 
   /// Remote candidates actually handed to the connection, in order.
   final List<PeerIceCandidate> addedRemoteCandidates = [];
+
+  /// Screen tracks this connection was asked to attach, in order. Its length
+  /// is how "exactly one m=video" is asserted without touching an SDP: a
+  /// second attach would be a second transceiver.
+  final List<ScreenVideoTrack> attachedScreenTracks = [];
+
+  /// What [attachScreenVideo] answers. `noVideoTransceiver` is an offer with
+  /// no video section; `failed` is a transceiver that refused the track.
+  ScreenVideoAttachment screenVideoAttachment = ScreenVideoAttachment.attached;
 
   /// What [createAnswer] produces.
   WebRtcSessionDescription answer = const WebRtcSessionDescription.answer(
@@ -145,8 +161,7 @@ class FakeWebRtcPeerConnection implements WebRtcPeerConnection {
       _connectionStates.stream;
 
   @override
-  Stream<PeerIceCandidate> get localIceCandidates =>
-      _localIceCandidates.stream;
+  Stream<PeerIceCandidate> get localIceCandidates => _localIceCandidates.stream;
 
   @override
   Stream<WebRtcDataChannel> get dataChannels => _dataChannels.stream;
@@ -162,15 +177,22 @@ class FakeWebRtcPeerConnection implements WebRtcPeerConnection {
   }
 
   @override
+  Future<ScreenVideoAttachment> attachScreenVideo(
+    ScreenVideoTrack track,
+  ) async {
+    calls.add('attachScreenVideo');
+    attachedScreenTracks.add(track);
+    return screenVideoAttachment;
+  }
+
+  @override
   Future<WebRtcSessionDescription> createAnswer() async {
     calls.add('createAnswer');
     return answer;
   }
 
   @override
-  Future<void> setLocalDescription(
-    WebRtcSessionDescription description,
-  ) async {
+  Future<void> setLocalDescription(WebRtcSessionDescription description) async {
     calls.add('setLocalDescription');
     localDescriptions.add(description);
   }
@@ -302,8 +324,7 @@ class FakeWebRtcSignalingGateway implements WebRtcSignalingGateway {
   static SignalingRelayResult _resultFor(
     SignalingRelayResult scripted,
     String remoteSessionId,
-  ) =>
-      scripted is SignalingRelayDelivered && scripted.remoteSessionId.isEmpty
+  ) => scripted is SignalingRelayDelivered && scripted.remoteSessionId.isEmpty
       ? SignalingRelayDelivered(remoteSessionId)
       : scripted;
 }

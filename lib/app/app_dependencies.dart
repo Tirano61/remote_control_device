@@ -23,6 +23,10 @@ import 'package:remote_control_device/features/device/domain/usecases/enroll_dev
 import 'package:remote_control_device/features/device/domain/usecases/load_device_credentials.dart';
 import 'package:remote_control_device/features/device/domain/usecases/renew_device_token.dart';
 import 'package:remote_control_device/features/remote_session/data/datasources/remote_session_remote_data_source.dart';
+import 'package:remote_control_device/features/screen_capture/data/flutter_webrtc_screen_media.dart';
+import 'package:remote_control_device/features/screen_capture/data/media_projection_screen_capture_client.dart';
+import 'package:remote_control_device/features/screen_capture/data/method_channel_media_projection_service.dart';
+import 'package:remote_control_device/features/screen_capture/domain/screen_capture_client.dart';
 import 'package:remote_control_device/features/remote_session/data/repositories/remote_session_repository_impl.dart';
 import 'package:remote_control_device/features/remote_session/domain/repositories/remote_session_repository.dart';
 import 'package:remote_control_device/features/remote_session/domain/usecases/close_remote_session.dart';
@@ -64,6 +68,7 @@ class AppDependencies {
     required this.closeRemoteSession,
     required this.peerConnectionFactory,
     required this.iceConfiguration,
+    required this.screenCaptureClient,
   });
 
   factory AppDependencies.bootstrap({
@@ -72,13 +77,15 @@ class AppDependencies {
     DeviceInfoProvider? deviceInfoProvider,
     DeviceRealtimeChannel? realtimeChannel,
     WebRtcPeerConnectionFactory? peerConnectionFactory,
+    ScreenCaptureClient? screenCaptureClient,
   }) {
     final resolvedConfig = config ?? AppConfig.fromEnvironment();
     final tokenStore = InMemoryDeviceTokenStore();
     final apiClient = ApiClient(config: resolvedConfig, tokenStore: tokenStore);
     final credentialRevocation = DeviceCredentialRevocation();
 
-    final storage = credentialsStorage ?? const SecureDeviceCredentialsStorage();
+    final storage =
+        credentialsStorage ?? const SecureDeviceCredentialsStorage();
     final infoProvider = deviceInfoProvider ?? PlatformDeviceInfoProvider();
 
     final DeviceEnrollmentRepository enrollmentRepository =
@@ -147,13 +154,25 @@ class AppDependencies {
       ),
       closeRemoteSession: CloseRemoteSession(remoteSessionRepository),
       // Constructing it opens nothing either: no peer connection exists until
-      // an offer arrives, and no media permission is involved at any point —
-      // this build captures neither camera, microphone nor screen.
+      // an offer arrives.
       peerConnectionFactory:
           peerConnectionFactory ?? const FlutterWebRtcPeerConnectionFactory(),
       iceConfiguration: WebRtcIceConfiguration.fromStunUrl(
         resolvedConfig.webRtcStunUrl,
       ),
+      // And neither does this: building it shows no dialog, starts no service
+      // and captures nothing. The screen is asked for at exactly one moment —
+      // a valid offer inside a live remote session the user has already
+      // accepted — and never at startup, at authentication, when the socket
+      // connects, or when a technician is assigned.
+      screenCaptureClient:
+          screenCaptureClient ??
+          MediaProjectionScreenCaptureClient(
+            consent: const FlutterWebRtcScreenCaptureConsent(),
+            foregroundService:
+                const MethodChannelMediaProjectionForegroundService(),
+            mediaSource: const FlutterWebRtcScreenMediaSource(),
+          ),
     );
   }
 
@@ -207,4 +226,13 @@ class AppDependencies {
   /// The ICE servers every peer connection is built with, read once from the
   /// compile-time environment. Empty means host candidates only.
   final WebRtcIceConfiguration iceConfiguration;
+
+  /// Android's `MediaProjection`, behind its port.
+  ///
+  /// Owned here rather than by the WebRTC bloc's factory because its lifetime
+  /// is the remote session's, not a peer connection's: one capture is shared
+  /// by every negotiation of one assistance session. Injectable for the same
+  /// reason as the factory above — a unit test cannot show an Android consent
+  /// dialog, let alone answer it.
+  final ScreenCaptureClient screenCaptureClient;
 }

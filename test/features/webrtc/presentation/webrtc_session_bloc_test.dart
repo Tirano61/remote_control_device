@@ -5,14 +5,18 @@ import 'package:remote_control_device/features/signaling/domain/entities/signali
 import 'package:remote_control_device/features/signaling/domain/entities/signaling_relay_result.dart';
 import 'package:remote_control_device/features/webrtc/domain/control_channel.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/peer_ice_candidate.dart';
+import 'package:remote_control_device/features/webrtc/domain/entities/screen_video_attachment.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_connection_state.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_data_channel_message.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_data_channel_state.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_ice_configuration.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_session_description.dart';
+import 'package:remote_control_device/features/screen_capture/domain/entities/screen_capture_result.dart';
+import 'package:remote_control_device/features/screen_capture/domain/entities/screen_capture_status.dart';
 import 'package:remote_control_device/features/webrtc/presentation/bloc/webrtc_session/webrtc_session_bloc.dart';
 
 import '../../../fakes/remote_session_fakes.dart';
+import '../../../fakes/screen_capture_fakes.dart';
 import '../../../fakes/signaling_fakes.dart';
 import '../../../fakes/webrtc_fakes.dart';
 
@@ -25,18 +29,30 @@ import '../../../fakes/webrtc_fakes.dart';
 /// a socket that went away. The parts that are genuinely libwebrtc's — whether
 /// two endpoints actually pair — are not testable here and are verified with a
 /// browser and a tablet.
+/// The screen the default fake grants.
+///
+/// Every state a negotiation reaches *past the answer* carries it, because the
+/// capture is prepared inside the offer flow and rides along on the state from
+/// there on. States reached before that point -- and every teardown that ends
+/// the remote session -- carry [ScreenCaptureStatus.idle], which is why the
+/// two appear side by side below rather than one being the default everywhere.
+const ScreenCaptureStatus sharing = ScreenCaptureStatus.active;
+
 void main() {
   late FakeWebRtcPeerConnectionFactory factory;
   late FakeWebRtcSignalingGateway signaling;
+  late FakeScreenCaptureClient screenCapture;
   late WebRtcSessionBloc bloc;
 
   setUp(() {
     factory = FakeWebRtcPeerConnectionFactory();
     signaling = FakeWebRtcSignalingGateway();
+    screenCapture = FakeScreenCaptureClient();
     bloc = WebRtcSessionBloc(
       peerConnectionFactory: factory,
       signaling: signaling,
       iceConfiguration: const WebRtcIceConfiguration.none(),
+      screenCapture: screenCapture,
     );
   });
 
@@ -108,6 +124,9 @@ void main() {
       expect(factory.createCount, 1);
       expect(peer.calls, [
         'setRemoteDescription',
+        // Between the two, and that placement is the point: the screen is on
+        // the offered video section before the SDP describing it is written.
+        'attachScreenVideo',
         'createAnswer',
         'setLocalDescription',
       ]);
@@ -118,7 +137,10 @@ void main() {
       expect(peer.localDescriptions.single.sdp, testLocalAnswerSdp);
       expect(signaling.sentAnswers.single.sdp, testLocalAnswerSdp);
       expect(signaling.sentAnswers.single.remoteSessionId, testRemoteSessionId);
-      expect(bloc.state, const WebRtcConnecting(testRemoteSessionId));
+      expect(
+        bloc.state,
+        const WebRtcConnecting(testRemoteSessionId, screenCapture: sharing),
+      );
     });
 
     test('the ICE configuration is the one it was built with', () async {
@@ -129,6 +151,7 @@ void main() {
         peerConnectionFactory: factory,
         signaling: signaling,
         iceConfiguration: configured,
+        screenCapture: FakeScreenCaptureClient(),
       );
       addTearDown(scoped.close);
 
@@ -138,10 +161,9 @@ void main() {
       await settle();
 
       expect(factory.configurations.single, configured);
-      expect(
-        factory.configurations.single.iceServers.single.urls,
-        ['stun:stun.example.org:19302'],
-      );
+      expect(factory.configurations.single.iceServers.single.urls, [
+        'stun:stun.example.org:19302',
+      ]);
     });
 
     test('no ICE servers is the default, for a LAN test', () {
@@ -244,16 +266,19 @@ void main() {
       expect(signaling.sentIceLines, ['candidate:A', 'candidate:B']);
     });
 
-    test('candidates gathered afterwards go out immediately, in order', () async {
-      final peer = await negotiate();
+    test(
+      'candidates gathered afterwards go out immediately, in order',
+      () async {
+        final peer = await negotiate();
 
-      peer.pushLocalCandidate(localCandidate('candidate:A'));
-      await settle();
-      peer.pushLocalCandidate(localCandidate('candidate:B'));
-      await settle();
+        peer.pushLocalCandidate(localCandidate('candidate:A'));
+        await settle();
+        peer.pushLocalCandidate(localCandidate('candidate:B'));
+        await settle();
 
-      expect(signaling.sentIceLines, ['candidate:A', 'candidate:B']);
-    });
+        expect(signaling.sentIceLines, ['candidate:A', 'candidate:B']);
+      },
+    );
 
     test('the candidate fields reach the wire unchanged', () async {
       final peer = await negotiate();
@@ -294,38 +319,41 @@ void main() {
   // ------------------------------------------------------------ remote ICE
 
   group('remote ICE', () {
-    test('candidates arriving before the offer is applied are queued', () async {
-      // The web sends its candidates as soon as its own offer was delivered
-      // and does not wait for the answer, so they routinely arrive while this
-      // side is still inside setRemoteDescription.
-      final gate = Completer<void>();
-      factory.setRemoteDescriptionGate = gate;
+    test(
+      'candidates arriving before the offer is applied are queued',
+      () async {
+        // The web sends its candidates as soon as its own offer was delivered
+        // and does not wait for the answer, so they routinely arrive while this
+        // side is still inside setRemoteDescription.
+        final gate = Completer<void>();
+        factory.setRemoteDescriptionGate = gate;
 
-      await becomeReady();
-      bloc.add(WebRtcOfferReceived(offerFor()));
-      await settle();
+        await becomeReady();
+        bloc.add(WebRtcOfferReceived(offerFor()));
+        await settle();
 
-      final peer = factory.last;
-      expect(peer.calls, ['setRemoteDescription']);
+        final peer = factory.last;
+        expect(peer.calls, ['setRemoteDescription']);
 
-      bloc.add(WebRtcRemoteIceReceived(remoteCandidate(candidate: 'A')));
-      bloc.add(WebRtcRemoteIceReceived(remoteCandidate(candidate: 'B')));
-      await settle();
+        bloc.add(WebRtcRemoteIceReceived(remoteCandidate(candidate: 'A')));
+        bloc.add(WebRtcRemoteIceReceived(remoteCandidate(candidate: 'B')));
+        await settle();
 
-      // Held, not dropped: the two ends would otherwise try to pair with half
-      // the addresses between them.
-      expect(peer.addedRemoteCandidates, isEmpty);
+        // Held, not dropped: the two ends would otherwise try to pair with half
+        // the addresses between them.
+        expect(peer.addedRemoteCandidates, isEmpty);
 
-      gate.complete();
-      await settle();
+        gate.complete();
+        await settle();
 
-      expect(
-        [for (final c in peer.addedRemoteCandidates) c.candidate],
-        ['A', 'B'],
-      );
-      // And the answer only leaves after the offer was applied.
-      expect(signaling.sentAnswers, hasLength(1));
-    });
+        expect(
+          [for (final c in peer.addedRemoteCandidates) c.candidate],
+          ['A', 'B'],
+        );
+        // And the answer only leaves after the offer was applied.
+        expect(signaling.sentAnswers, hasLength(1));
+      },
+    );
 
     test('candidates arriving afterwards are applied in order', () async {
       final peer = await negotiate();
@@ -353,14 +381,17 @@ void main() {
       expect(peer.addedRemoteCandidates.single.isEndOfCandidates, isTrue);
     });
 
-    test('a candidate with no negotiation to attach it to is dropped', () async {
-      await becomeReady();
+    test(
+      'a candidate with no negotiation to attach it to is dropped',
+      () async {
+        await becomeReady();
 
-      bloc.add(WebRtcRemoteIceReceived(remoteCandidate()));
-      await settle();
+        bloc.add(WebRtcRemoteIceReceived(remoteCandidate()));
+        await settle();
 
-      expect(factory.createCount, 0);
-    });
+        expect(factory.createCount, 0);
+      },
+    );
   });
 
   // ----------------------------------------------------------- the answer
@@ -376,7 +407,10 @@ void main() {
 
       // The web is still waiting for an answer that never arrived; this half of
       // the negotiation can only hold resources.
-      expect(bloc.state, const WebRtcFailed(testRemoteSessionId));
+      expect(
+        bloc.state,
+        const WebRtcFailed(testRemoteSessionId, screenCapture: sharing),
+      );
       expect(factory.last.isClosed, isTrue);
     });
 
@@ -388,7 +422,10 @@ void main() {
       await settle();
 
       expect(signaling.sentAnswers, hasLength(1));
-      expect(bloc.state, const WebRtcFailed(testRemoteSessionId));
+      expect(
+        bloc.state,
+        const WebRtcFailed(testRemoteSessionId, screenCapture: sharing),
+      );
     });
 
     test('a local ICE candidate is never sent after a failed answer', () async {
@@ -509,22 +546,24 @@ void main() {
       expect(received.single.text, '{"tap":1}');
     });
 
-    test('a connected peer with an open channel is the success condition',
-        () async {
-      final peer = await negotiate();
-      peer.pushConnectionState(WebRtcConnectionState.connected);
-      await settle();
-      // Connected alone is not enough.
-      expect(bloc.state.isRemoteConnectionEstablished, isFalse);
+    test(
+      'a connected peer with an open channel is the success condition',
+      () async {
+        final peer = await negotiate();
+        peer.pushConnectionState(WebRtcConnectionState.connected);
+        await settle();
+        // Connected alone is not enough.
+        expect(bloc.state.isRemoteConnectionEstablished, isFalse);
 
-      final channel = peer.pushDataChannel();
-      await settle();
-      channel.pushState(WebRtcDataChannelState.open);
-      await settle();
+        final channel = peer.pushDataChannel();
+        await settle();
+        channel.pushState(WebRtcDataChannelState.open);
+        await settle();
 
-      expect(bloc.state, isA<WebRtcConnected>());
-      expect(bloc.state.isRemoteConnectionEstablished, isTrue);
-    });
+        expect(bloc.state, isA<WebRtcConnected>());
+        expect(bloc.state.isRemoteConnectionEstablished, isTrue);
+      },
+    );
 
     test('an open channel alone is not enough either', () async {
       final peer = await negotiate();
@@ -561,51 +600,76 @@ void main() {
       ]);
     });
 
-    test('new says nothing while the negotiation is still being set up',
-        () async {
-      final peer = await negotiate();
+    test(
+      'new says nothing while the negotiation is still being set up',
+      () async {
+        final peer = await negotiate();
 
-      // `new` before anything connected is the state the connection was
-      // created in; it does not undo the answer that was just relayed.
-      peer.pushConnectionState(WebRtcConnectionState.initial);
-      await settle();
+        // `new` before anything connected is the state the connection was
+        // created in; it does not undo the answer that was just relayed.
+        peer.pushConnectionState(WebRtcConnectionState.initial);
+        await settle();
 
-      expect(bloc.state, const WebRtcConnecting(testRemoteSessionId));
-      expect(peer.isClosed, isFalse);
-    });
+        expect(
+          bloc.state,
+          const WebRtcConnecting(testRemoteSessionId, screenCapture: sharing),
+        );
+        expect(peer.isClosed, isFalse);
+      },
+    );
 
-    test('a connected peer restarting its transports reads as connecting',
-        () async {
-      final peer = await negotiate();
-      peer.pushConnectionState(WebRtcConnectionState.connected);
-      await settle();
+    test(
+      'a connected peer restarting its transports reads as connecting',
+      () async {
+        final peer = await negotiate();
+        peer.pushConnectionState(WebRtcConnectionState.connected);
+        await settle();
 
-      peer.pushConnectionState(WebRtcConnectionState.initial);
-      await settle();
+        peer.pushConnectionState(WebRtcConnectionState.initial);
+        await settle();
 
-      expect(bloc.state, const WebRtcConnecting(testRemoteSessionId));
-    });
+        expect(
+          bloc.state,
+          const WebRtcConnecting(testRemoteSessionId, screenCapture: sharing),
+        );
+      },
+    );
 
     test('connected, interrupted and back again', () async {
       final peer = await negotiate();
 
       peer.pushConnectionState(WebRtcConnectionState.connecting);
       await settle();
-      expect(bloc.state, const WebRtcConnecting(testRemoteSessionId));
+      expect(
+        bloc.state,
+        const WebRtcConnecting(testRemoteSessionId, screenCapture: sharing),
+      );
 
       peer.pushConnectionState(WebRtcConnectionState.connected);
       await settle();
-      expect(bloc.state, const WebRtcConnected(testRemoteSessionId));
+      expect(
+        bloc.state,
+        const WebRtcConnected(testRemoteSessionId, screenCapture: sharing),
+      );
 
       // Possibly transient: nothing is torn down and no timer is started.
       peer.pushConnectionState(WebRtcConnectionState.disconnected);
       await settle();
-      expect(bloc.state, const WebRtcInterrupted(testRemoteSessionId));
+      expect(
+        bloc.state,
+        const WebRtcInterrupted(testRemoteSessionId, screenCapture: sharing),
+      );
       expect(peer.isClosed, isFalse);
+      // The screen is not torn down with a transport either: ICE may re-pair,
+      // and the capture the user authorised is still the right one.
+      expect(screenCapture.stopCount, 0);
 
       peer.pushConnectionState(WebRtcConnectionState.connected);
       await settle();
-      expect(bloc.state, const WebRtcConnected(testRemoteSessionId));
+      expect(
+        bloc.state,
+        const WebRtcConnected(testRemoteSessionId, screenCapture: sharing),
+      );
     });
 
     test('failed closes the negotiation and starts nothing', () async {
@@ -614,7 +678,10 @@ void main() {
       peer.pushConnectionState(WebRtcConnectionState.failed);
       await settle();
 
-      expect(bloc.state, const WebRtcFailed(testRemoteSessionId));
+      expect(
+        bloc.state,
+        const WebRtcFailed(testRemoteSessionId, screenCapture: sharing),
+      );
       expect(peer.isClosed, isTrue);
       expect(factory.createCount, 1);
     });
@@ -625,7 +692,10 @@ void main() {
       peer.pushConnectionState(WebRtcConnectionState.closed);
       await settle();
 
-      expect(bloc.state, const WebRtcClosed(testRemoteSessionId));
+      expect(
+        bloc.state,
+        const WebRtcClosed(testRemoteSessionId, screenCapture: sharing),
+      );
       expect(factory.createCount, 1);
     });
   });
@@ -639,27 +709,29 @@ void main() {
       bloc.add(const WebRtcSignalingAvailabilityChanged(null));
       await settle();
 
-      expect(bloc.state, const WebRtcIdle());
+      expect(bloc.state, const WebRtcIdle(screenCapture: sharing));
       expect(peer.isClosed, isTrue);
     });
 
-    test('and the device then waits for a new offer, never making one',
-        () async {
-      await negotiate();
-      bloc.add(const WebRtcSignalingAvailabilityChanged(null));
-      await settle();
+    test(
+      'and the device then waits for a new offer, never making one',
+      () async {
+        await negotiate();
+        bloc.add(const WebRtcSignalingAvailabilityChanged(null));
+        await settle();
 
-      // The socket comes back and rejoins.
-      bloc.add(const WebRtcSignalingAvailabilityChanged(testRemoteSessionId));
-      await settle();
+        // The socket comes back and rejoins.
+        bloc.add(const WebRtcSignalingAvailabilityChanged(testRemoteSessionId));
+        await settle();
 
-      expect(factory.createCount, 1);
-      expect(bloc.state, const WebRtcIdle());
+        expect(factory.createCount, 1);
+        expect(bloc.state, const WebRtcIdle(screenCapture: sharing));
 
-      // Only a new offer starts anything.
-      await receiveOffer(sdp: testSecondOfferSdp);
-      expect(factory.createCount, 2);
-    });
+        // Only a new offer starts anything.
+        await receiveOffer(sdp: testSecondOfferSdp);
+        expect(factory.createCount, 2);
+      },
+    );
 
     test('a connected peer is left alone', () async {
       final peer = await negotiate();
@@ -699,14 +771,20 @@ void main() {
       final first = await negotiate();
       first.pushConnectionState(WebRtcConnectionState.failed);
       await settle();
-      expect(bloc.state, const WebRtcFailed(testRemoteSessionId));
+      expect(
+        bloc.state,
+        const WebRtcFailed(testRemoteSessionId, screenCapture: sharing),
+      );
 
       // The web reloaded, rejoined and offered again.
       await receiveOffer(sdp: testSecondOfferSdp);
 
       expect(factory.createCount, 2);
       expect(signaling.sentAnswers, hasLength(2));
-      expect(bloc.state, const WebRtcConnecting(testRemoteSessionId));
+      expect(
+        bloc.state,
+        const WebRtcConnecting(testRemoteSessionId, screenCapture: sharing),
+      );
     });
 
     test('a late callback from the old generation is ignored', () async {
@@ -716,7 +794,10 @@ void main() {
       await receiveOffer(sdp: testSecondOfferSdp);
       factory.last.pushConnectionState(WebRtcConnectionState.connected);
       await settle();
-      expect(bloc.state, const WebRtcConnected(testRemoteSessionId));
+      expect(
+        bloc.state,
+        const WebRtcConnected(testRemoteSessionId, screenCapture: sharing),
+      );
 
       // The first negotiation is generation 1 — the first offer bumps 0 to 1 —
       // and everything after it moved on. A real connection keeps reporting
@@ -729,23 +810,28 @@ void main() {
       bloc.add(WebRtcLocalIceProduced(1, localCandidate('candidate:stale')));
       await settle();
 
-      expect(bloc.state, const WebRtcConnected(testRemoteSessionId));
+      expect(
+        bloc.state,
+        const WebRtcConnected(testRemoteSessionId, screenCapture: sharing),
+      );
       expect(signaling.sentIceLines, isNot(contains('candidate:stale')));
     });
 
-    test('a data channel from an old generation is closed, never kept',
-        () async {
-      await negotiate();
-      expect(bloc.state.controlChannel, isNull);
+    test(
+      'a data channel from an old generation is closed, never kept',
+      () async {
+        await negotiate();
+        expect(bloc.state.controlChannel, isNull);
 
-      final stale = FakeWebRtcDataChannel(label: controlDataChannelLabel);
-      // Generation 0 can never be current: the first offer already bumped it.
-      bloc.add(WebRtcDataChannelOffered(0, stale));
-      await settle();
+        final stale = FakeWebRtcDataChannel(label: controlDataChannelLabel);
+        // Generation 0 can never be current: the first offer already bumped it.
+        bloc.add(WebRtcDataChannelOffered(0, stale));
+        await settle();
 
-      expect(stale.isClosed, isTrue);
-      expect(bloc.state.controlChannel, isNull);
-    });
+        expect(stale.isClosed, isTrue);
+        expect(bloc.state.controlChannel, isNull);
+      },
+    );
 
     test('an offer after the peer closed builds a new one', () async {
       final first = await negotiate();
@@ -840,6 +926,280 @@ void main() {
 
       expect(bloc.state, const WebRtcIdle());
       expect(peer.closeCount, 1);
+    });
+  });
+
+  // ---------------------------------------------------------- screen video
+
+  group('sharing the screen', () {
+    test('the screen goes on the connection before the answer exists', () async {
+      final peer = await negotiate();
+
+      // The order is the whole point. `remote_control_web` creates a recvonly
+      // video transceiver before it offers, so by the time the offer has been
+      // applied there is exactly one m=video waiting to be filled; filling it
+      // after createAnswer would describe a negotiation that is not happening.
+      expect(peer.calls, [
+        'setRemoteDescription',
+        'attachScreenVideo',
+        'createAnswer',
+        'setLocalDescription',
+      ]);
+      expect(peer.attachedScreenTracks, [testScreenVideoTrack]);
+      expect(screenCapture.requests, [testRemoteSessionId]);
+      expect(bloc.state.screenCapture, ScreenCaptureStatus.active);
+    });
+
+    test('the offered transceiver is used once, never a second one', () async {
+      final peer = await negotiate();
+
+      // One attach, so one m=video: the section the web offered. A second
+      // attach here would be an addTransceiver or an addTrack, and the answer
+      // would carry a video section the web never asked for and cannot
+      // receive on.
+      expect(
+        peer.calls.where((call) => call == 'attachScreenVideo'),
+        hasLength(1),
+      );
+      expect(peer.attachedScreenTracks, hasLength(1));
+    });
+
+    test('the screen is asked for only while answering a real offer', () async {
+      // Every cue short of an offer, including both preconditions being in
+      // place and the technician being in the room.
+      await becomeReady();
+      bloc.add(const WebRtcSignalingAvailabilityChanged(testRemoteSessionId));
+      bloc.add(const WebRtcRemoteSessionChanged(testRemoteSessionId));
+      await settle();
+
+      expect(screenCapture.requests, isEmpty);
+      expect(bloc.state.screenCapture, ScreenCaptureStatus.idle);
+    });
+
+    test('an offer that is ignored never asks for the screen', () async {
+      await becomeReady();
+
+      await receiveOffer(remoteSessionId: testOtherRemoteSessionId);
+
+      // Following it would let whatever is on the other end of the socket make
+      // a tablet ask its user to share their screen.
+      expect(screenCapture.requests, isEmpty);
+    });
+  });
+
+  // -------------------------------------------------- a screen that is not
+
+  group('answering without a screen', () {
+    test('a declined dialog still produces an answer', () async {
+      screenCapture.result = const ScreenCaptureDenied();
+
+      final peer = await negotiate();
+
+      // The assistance is unharmed. This is the ordinary case of a user who
+      // accepted a technician and not a screen share, and it must not look
+      // like a failure anywhere: the negotiation runs exactly as it did before
+      // there was a screen to attach.
+      expect(peer.calls, [
+        'setRemoteDescription',
+        'createAnswer',
+        'setLocalDescription',
+      ]);
+      expect(signaling.sentAnswers, hasLength(1));
+      expect(bloc.state, isA<WebRtcConnecting>());
+      expect(bloc.state.screenCapture, ScreenCaptureStatus.denied);
+    });
+
+    test('a declined dialog leaves nothing attached', () async {
+      screenCapture.result = const ScreenCaptureDenied();
+
+      final peer = await negotiate();
+
+      expect(peer.attachedScreenTracks, isEmpty);
+      expect(peer.calls, isNot(contains('attachScreenVideo')));
+    });
+
+    test('a capture that failed still produces an answer', () async {
+      screenCapture.result = const ScreenCaptureUnavailable(
+        ScreenCaptureFailure.foregroundServiceRefused,
+      );
+
+      final peer = await negotiate();
+
+      expect(peer.calls, contains('createAnswer'));
+      expect(signaling.sentAnswers, hasLength(1));
+      expect(bloc.state.screenCapture, ScreenCaptureStatus.failed);
+    });
+
+    test('the control channel opens on a connection with no screen', () async {
+      screenCapture.result = const ScreenCaptureDenied();
+      final peer = await negotiate();
+
+      peer.pushConnectionState(WebRtcConnectionState.connected);
+      final channel = peer.pushDataChannel();
+      await settle();
+      channel.pushState(WebRtcDataChannelState.open);
+      await settle();
+
+      // The success condition of this stage is untouched by the screen: a
+      // connected peer and an open control channel, and nothing else.
+      expect(bloc.state.isRemoteConnectionEstablished, isTrue);
+      expect(bloc.state.screenCapture, ScreenCaptureStatus.denied);
+    });
+
+    test('an offer with no video section is answered anyway', () async {
+      factory.screenVideoAttachment = ScreenVideoAttachment.noVideoTransceiver;
+
+      final peer = await negotiate();
+
+      // Nothing is invented to make up for it: no transceiver is added, no SDP
+      // is rewritten, and the negotiation carries on with the data channel.
+      expect(peer.calls, contains('createAnswer'));
+      expect(signaling.sentAnswers, hasLength(1));
+      expect(bloc.state.screenCapture, ScreenCaptureStatus.failed);
+      // And the capture is released, because there is nowhere for it to go.
+      // Recording somebody's screen for nobody, behind a notification saying
+      // it is being shared, is worse than not recording it.
+      expect(screenCapture.stopCount, 1);
+      expect(screenCapture.isActive, isFalse);
+    });
+
+    test('an attachment that failed releases the capture', () async {
+      factory.screenVideoAttachment = ScreenVideoAttachment.failed;
+
+      await negotiate();
+
+      expect(bloc.state.screenCapture, ScreenCaptureStatus.failed);
+      expect(screenCapture.stopCount, 1);
+    });
+  });
+
+  // ------------------------------------------ the screen and the peer
+
+  group('one capture, several negotiations', () {
+    test('a second negotiation reuses the capture, asking nobody', () async {
+      final first = await negotiate();
+      first.pushConnectionState(WebRtcConnectionState.failed);
+      await settle();
+
+      await receiveOffer(sdp: testSecondOfferSdp);
+
+      // The client is what refuses a second Android dialog for one remote
+      // session; what the bloc must not do is stop the capture in between.
+      expect(screenCapture.stopCount, 0);
+      expect(screenCapture.requests, [
+        testRemoteSessionId,
+        testRemoteSessionId,
+      ]);
+      expect(factory.last.attachedScreenTracks, [testScreenVideoTrack]);
+      expect(bloc.state.screenCapture, ScreenCaptureStatus.active);
+    });
+
+    test('a peer connection closing does not stop the capture', () async {
+      final peer = await negotiate();
+
+      peer.pushConnectionState(WebRtcConnectionState.closed);
+      await settle();
+
+      // MediaProjection belongs to the remote session, not to this peer
+      // connection. The backend still holds the session; the web will come
+      // back and offer again.
+      expect(screenCapture.stopCount, 0);
+      expect(bloc.state.screenCapture, ScreenCaptureStatus.active);
+    });
+
+    test('a generation that went stale mid-dialog answers nothing', () async {
+      await becomeReady();
+      final gate = Completer<void>();
+      screenCapture.startGate = gate;
+
+      bloc.add(WebRtcOfferReceived(offerFor()));
+      await settle();
+      final abandoned = factory.last;
+
+      // While the user is looking at the Android dialog, the web reloads and
+      // offers again. The generation moves on.
+      screenCapture.startGate = null;
+      await receiveOffer(sdp: testSecondOfferSdp);
+      gate.complete();
+      await settle();
+
+      // No answer was ever created for the abandoned peer connection.
+      expect(abandoned.calls, isNot(contains('createAnswer')));
+      expect(abandoned.attachedScreenTracks, isEmpty);
+      expect(abandoned.isClosed, isTrue);
+      // And the capture the user just authorised survives it, for the
+      // negotiation that replaced it.
+      expect(screenCapture.stopCount, 0);
+      expect(bloc.state.screenCapture, ScreenCaptureStatus.active);
+    });
+  });
+
+  // ----------------------------------------------------- releasing it
+
+  group('the screen and the remote session', () {
+    test('a closed remote session stops the capture', () async {
+      await negotiate();
+
+      bloc.add(const WebRtcRemoteSessionChanged(null));
+      await settle();
+
+      // Every way an assistance ends arrives here: the device closing it, the
+      // technician closing it, remote-session:closed, a revoked credential.
+      expect(screenCapture.stopCount, 1);
+      expect(bloc.state, const WebRtcIdle());
+    });
+
+    test('a different remote session starts a different capture', () async {
+      await negotiate();
+
+      bloc.add(const WebRtcRemoteSessionChanged(testOtherRemoteSessionId));
+      await settle();
+
+      // The old capture is released here; the next offer asks the user again,
+      // because an Android projection is granted for one capture and a later
+      // assistance is not the one they agreed to.
+      expect(screenCapture.stopCount, 1);
+      expect(bloc.state.screenCapture, ScreenCaptureStatus.idle);
+    });
+
+    test('a capture outliving its negotiation is still released', () async {
+      // The negotiation was abandoned when signaling went away, so nothing
+      // holds a peer connection any more -- but the capture is still running
+      // and the panel is still saying so.
+      await negotiate();
+      bloc.add(const WebRtcSignalingAvailabilityChanged(null));
+      await settle();
+      expect(bloc.state, const WebRtcIdle(screenCapture: sharing));
+
+      bloc.add(const WebRtcRemoteSessionChanged(null));
+      await settle();
+
+      expect(screenCapture.stopCount, 1);
+      expect(bloc.state, const WebRtcIdle());
+    });
+
+    test('closing the bloc stops the capture', () async {
+      await negotiate();
+
+      await bloc.close();
+
+      // No MediaProjection outlives the process that was granted it, and no
+      // notification outlives the assistance it belonged to.
+      expect(screenCapture.stopCount, 1);
+    });
+
+    test('repeated teardown stops it once and never throws', () async {
+      await negotiate();
+
+      bloc.add(const WebRtcRemoteSessionChanged(null));
+      await settle();
+      bloc.add(const WebRtcRemoteSessionChanged(null));
+      await settle();
+      bloc.add(const WebRtcSignalingAvailabilityChanged(null));
+      await settle();
+
+      expect(screenCapture.stopCount, 1);
+      expect(bloc.state, const WebRtcIdle());
     });
   });
 

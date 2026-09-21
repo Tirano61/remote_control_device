@@ -1,4 +1,6 @@
+import 'package:remote_control_device/features/screen_capture/domain/entities/screen_video_track.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/peer_ice_candidate.dart';
+import 'package:remote_control_device/features/webrtc/domain/entities/screen_video_attachment.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_connection_state.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_data_channel_message.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_data_channel_state.dart';
@@ -32,9 +34,11 @@ import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_ses
 abstract interface class WebRtcPeerConnectionFactory {
   /// Creates a peer connection with [configuration] and no media of any kind.
   ///
-  /// This build captures nothing — no camera, no microphone, no screen — so no
-  /// track is ever added. Screen capture arrives with `MediaProjection`, in its
-  /// own prompt, along with the permissions it needs.
+  /// It captures nothing at this point, and nothing is added to it here. The
+  /// screen arrives later and from one direction only: an offer is applied,
+  /// the video section it carries is found, and the track is put on *that*
+  /// section by [WebRtcPeerConnection.attachScreenVideo]. There is still no
+  /// camera and no microphone, in this build or in its manifest.
   Future<WebRtcPeerConnection> create(WebRtcIceConfiguration configuration);
 }
 
@@ -68,6 +72,38 @@ abstract interface class WebRtcPeerConnection {
   /// filtered. Remote candidates may only be added after this completes, which
   /// is why the caller queues the ones that arrive first.
   Future<void> setRemoteDescription(WebRtcSessionDescription description);
+
+  /// Puts the screen's [track] on the video section the applied offer created,
+  /// and turns that section into a sending one.
+  ///
+  /// Called between [setRemoteDescription] and [createAnswer], and that
+  /// placement is the whole design. `remote_control_web` creates a `recvonly`
+  /// video transceiver *before* it offers, so by the time the offer has been
+  /// applied there is already exactly one video `m=` section waiting for this
+  /// end to fill:
+  ///
+  /// ```text
+  /// web     addTransceiver(video, recvonly)  ->  offer carries m=video
+  /// device  setRemoteDescription(offer)      ->  a video transceiver exists
+  /// device  attachScreenVideo(track)         ->  that one becomes sendonly
+  /// device  createAnswer()                   ->  the answer says sendonly
+  /// ```
+  ///
+  /// Which is why the port says *attach*, not *add*. Adding a track — or
+  /// adding a transceiver — after the offer was applied would create a
+  /// **second** `m=video` that the web never offered and cannot receive on,
+  /// and the answer would then describe a negotiation neither end asked for.
+  /// The section that is used is always the section the offer brought.
+  ///
+  /// The SDP itself is never touched: no string is edited, nothing is
+  /// reordered and no line is inserted. The direction and the track are set
+  /// through the peer connection, and `createAnswer` writes the SDP that
+  /// follows from them.
+  ///
+  /// Never throws. An answer is created whatever this returns, because a
+  /// screen that could not be attached is a missing capability and not a
+  /// failed assistance session.
+  Future<ScreenVideoAttachment> attachScreenVideo(ScreenVideoTrack track);
 
   /// Produces the answer. Does **not** apply it — [setLocalDescription] does,
   /// and keeping them apart is what makes the order of the two observable.

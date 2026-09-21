@@ -4,15 +4,22 @@ import 'package:remote_control_device/core/error/failures.dart';
 import 'package:remote_control_device/features/device/presentation/bloc/realtime/device_realtime_bloc.dart';
 import 'package:remote_control_device/features/device/presentation/widgets/failure_messages.dart';
 import 'package:remote_control_device/features/remote_session/presentation/bloc/remote_session/remote_session_bloc.dart';
+import 'package:remote_control_device/features/screen_capture/domain/entities/screen_capture_status.dart';
 import 'package:remote_control_device/features/webrtc/presentation/bloc/webrtc_session/webrtc_session_bloc.dart';
 
 /// What the screen shows while a remote assistance session is live.
 ///
 /// It renders a state the backend confirmed and offers exactly one action:
-/// ending the assistance. There is still no video and no remote control — this
-/// build negotiates a peer connection and a control channel and sends nothing
-/// over either — so the panel says "remote connection established" and never
-/// "sharing your screen", which would be a promise the application cannot keep.
+/// ending the assistance. The screen may now be travelling to the technician,
+/// but nothing comes back: there is still no remote control, and the control
+/// channel carries nothing.
+///
+/// Screen sharing is one discreet line and never the headline. It is a
+/// separate fact from the assistance itself — a user who declined Android's
+/// capture dialog still has a technician connected — and putting it where the
+/// headline is would make a refused permission look like a broken session.
+/// Android's own dialog and its persistent notification are what actually tell
+/// the user their screen is being shared; this line only agrees with them.
 ///
 /// It reads two states because the user's question spans both, and the two are
 /// allowed to disagree for a moment:
@@ -45,6 +52,7 @@ class RemoteSessionPanel extends StatelessWidget {
   /// Keys the widget tests address, so a rename of user-facing text is not a
   /// test failure.
   static const Key closeButtonKey = Key('remote-session-close-button');
+  static const Key screenCaptureLineKey = Key('remote-session-screen-line');
 
   final RemoteSessionLive state;
 
@@ -68,8 +76,10 @@ class RemoteSessionPanel extends StatelessWidget {
             // Success at this stage is both halves at once: the peer connection
             // connected and the control channel open. Either alone is still
             // "connecting", because either alone could not carry a command once
-            // there is one to carry.
+            // there is one to carry. Screen capture is deliberately not part of
+            // it, and is read separately below.
             established: webRtc.isRemoteConnectionEstablished,
+            screenCapture: webRtc.screenCapture,
           ),
         );
       },
@@ -83,9 +93,11 @@ class RemoteSessionPanel extends StatelessWidget {
     required Failure? failure,
     required bool connected,
     required bool established,
+    required ScreenCaptureStatus screenCapture,
   }) {
     final detail = _detail(connected: connected, established: established);
     final connectedSince = _connectedSince(connected: connected);
+    final screen = _screenLine(screenCapture, connected: connected);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -104,6 +116,16 @@ class RemoteSessionPanel extends StatelessWidget {
           const SizedBox(height: 4),
           Text(
             'Conectado desde: $connectedSince',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.outline,
+            ),
+          ),
+        ],
+        if (screen != null) ...[
+          const SizedBox(height: 4),
+          Text(
+            screen,
+            key: screenCaptureLineKey,
             style: theme.textTheme.bodySmall?.copyWith(
               color: theme.colorScheme.outline,
             ),
@@ -182,6 +204,28 @@ class RemoteSessionPanel extends StatelessWidget {
     if (state is! RemoteSessionActive) return null;
 
     return established ? 'Conexión remota establecida' : null;
+  }
+
+  /// One short line about the screen, or `null` when there is nothing to say.
+  ///
+  /// Four outcomes, no technical detail and no button. The permission dialog
+  /// belongs to Android, the "stop sharing" control belongs to Android, and
+  /// duplicating either here would offer the user a second way to do something
+  /// the system already does better.
+  ///
+  /// Nothing is shown while the tablet is reconnecting: the headline is
+  /// already saying the connection is the problem, and a capture that is still
+  /// running locally is not what the user needs to read at that moment.
+  String? _screenLine(ScreenCaptureStatus status, {required bool connected}) {
+    if (state.closing || !connected) return null;
+
+    return switch (status) {
+      ScreenCaptureStatus.idle => null,
+      ScreenCaptureStatus.requesting => 'Pantalla: esperando autorización',
+      ScreenCaptureStatus.active => 'Pantalla: compartiendo',
+      ScreenCaptureStatus.denied => 'Pantalla: permiso rechazado',
+      ScreenCaptureStatus.failed => 'Pantalla: error al compartir',
+    };
   }
 
   /// `HH:mm` of `connectedAt`, in the tablet's local time, or `null`.

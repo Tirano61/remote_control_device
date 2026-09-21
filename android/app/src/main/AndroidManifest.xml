@@ -4,6 +4,20 @@
     <!-- The device talks to remote_control_backend over HTTP(S). -->
     <uses-permission android:name="android.permission.INTERNET"/>   
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Screen sharing during an assistance session.
+
+         Both are required together from Android 14 (API 34): a MediaProjection
+         capture may only run while a foreground service typed mediaProjection
+         is running, and declaring the type needs its own permission.
+
+         There is deliberately no CAMERA, no RECORD_AUDIO and no location
+         permission here. This application captures the screen and nothing
+         else, and getDisplayMedia is asked for video only - so there is
+         nothing to ask a microphone or a camera for, and no way to start one
+         by mistake. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     
     
     <application
@@ -32,6 +46,17 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <!-- Keeps the screen capture alive and shows the notification that
+             tells the user it is running.
+
+             exported="false": nothing outside this application may start it.
+             The only thing that does is MediaProjectionChannel, and only after
+             the user has granted the projection. -->
+        <service
+            android:name=".MediaProjectionForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

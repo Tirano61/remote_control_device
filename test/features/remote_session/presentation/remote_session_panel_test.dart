@@ -22,6 +22,7 @@ import 'package:remote_control_device/features/support/domain/usecases/reject_su
 import 'package:remote_control_device/features/support/domain/usecases/request_support.dart';
 import 'package:remote_control_device/features/support/presentation/bloc/support/support_bloc.dart';
 import 'package:remote_control_device/features/support/presentation/widgets/support_panel.dart';
+import 'package:remote_control_device/features/screen_capture/domain/entities/screen_capture_result.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_connection_state.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_data_channel_state.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_ice_configuration.dart';
@@ -32,6 +33,7 @@ import '../../../fakes/device_fakes.dart';
 import '../../../fakes/realtime_fakes.dart';
 import '../../../fakes/remote_session_fakes.dart';
 import '../../../fakes/support_fakes.dart';
+import '../../../fakes/screen_capture_fakes.dart';
 import '../../../fakes/webrtc_fakes.dart';
 
 /// Drives the real screen — `ReadyPage`, both panels, all three blocs — with
@@ -47,6 +49,7 @@ void main() {
   late DeviceRealtimeBloc realtimeBloc;
   late WebRtcSessionBloc webRtcBloc;
   late FakeWebRtcPeerConnectionFactory peerFactory;
+  late FakeScreenCaptureClient screenCapture;
   late FakeWebRtcSignalingGateway webRtcSignaling;
 
   /// Built inside the test body on purpose: a bloc created in `setUp` lives in
@@ -85,10 +88,12 @@ void main() {
     );
     peerFactory = FakeWebRtcPeerConnectionFactory();
     webRtcSignaling = FakeWebRtcSignalingGateway();
+    screenCapture = FakeScreenCaptureClient();
     webRtcBloc = WebRtcSessionBloc(
       peerConnectionFactory: peerFactory,
       signaling: webRtcSignaling,
       iceConfiguration: const WebRtcIceConfiguration.none(),
+      screenCapture: screenCapture,
     );
     addTearDown(supportBloc.close);
     addTearDown(remoteSessionBloc.close);
@@ -116,7 +121,9 @@ void main() {
   /// a technician, the channel is up, and no session exists yet.
   Future<void> pumpAccepted(WidgetTester tester) async {
     createBlocs();
-    supportRepository.currentResult = const Ok<SupportRequest?>(acceptedRequest);
+    supportRepository.currentResult = const Ok<SupportRequest?>(
+      acceptedRequest,
+    );
     await tester.pumpWidget(harness());
 
     realtimeBloc.add(const DeviceRealtimeStartRequested());
@@ -126,26 +133,27 @@ void main() {
     await settle(tester);
   }
 
-  testWidgets('ACCEPTED with no session yet keeps preparing, without an error',
-      (tester) async {
-    await pumpAccepted(tester);
+  testWidgets(
+    'ACCEPTED with no session yet keeps preparing, without an error',
+    (tester) async {
+      await pumpAccepted(tester);
 
-    expect(find.text('Técnico autorizado'), findsOneWidget);
-    expect(find.text('Preparando la asistencia...'), findsOneWidget);
-    expect(find.byKey(RemoteSessionPanel.closeButtonKey), findsNothing);
-    // Waiting for the technician to press "start" is not a failure.
-    expect(find.textContaining('No se pudo'), findsNothing);
-    expect(find.byKey(RemoteSessionPanel.closeButtonKey), findsNothing);
-  });
+      expect(find.text('Técnico autorizado'), findsOneWidget);
+      expect(find.text('Preparando la asistencia...'), findsOneWidget);
+      expect(find.byKey(RemoteSessionPanel.closeButtonKey), findsNothing);
+      // Waiting for the technician to press "start" is not a failure.
+      expect(find.textContaining('No se pudo'), findsNothing);
+      expect(find.byKey(RemoteSessionPanel.closeButtonKey), findsNothing);
+    },
+  );
 
-  testWidgets('CONNECTING shows the technician and offers to end it',
-      (tester) async {
+  testWidgets('CONNECTING shows the technician and offers to end it', (
+    tester,
+  ) async {
     await pumpAccepted(tester);
 
     remoteSessionRepository.currentResult = connectingRemoteSession;
-    remoteSessionBloc.add(
-      const RemoteSessionAnnounced(testRemoteSessionId),
-    );
+    remoteSessionBloc.add(const RemoteSessionAnnounced(testRemoteSessionId));
     await settle(tester);
 
     expect(find.text('Asistencia remota'), findsOneWidget);
@@ -155,8 +163,10 @@ void main() {
     // The support panel is no longer in charge.
     expect(find.text('Preparando la asistencia...'), findsNothing);
     expect(find.byKey(SupportPanel.requestButtonKey), findsNothing);
-    // Nothing this build cannot actually do is announced.
-    expect(find.textContaining('pantalla'), findsNothing);
+    // Nothing this build cannot actually do is announced -- and the screen is
+    // not mentioned before there is an offer to answer, because nothing has
+    // been captured and the user has not been asked for anything.
+    expect(find.byKey(RemoteSessionPanel.screenCaptureLineKey), findsNothing);
     expect(find.textContaining('control'), findsNothing);
   });
 
@@ -179,8 +189,9 @@ void main() {
     await settle(tester);
   }
 
-  testWidgets('a connected peer with an open control channel says so',
-      (tester) async {
+  testWidgets('a connected peer with an open control channel says so', (
+    tester,
+  ) async {
     await pumpAccepted(tester);
     remoteSessionRepository.currentResult = connectingRemoteSession;
     remoteSessionBloc.add(const RemoteSessionAnnounced(testRemoteSessionId));
@@ -196,8 +207,9 @@ void main() {
     expect(find.text('Conectando con el técnico...'), findsNothing);
     // Ending the assistance stays available; it matters most right here.
     expect(find.byKey(RemoteSessionPanel.closeButtonKey), findsOneWidget);
-    // And still nothing this build cannot do is claimed.
-    expect(find.textContaining('pantalla'), findsNothing);
+    // The screen is a second, quieter line. It never replaces the headline:
+    // the assistance is what the user is in, and sharing is one fact about it.
+    expect(find.text('Pantalla: compartiendo'), findsOneWidget);
   });
 
   testWidgets('half a connection is still connecting', (tester) async {
@@ -220,8 +232,9 @@ void main() {
     expect(find.text('Conexión remota establecida'), findsNothing);
   });
 
-  testWidgets('a lost socket outranks an established peer connection',
-      (tester) async {
+  testWidgets('a lost socket outranks an established peer connection', (
+    tester,
+  ) async {
     await pumpAccepted(tester);
     remoteSessionRepository.currentResult = connectingRemoteSession;
     remoteSessionBloc.add(const RemoteSessionAnnounced(testRemoteSessionId));
@@ -241,8 +254,9 @@ void main() {
     expect(webRtcBloc.state.isRemoteConnectionEstablished, isTrue);
   });
 
-  testWidgets('ACTIVE says the assistance is under way, and nothing more',
-      (tester) async {
+  testWidgets('ACTIVE says the assistance is under way, and nothing more', (
+    tester,
+  ) async {
     await pumpAccepted(tester);
 
     remoteSessionRepository.currentResult = activeRemoteSession;
@@ -252,12 +266,97 @@ void main() {
     expect(find.text('Asistencia en curso'), findsOneWidget);
     expect(find.text('Conectando con el técnico...'), findsNothing);
     expect(find.byKey(RemoteSessionPanel.closeButtonKey), findsOneWidget);
-    expect(find.textContaining('Compartiendo'), findsNothing);
-    expect(find.textContaining('pantalla'), findsNothing);
+    // ACTIVE on its own says nothing about the screen: no offer was answered
+    // here, so nothing was captured and nothing is claimed.
+    expect(find.byKey(RemoteSessionPanel.screenCaptureLineKey), findsNothing);
   });
 
-  testWidgets('CONNECTING becomes ACTIVE without contradicting itself',
-      (tester) async {
+  testWidgets('a refused screen does not look like a broken session', (
+    tester,
+  ) async {
+    await pumpAccepted(tester);
+    screenCapture.result = const ScreenCaptureDenied();
+    remoteSessionRepository.currentResult = connectingRemoteSession;
+    remoteSessionBloc.add(const RemoteSessionAnnounced(testRemoteSessionId));
+    await settle(tester);
+
+    await establishPeerConnection(tester);
+
+    // The technician is connected and the control channel is open. Declining
+    // the Android dialog cost the screen and nothing else, and the headline
+    // says exactly that.
+    expect(find.text('Conexión remota establecida'), findsOneWidget);
+    expect(find.text('Pantalla: permiso rechazado'), findsOneWidget);
+    expect(find.byKey(RemoteSessionPanel.closeButtonKey), findsOneWidget);
+  });
+
+  testWidgets('a capture that failed says so, and no more than that', (
+    tester,
+  ) async {
+    await pumpAccepted(tester);
+    screenCapture.result = const ScreenCaptureUnavailable(
+      ScreenCaptureFailure.captureRefused,
+    );
+    remoteSessionRepository.currentResult = connectingRemoteSession;
+    remoteSessionBloc.add(const RemoteSessionAnnounced(testRemoteSessionId));
+    await settle(tester);
+
+    await establishPeerConnection(tester);
+
+    expect(find.text('Pantalla: error al compartir'), findsOneWidget);
+    // No reason, no code, no platform message. The user can do nothing with
+    // any of those, and one of them could quote an Android exception.
+    expect(find.textContaining('captureRefused'), findsNothing);
+    expect(find.textContaining('MediaProjection'), findsNothing);
+  });
+
+  testWidgets('the wait for the Android dialog is visible', (tester) async {
+    await pumpAccepted(tester);
+    final gate = Completer<void>();
+    screenCapture.startGate = gate;
+    remoteSessionRepository.currentResult = connectingRemoteSession;
+    remoteSessionBloc.add(const RemoteSessionAnnounced(testRemoteSessionId));
+    await settle(tester);
+
+    webRtcBloc.add(
+      const WebRtcSignalingAvailabilityChanged(testRemoteSessionId),
+    );
+    webRtcBloc.add(const WebRtcRemoteSessionChanged(testRemoteSessionId));
+    webRtcBloc.add(WebRtcOfferReceived(offerFor()));
+    await settle(tester);
+
+    // Android's own dialog is over the app at this moment; the line is what is
+    // underneath it, and what is left if the user takes their time.
+    expect(find.text('Pantalla: esperando autorización'), findsOneWidget);
+
+    gate.complete();
+    await settle(tester);
+    expect(find.text('Pantalla: compartiendo'), findsOneWidget);
+  });
+
+  testWidgets('a reconnecting tablet says nothing about the screen', (
+    tester,
+  ) async {
+    await pumpAccepted(tester);
+    remoteSessionRepository.currentResult = connectingRemoteSession;
+    remoteSessionBloc.add(const RemoteSessionAnnounced(testRemoteSessionId));
+    await settle(tester);
+    await establishPeerConnection(tester);
+    expect(find.text('Pantalla: compartiendo'), findsOneWidget);
+
+    client.push(const RealtimeDisconnected());
+    await settle(tester);
+
+    // The headline is already saying the connection is the problem. A second
+    // line about a capture that is still running locally is not what the user
+    // needs to read at that moment.
+    expect(find.text('Reconectando...'), findsNWidgets(2));
+    expect(find.byKey(RemoteSessionPanel.screenCaptureLineKey), findsNothing);
+  });
+
+  testWidgets('CONNECTING becomes ACTIVE without contradicting itself', (
+    tester,
+  ) async {
     await pumpAccepted(tester);
     remoteSessionRepository.currentResult = connectingRemoteSession;
     remoteSessionBloc.add(const RemoteSessionSyncRequested());
@@ -285,8 +384,9 @@ void main() {
     expect(peerFactory.createCount, 1);
   });
 
-  testWidgets('ACTIVE shows when the backend says the connection came up',
-      (tester) async {
+  testWidgets('ACTIVE shows when the backend says the connection came up', (
+    tester,
+  ) async {
     await pumpAccepted(tester);
 
     remoteSessionRepository.currentResult = activatedRemoteSession;
@@ -301,8 +401,9 @@ void main() {
     expect(find.text('Conectado desde: $hour:$minute'), findsOneWidget);
   });
 
-  testWidgets('a session with no connectedAt shows no connection time',
-      (tester) async {
+  testWidgets('a session with no connectedAt shows no connection time', (
+    tester,
+  ) async {
     await pumpAccepted(tester);
 
     // ACTIVE without the field: nothing is invented to fill the line.
@@ -314,8 +415,9 @@ void main() {
     expect(find.textContaining('Conectado desde'), findsNothing);
   });
 
-  testWidgets('an ACTIVE session that loses the socket says reconnecting',
-      (tester) async {
+  testWidgets('an ACTIVE session that loses the socket says reconnecting', (
+    tester,
+  ) async {
     await pumpAccepted(tester);
     remoteSessionRepository.currentResult = activatedRemoteSession;
     remoteSessionBloc.add(const RemoteSessionSyncRequested());
@@ -334,8 +436,9 @@ void main() {
     expect(webRtcBloc.state.isRemoteConnectionEstablished, isTrue);
   });
 
-  testWidgets('losing the channel says reconnecting, never that it ended',
-      (tester) async {
+  testWidgets('losing the channel says reconnecting, never that it ended', (
+    tester,
+  ) async {
     await pumpAccepted(tester);
     remoteSessionRepository.currentResult = connectingRemoteSession;
     remoteSessionBloc.add(const RemoteSessionSyncRequested());
@@ -355,17 +458,16 @@ void main() {
     // The session is still there and can still be ended.
     expect(
       tester
-          .widget<OutlinedButton>(
-            find.byKey(RemoteSessionPanel.closeButtonKey),
-          )
+          .widget<OutlinedButton>(find.byKey(RemoteSessionPanel.closeButtonKey))
           .onPressed,
       isNotNull,
     );
     expect(find.byKey(SupportPanel.requestButtonKey), findsNothing);
   });
 
-  testWidgets('ending it from the tablet closes and returns to the request',
-      (tester) async {
+  testWidgets('ending it from the tablet closes and returns to the request', (
+    tester,
+  ) async {
     await pumpAccepted(tester);
     remoteSessionRepository.currentResult = connectingRemoteSession;
     remoteSessionBloc.add(const RemoteSessionSyncRequested());
@@ -384,8 +486,9 @@ void main() {
     expect(find.byKey(RemoteSessionPanel.closeButtonKey), findsNothing);
   });
 
-  testWidgets('a second tap while closing cannot start another close',
-      (tester) async {
+  testWidgets('a second tap while closing cannot start another close', (
+    tester,
+  ) async {
     await pumpAccepted(tester);
     remoteSessionRepository.currentResult = connectingRemoteSession;
     remoteSessionBloc.add(const RemoteSessionSyncRequested());
@@ -403,9 +506,7 @@ void main() {
     expect(find.text('Finalizando la asistencia...'), findsOneWidget);
     expect(
       tester
-          .widget<OutlinedButton>(
-            find.byKey(RemoteSessionPanel.closeButtonKey),
-          )
+          .widget<OutlinedButton>(find.byKey(RemoteSessionPanel.closeButtonKey))
           .onPressed,
       isNull,
     );
@@ -415,8 +516,9 @@ void main() {
     expect(remoteSessionRepository.closeCount, 1);
   });
 
-  testWidgets('an unknown session state offers to ask again, not to request',
-      (tester) async {
+  testWidgets('an unknown session state offers to ask again, not to request', (
+    tester,
+  ) async {
     createBlocs();
     supportRepository.currentResult = const Ok<SupportRequest?>(null);
     remoteSessionRepository.currentResult = remoteSessionUnreachable;
@@ -443,8 +545,9 @@ void main() {
     expect(find.text('Conectando con el técnico...'), findsOneWidget);
   });
 
-  testWidgets('never shows a token, a secret or a backend message',
-      (tester) async {
+  testWidgets('never shows a token, a secret or a backend message', (
+    tester,
+  ) async {
     await pumpAccepted(tester);
     remoteSessionRepository.currentResult = connectingRemoteSession;
     remoteSessionBloc.add(const RemoteSessionSyncRequested());

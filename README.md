@@ -7,6 +7,11 @@ The backend (`remote_control_backend`) is the source of truth; its contracts are
 copied under [docs/backend/ENDPOINTS.md](docs/backend/ENDPOINTS.md) (REST) and
 [docs/backend/REALTIME.md](docs/backend/REALTIME.md) (Socket.IO).
 
+How the screen reaches the technician — the WebRTC roles, the Android 14
+consent → foreground service → capture order, and what happens when the user
+declines — is written up in
+[docs/webrtc/SCREEN_SHARING.md](docs/webrtc/SCREEN_SHARING.md).
+
 ## Backend base URL
 
 The base URL is the only environment-dependent setting and is injected at

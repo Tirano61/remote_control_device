@@ -81,6 +81,11 @@ class _RemoteControlAppState extends State<RemoteControlApp> {
       peerConnectionFactory: dependencies.peerConnectionFactory,
       signaling: _signalingBloc,
       iceConfiguration: dependencies.iceConfiguration,
+      // The screen, behind its own port. The bloc decides *when* it may be
+      // asked for — only while answering an offer for a live remote session —
+      // and the client decides how, in which order, and whether the user has
+      // to be asked at all.
+      screenCapture: dependencies.screenCaptureClient,
     );
 
     _realtimeCoordinator = DeviceRealtimeCoordinator(
@@ -124,8 +129,9 @@ class _RemoteControlAppState extends State<RemoteControlApp> {
     _realtimeCoordinator.dispose();
     // Closing the realtime bloc also disposes the socket, so no connection
     // outlives the session it belonged to. The WebRTC bloc goes first for the
-    // same reason applied to the peer connection: it closes its channel and
-    // its connection on the way out, so no P2P link outlives the application.
+    // same reason applied to the peer connection and to the screen: it closes
+    // its channel, its connection and its capture on the way out, so neither a
+    // P2P link nor a MediaProjection outlives the application.
     _webRtcBloc.close();
     _signalingBloc.close();
     _realtimeBloc.close();

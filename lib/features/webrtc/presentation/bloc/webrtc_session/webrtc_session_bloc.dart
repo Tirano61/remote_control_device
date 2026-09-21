@@ -8,8 +8,12 @@ import 'package:remote_control_device/features/signaling/domain/entities/signali
 import 'package:remote_control_device/features/signaling/domain/entities/webrtc_answer.dart';
 import 'package:remote_control_device/features/signaling/domain/entities/webrtc_ice_candidate.dart';
 import 'package:remote_control_device/features/signaling/domain/entities/webrtc_offer.dart';
+import 'package:remote_control_device/features/screen_capture/domain/entities/screen_capture_result.dart';
+import 'package:remote_control_device/features/screen_capture/domain/entities/screen_capture_status.dart';
+import 'package:remote_control_device/features/screen_capture/domain/screen_capture_client.dart';
 import 'package:remote_control_device/features/webrtc/domain/control_channel.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/peer_ice_candidate.dart';
+import 'package:remote_control_device/features/webrtc/domain/entities/screen_video_attachment.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_connection_state.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_data_channel_message.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_data_channel_state.dart';
@@ -71,9 +75,11 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     required WebRtcPeerConnectionFactory peerConnectionFactory,
     required WebRtcSignalingGateway signaling,
     required WebRtcIceConfiguration iceConfiguration,
+    required ScreenCaptureClient screenCapture,
   }) : _peerConnectionFactory = peerConnectionFactory,
        _signaling = signaling,
        _iceConfiguration = iceConfiguration,
+       _screenCapture = screenCapture,
        super(const WebRtcIdle()) {
     on<WebRtcOfferReceived>(_onOfferReceived);
     on<WebRtcRemoteIceReceived>(_onRemoteIceReceived);
@@ -90,6 +96,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   final WebRtcPeerConnectionFactory _peerConnectionFactory;
   final WebRtcSignalingGateway _signaling;
   final WebRtcIceConfiguration _iceConfiguration;
+  final ScreenCaptureClient _screenCapture;
 
   /// Bumped whenever a negotiation is abandoned or replaced. Everything a peer
   /// connection reports carries the generation it belongs to, and anything that
@@ -143,6 +150,20 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   bool _flushingRemoteIce = false;
 
   WebRtcDataChannelState? _controlChannelState;
+
+  /// Where screen sharing is, as the rest of the application reads it. Kept
+  /// beside [_controlChannelState] because both are facts the state carries
+  /// and neither may overwrite the other's half of it.
+  ScreenCaptureStatus _screenCaptureStatus = ScreenCaptureStatus.idle;
+
+  /// The remote session a running capture belongs to, or `null`.
+  ///
+  /// Held here and not read back from the client because it answers a question
+  /// the client cannot: *may this capture outlive what just happened?* A peer
+  /// connection being replaced leaves it alone; the backend's live session
+  /// changing ends it. Those are two different lifetimes and this is the field
+  /// that keeps them apart.
+  String? _screenCaptureSessionId;
 
   /// Frames received on the `control` channel, unparsed and un-acted-upon.
   ///
@@ -212,7 +233,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     final generation = _generation;
     _negotiationSessionId = sessionId;
     _negotiatedOfferSdp = offer.sdp;
-    emit(WebRtcPreparing(sessionId));
+    emit(WebRtcPreparing(sessionId, screenCapture: _screenCaptureStatus));
 
     // A previous negotiation — failed, closed, or superseded by this offer —
     // releases everything it held before a new one exists, so the two never
@@ -226,7 +247,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     } catch (_) {
       if (generation != _generation) return;
       _log('peer connection could not be created for $sessionId');
-      emit(WebRtcFailed(sessionId));
+      emit(WebRtcFailed(sessionId, screenCapture: _screenCaptureStatus));
       return;
     }
     if (generation != _generation) {
@@ -241,7 +262,9 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     _bindPeer(peer, generation);
 
     try {
-      await peer.setRemoteDescription(WebRtcSessionDescription.offer(offer.sdp));
+      await peer.setRemoteDescription(
+        WebRtcSessionDescription.offer(offer.sdp),
+      );
       if (generation != _generation) return;
       _log('remote description applied for $sessionId');
       _remoteDescriptionApplied = true;
@@ -250,7 +273,22 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
       await _flushRemoteIce(generation);
       if (generation != _generation) return;
 
-      emit(WebRtcAnswering(sessionId, controlChannel: _controlChannelState));
+      emit(_restate(WebRtcAnswering(sessionId)));
+
+      // The screen goes on the connection *before* the answer is created, and
+      // that is the whole ordering change this stage brings:
+      //
+      //   setRemoteDescription  the offer's m=video exists as a transceiver
+      //   attach                that transceiver becomes sendonly, with track
+      //   createAnswer          the SDP is written from what is now true
+      //
+      // The other way round would produce an answer describing a video section
+      // this end is not sending on, and a second negotiation would be needed
+      // to correct it. The user is asked for their screen inside this step, so
+      // it can take as long as a person takes.
+      await _prepareScreenCapture(sessionId, peer, generation, emit);
+      if (generation != _generation) return;
+      if (isClosed) return;
 
       final answer = await peer.createAnswer();
       if (generation != _generation) return;
@@ -273,13 +311,13 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
         // the web creates a new offer.
         _log('answer not relayed for $sessionId: ${_describe(relayed)}');
         await _teardownPeer();
-        emit(WebRtcFailed(sessionId));
+        emit(WebRtcFailed(sessionId, screenCapture: _screenCaptureStatus));
         return;
       }
 
       _log('answer relayed for $sessionId');
       _answerDelivered = true;
-      emit(WebRtcConnecting(sessionId, controlChannel: _controlChannelState));
+      emit(_restate(WebRtcConnecting(sessionId)));
 
       // Deliberately not awaited: the flush keeps draining for as long as ICE
       // keeps producing candidates, which can be the whole life of the
@@ -291,8 +329,101 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
       // quote the SDP it choked on.
       _log('negotiation failed for $sessionId');
       await _teardownPeer();
-      emit(WebRtcFailed(sessionId));
+      emit(WebRtcFailed(sessionId, screenCapture: _screenCaptureStatus));
     }
+  }
+
+  // --------------------------------------------------------- screen capture
+
+  /// Asks for the screen and puts it on the offered video section.
+  ///
+  /// Returns having done everything it could and nothing it could not; it does
+  /// not report success, because there is nothing for the caller to do
+  /// differently. Whatever happens here — the user declines, the foreground
+  /// service is refused, `getDisplayMedia` fails, the offer carried no video —
+  /// the answer is still created and the `control` channel still opens. The
+  /// screen is an extra capability and losing it never costs the assistance.
+  Future<void> _prepareScreenCapture(
+    String sessionId,
+    WebRtcPeerConnection peer,
+    int generation,
+    Emitter<WebRtcSessionState> emit,
+  ) async {
+    // A capture already running for this session is handed straight back by
+    // the client, with no Android dialog: only a genuinely new one is worth
+    // telling the user we are waiting for.
+    if (!_screenCapture.isActive) {
+      _screenCaptureStatus = ScreenCaptureStatus.requesting;
+      emit(_restate());
+    }
+
+    final result = await _screenCapture.requestAndStart(sessionId);
+
+    switch (result) {
+      case ScreenCaptureStarted(:final videoTrack):
+        // Recorded before the generation is checked. Whatever happens to this
+        // negotiation, a capture is running now and something has to know
+        // which remote session it belongs to.
+        _screenCaptureSessionId = sessionId;
+        _screenCaptureStatus = ScreenCaptureStatus.active;
+
+        if (generation != _generation) {
+          // The negotiation was replaced while the user was answering the
+          // Android dialog. The capture is deliberately *not* stopped: it
+          // belongs to the remote session, the next peer connection for that
+          // same session reuses it, and asking the user a second time for a
+          // screen they just granted is the behaviour Android 14 made
+          // expensive and users find alarming.
+          _log('screen capture kept: its negotiation was replaced');
+          break;
+        }
+
+        final attachment = await peer.attachScreenVideo(videoTrack);
+        if (generation != _generation) {
+          _log('screen capture kept: its negotiation was replaced');
+          break;
+        }
+        switch (attachment) {
+          case ScreenVideoAttachment.attached:
+            _log('video track attached');
+          case ScreenVideoAttachment.noVideoTransceiver:
+          case ScreenVideoAttachment.failed:
+            // There is nowhere for the screen to go. Leaving MediaProjection
+            // running would mean capturing a person's screen for nobody,
+            // behind a notification telling them it is being shared — so it is
+            // stopped, the failure is recorded, and the negotiation carries on
+            // with the data channel alone.
+            _log('screen capture stopped: it could not be attached');
+            await _stopScreenCapture();
+            _screenCaptureStatus = ScreenCaptureStatus.failed;
+        }
+      case ScreenCaptureDenied():
+        _screenCaptureStatus = ScreenCaptureStatus.denied;
+      case ScreenCaptureUnavailable():
+        _screenCaptureStatus = ScreenCaptureStatus.failed;
+    }
+
+    if (!isClosed) emit(_restate());
+  }
+
+  /// Ends the capture and takes the notification down. Idempotent.
+  ///
+  /// Never called because a peer connection went away — only because the
+  /// remote session it belonged to did, or because the application is closing.
+  Future<bool> _stopScreenCapture() async {
+    final wasRunning =
+        _screenCaptureSessionId != null ||
+        _screenCaptureStatus != ScreenCaptureStatus.idle;
+
+    _screenCaptureSessionId = null;
+    _screenCaptureStatus = ScreenCaptureStatus.idle;
+    try {
+      await _screenCapture.stop();
+    } catch (_) {
+      // Teardown must never throw: several paths lead here and none of them
+      // has anything left to do about a failure.
+    }
+    return wasRunning;
   }
 
   // ------------------------------------------------------------------- ICE
@@ -428,10 +559,14 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     //                      break it a second time.
     switch (state) {
       case WebRtcPreparing() || WebRtcAnswering() || WebRtcConnecting():
+        // The peer connection goes; the capture stays. Losing the signaling
+        // room says nothing about the assistance — the backend still holds the
+        // remote session — and the web will offer again after its own rejoin,
+        // to a device that can answer with the screen it already has.
         _log('negotiation abandoned: signaling is no longer joined');
         await _teardownPeer();
         _negotiationSessionId = null;
-        emit(const WebRtcIdle());
+        emit(WebRtcIdle(screenCapture: _screenCaptureStatus));
       case WebRtcIdle() ||
           WebRtcConnected() ||
           WebRtcInterrupted() ||
@@ -449,17 +584,33 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     if (sessionId == _liveRemoteSessionId) return;
     _liveRemoteSessionId = sessionId;
 
+    // The screen is released here and nowhere else. `MediaProjection` belongs
+    // to the remote session: it survives a peer connection being rebuilt, and
+    // it must not survive the assistance ending — by either end, by a closed
+    // event, or by a device identity that is no longer valid, all of which
+    // arrive as this one event with a different id or with none.
+    var released = false;
+    if (_screenCaptureSessionId != null &&
+        _screenCaptureSessionId != sessionId) {
+      _log('screen capture stopped: its remote session is gone');
+      released = await _stopScreenCapture();
+    }
+
     // The assistance this peer connection belongs to is over, or it is a
     // different assistance now. Either way nothing of the old one may survive:
     // a peer connection that outlived its remote session would be a technician
     // still reaching the tablet after the backend says the session is closed.
-    if (_negotiationSessionId == null) return;
-    if (sessionId == _negotiationSessionId) return;
+    if (_negotiationSessionId == null || sessionId == _negotiationSessionId) {
+      // Nothing to tear down, but the screen line on the panel has just
+      // changed and the state is the only way it hears about it.
+      if (released && !isClosed) emit(_restate());
+      return;
+    }
 
     _log('negotiation closed: the remote session it belonged to is gone');
     await _teardownPeer();
     _negotiationSessionId = null;
-    emit(const WebRtcIdle());
+    emit(WebRtcIdle(screenCapture: _screenCaptureStatus));
   }
 
   // ------------------------------------------------------- peer connection
@@ -480,32 +631,28 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
         // the negotiation is still being set up it says nothing the state does
         // not already say.
         if (state is WebRtcConnected || state is WebRtcInterrupted) {
-          emit(
-            WebRtcConnecting(sessionId, controlChannel: _controlChannelState),
-          );
+          emit(_restate(WebRtcConnecting(sessionId)));
         }
       case WebRtcConnectionState.connected:
         _log('peer connection connected for $sessionId');
-        emit(WebRtcConnected(sessionId, controlChannel: _controlChannelState));
+        emit(_restate(WebRtcConnected(sessionId)));
       case WebRtcConnectionState.disconnected:
         // Possibly transient, which is what WebRTC means by it. Nothing is
         // closed and no timer is started: ICE may re-pair on its own, and a
         // deadline picked out of the air here would cut off recoveries that
         // were about to succeed.
         _log('peer connection interrupted for $sessionId');
-        emit(
-          WebRtcInterrupted(sessionId, controlChannel: _controlChannelState),
-        );
+        emit(_restate(WebRtcInterrupted(sessionId)));
       case WebRtcConnectionState.failed:
         _log('peer connection failed for $sessionId');
         await _teardownPeer();
-        emit(WebRtcFailed(sessionId));
+        emit(WebRtcFailed(sessionId, screenCapture: _screenCaptureStatus));
       case WebRtcConnectionState.closed:
         // Reaching here means the other end closed it — this side detaches its
         // callbacks before closing, so its own closes are never reported back.
         _log('peer connection closed for $sessionId');
         await _teardownPeer();
-        emit(WebRtcClosed(sessionId));
+        emit(WebRtcClosed(sessionId, screenCapture: _screenCaptureStatus));
     }
   }
 
@@ -557,7 +704,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     if (channel.state == WebRtcDataChannelState.open) {
       _log('control data channel open');
     }
-    emit(_withControlChannel(channel.state));
+    emit(_restate());
   }
 
   Future<void> _onDataChannelStateChanged(
@@ -571,41 +718,61 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     if (event.channelState == WebRtcDataChannelState.open) {
       _log('control data channel open');
     }
-    emit(_withControlChannel(event.channelState));
+    emit(_restate());
   }
 
-  /// Rewrites the current state with a new channel state, leaving everything
-  /// else alone. The channel and the connection move independently, so neither
-  /// may overwrite the other's half of the state.
-  WebRtcSessionState _withControlChannel(WebRtcDataChannelState? channelState) {
-    final current = state;
-    // One that has not started cannot have been given a channel.
-    if (current is! WebRtcNegotiation) return current;
+  /// Stamps the two facts the bloc tracks beside the negotiation — the
+  /// `control` channel's state and where screen sharing is — onto a state.
+  ///
+  /// With [next] it is a transition: the negotiation moves and carries the
+  /// other two along unchanged. Without it, it rewrites the current state in
+  /// place, which is what a channel opening or a capture starting is — neither
+  /// of those moves the negotiation, and neither may overwrite the other's
+  /// half of the state.
+  WebRtcSessionState _restate([WebRtcSessionState? next]) {
+    final current = next ?? state;
+    // A state with no negotiation carries no channel; it does carry the
+    // capture, because MediaProjection outlives the peer connection.
+    if (current is! WebRtcNegotiation) {
+      return WebRtcIdle(screenCapture: _screenCaptureStatus);
+    }
 
     final sessionId = current.remoteSessionId;
     return switch (current) {
       WebRtcPreparing() => WebRtcPreparing(
         sessionId,
-        controlChannel: channelState,
+        controlChannel: _controlChannelState,
+        screenCapture: _screenCaptureStatus,
       ),
       WebRtcAnswering() => WebRtcAnswering(
         sessionId,
-        controlChannel: channelState,
+        controlChannel: _controlChannelState,
+        screenCapture: _screenCaptureStatus,
       ),
       WebRtcConnecting() => WebRtcConnecting(
         sessionId,
-        controlChannel: channelState,
+        controlChannel: _controlChannelState,
+        screenCapture: _screenCaptureStatus,
       ),
       WebRtcConnected() => WebRtcConnected(
         sessionId,
-        controlChannel: channelState,
+        controlChannel: _controlChannelState,
+        screenCapture: _screenCaptureStatus,
       ),
       WebRtcInterrupted() => WebRtcInterrupted(
         sessionId,
-        controlChannel: channelState,
+        controlChannel: _controlChannelState,
+        screenCapture: _screenCaptureStatus,
       ),
       // A negotiation that is over carries no channel any more.
-      WebRtcFailed() || WebRtcClosed() => current,
+      WebRtcFailed() => WebRtcFailed(
+        sessionId,
+        screenCapture: _screenCaptureStatus,
+      ),
+      WebRtcClosed() => WebRtcClosed(
+        sessionId,
+        screenCapture: _screenCaptureStatus,
+      ),
     };
   }
 
@@ -686,6 +853,10 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   @override
   Future<void> close() async {
     await _teardownPeer();
+    // The screen goes with the application. A capture that outlived the
+    // process that authorised it would be a notification the user cannot get
+    // rid of, over a MediaProjection nothing is reading.
+    await _stopScreenCapture();
     await _controlMessages.close();
     return super.close();
   }

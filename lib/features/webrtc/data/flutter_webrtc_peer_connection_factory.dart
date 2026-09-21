@@ -3,7 +3,10 @@ import 'dart:developer' as developer;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
+import 'package:remote_control_device/features/screen_capture/data/flutter_webrtc_screen_media.dart';
+import 'package:remote_control_device/features/screen_capture/domain/entities/screen_video_track.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/peer_ice_candidate.dart';
+import 'package:remote_control_device/features/webrtc/domain/entities/screen_video_attachment.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_connection_state.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_data_channel_message.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_data_channel_state.dart';
@@ -24,7 +27,8 @@ import 'package:remote_control_device/features/webrtc/domain/webrtc_peer_client.
 ///
 /// Nothing here logs an SDP or a candidate line. The states it does log are
 /// operational facts that carry no address and no secret.
-class FlutterWebRtcPeerConnectionFactory implements WebRtcPeerConnectionFactory {
+class FlutterWebRtcPeerConnectionFactory
+    implements WebRtcPeerConnectionFactory {
   const FlutterWebRtcPeerConnectionFactory();
 
   @override
@@ -80,7 +84,8 @@ class _FlutterWebRtcPeerConnection implements WebRtcPeerConnection {
   bool _closed = false;
 
   @override
-  Stream<WebRtcConnectionState> get connectionStates => _connectionStates.stream;
+  Stream<WebRtcConnectionState> get connectionStates =>
+      _connectionStates.stream;
 
   @override
   Stream<PeerIceCandidate> get localIceCandidates => _localIceCandidates.stream;
@@ -91,6 +96,70 @@ class _FlutterWebRtcPeerConnection implements WebRtcPeerConnection {
   @override
   Future<void> setRemoteDescription(WebRtcSessionDescription description) =>
       _connection.setRemoteDescription(_descriptionOf(description));
+
+  /// Finds the video section the offer brought and makes it send the screen.
+  ///
+  /// The lookup is the interesting part. `RTCRtpTransceiver` in
+  /// `flutter_webrtc 1.6.2+hotfix.2` carries no media kind of its own — the
+  /// Android side maps a transceiver to `{transceiverId, mid, direction,
+  /// sender, receiver}` and nothing else — so the kind has to be read off the
+  /// receiver's track, which libwebrtc creates together with the transceiver
+  /// while the offer is being applied. The `mid` is no help: it is `"0"` or
+  /// `"1"`, an ordering, not a kind.
+  ///
+  /// Then two calls, in this order:
+  ///
+  /// ```text
+  /// transceiver.setDirection(SendOnly)   this end sends, and does not receive
+  /// transceiver.sender.replaceTrack(t)   what it sends is the screen
+  /// ```
+  ///
+  /// Neither creates an `m=` section, which is the point: `addTransceiver`
+  /// would add a second `m=video` the web never offered, and `addTrack` would
+  /// do the same whenever libwebrtc found no free sender to reuse. Reusing the
+  /// offered transceiver is what keeps the answer a mirror of the offer.
+  ///
+  /// Nothing here is logged beyond the outcome. A libwebrtc error message can
+  /// quote the SDP it was working on.
+  @override
+  Future<ScreenVideoAttachment> attachScreenVideo(
+    ScreenVideoTrack track,
+  ) async {
+    // The track has to be one this application captured. A handle from
+    // anywhere else has no native object behind it, and guessing one up would
+    // mean asking libwebrtc to send something nobody consented to.
+    if (track is! FlutterWebRtcScreenVideoTrack) {
+      _log('screen video track refused: it did not come from this capture');
+      return ScreenVideoAttachment.failed;
+    }
+
+    rtc.RTCRtpTransceiver? videoTransceiver;
+    try {
+      final transceivers = await _connection.getTransceivers();
+      for (final transceiver in transceivers) {
+        if (transceiver.receiver.track?.kind == 'video') {
+          videoTransceiver = transceiver;
+          break;
+        }
+      }
+    } catch (_) {
+      _log('the offered transceivers could not be read');
+      return ScreenVideoAttachment.failed;
+    }
+
+    if (videoTransceiver == null) {
+      return ScreenVideoAttachment.noVideoTransceiver;
+    }
+
+    try {
+      await videoTransceiver.setDirection(rtc.TransceiverDirection.SendOnly);
+      await videoTransceiver.sender.replaceTrack(track.track);
+    } catch (_) {
+      _log('the screen video track could not be attached');
+      return ScreenVideoAttachment.failed;
+    }
+    return ScreenVideoAttachment.attached;
+  }
 
   @override
   Future<WebRtcSessionDescription> createAnswer() async {

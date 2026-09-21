@@ -22,7 +22,7 @@ part of 'webrtc_session_bloc.dart';
 /// connected and the `control` channel is open. Nothing here writes a session
 /// status, and nothing here asks the backend for one.
 sealed class WebRtcSessionState extends Equatable {
-  const WebRtcSessionState();
+  const WebRtcSessionState({this.screenCapture = ScreenCaptureStatus.idle});
 
   /// The remote session this negotiation belongs to, or `null` when there is
   /// no negotiation. Never adopted from a payload: it is the session the device
@@ -32,6 +32,16 @@ sealed class WebRtcSessionState extends Equatable {
   /// The `control` channel's state, once the peer has opened one.
   WebRtcDataChannelState? get controlChannel => null;
 
+  /// Where screen sharing is.
+  ///
+  /// A third axis, independent of the other two and carried by every state
+  /// including [WebRtcIdle] — because `MediaProjection` belongs to the remote
+  /// session and not to the peer connection, and a negotiation that was
+  /// abandoned leaves a capture running that the user can still see in their
+  /// notification shade. A state that reported `idle` then would be lying to
+  /// the one person who can see it is not.
+  final ScreenCaptureStatus screenCapture;
+
   /// The success condition of this stage, and the whole of it:
   ///
   /// ```text
@@ -39,6 +49,9 @@ sealed class WebRtcSessionState extends Equatable {
   /// ```
   ///
   /// No command has to have been exchanged — there is no control protocol yet.
+  /// Deliberately *not* widened by screen capture: a user who declined the
+  /// Android dialog has a working remote connection, and a technician holding
+  /// an open control channel is connected whether or not a screen arrives.
   bool get isRemoteConnectionEstablished => false;
 
   @override
@@ -52,12 +65,19 @@ sealed class WebRtcSessionState extends Equatable {
 /// lost mid-negotiation, a dropped device credential. It says nothing about the
 /// remote session, which only the backend moves.
 final class WebRtcIdle extends WebRtcSessionState {
-  const WebRtcIdle();
+  const WebRtcIdle({super.screenCapture});
+
+  @override
+  List<Object?> get props => [screenCapture];
 }
 
 /// Shared shape of every state in which a negotiation exists or existed.
 sealed class WebRtcNegotiation extends WebRtcSessionState {
-  const WebRtcNegotiation(this.remoteSessionId, {this.controlChannel});
+  const WebRtcNegotiation(
+    this.remoteSessionId, {
+    this.controlChannel,
+    super.screenCapture,
+  });
 
   @override
   final String remoteSessionId;
@@ -66,25 +86,37 @@ sealed class WebRtcNegotiation extends WebRtcSessionState {
   final WebRtcDataChannelState? controlChannel;
 
   @override
-  List<Object?> get props => [remoteSessionId, controlChannel];
+  List<Object?> get props => [remoteSessionId, controlChannel, screenCapture];
 }
 
 /// An offer was accepted: the peer connection is being created and the remote
 /// description applied.
 final class WebRtcPreparing extends WebRtcNegotiation {
-  const WebRtcPreparing(super.remoteSessionId, {super.controlChannel});
+  const WebRtcPreparing(
+    super.remoteSessionId, {
+    super.controlChannel,
+    super.screenCapture,
+  });
 }
 
 /// The remote description is applied and the answer is being created and
 /// relayed.
 final class WebRtcAnswering extends WebRtcNegotiation {
-  const WebRtcAnswering(super.remoteSessionId, {super.controlChannel});
+  const WebRtcAnswering(
+    super.remoteSessionId, {
+    super.controlChannel,
+    super.screenCapture,
+  });
 }
 
 /// The answer was delivered to the technician's namespace and ICE is being
 /// exchanged. This is where a negotiation waits for connectivity to be found.
 final class WebRtcConnecting extends WebRtcNegotiation {
-  const WebRtcConnecting(super.remoteSessionId, {super.controlChannel});
+  const WebRtcConnecting(
+    super.remoteSessionId, {
+    super.controlChannel,
+    super.screenCapture,
+  });
 }
 
 /// Every transport is connected.
@@ -94,7 +126,11 @@ final class WebRtcConnecting extends WebRtcNegotiation {
 /// channel and the connection are separate facts and neither waits for the
 /// other.
 final class WebRtcConnected extends WebRtcNegotiation {
-  const WebRtcConnected(super.remoteSessionId, {super.controlChannel});
+  const WebRtcConnected(
+    super.remoteSessionId, {
+    super.controlChannel,
+    super.screenCapture,
+  });
 
   @override
   bool get isRemoteConnectionEstablished =>
@@ -108,7 +144,11 @@ final class WebRtcConnected extends WebRtcNegotiation {
 /// recovers on its own — and comes back as [WebRtcConnected] — or turns into
 /// [WebRtcFailed], which is terminal.
 final class WebRtcInterrupted extends WebRtcNegotiation {
-  const WebRtcInterrupted(super.remoteSessionId, {super.controlChannel});
+  const WebRtcInterrupted(
+    super.remoteSessionId, {
+    super.controlChannel,
+    super.screenCapture,
+  });
 }
 
 /// The negotiation is over and its resources are released.
@@ -119,7 +159,7 @@ final class WebRtcInterrupted extends WebRtcNegotiation {
 /// whole loop protection — a device that renegotiated on failure would offer
 /// against an end that is also offering.
 final class WebRtcFailed extends WebRtcNegotiation {
-  const WebRtcFailed(super.remoteSessionId);
+  const WebRtcFailed(super.remoteSessionId, {super.screenCapture});
 }
 
 /// The peer connection closed, and this side did not ask for it.
@@ -128,5 +168,5 @@ final class WebRtcFailed extends WebRtcNegotiation {
 /// Like [WebRtcFailed] it waits: when the web app comes back it will join again
 /// and create a new offer, and that offer is what starts the next negotiation.
 final class WebRtcClosed extends WebRtcNegotiation {
-  const WebRtcClosed(super.remoteSessionId);
+  const WebRtcClosed(super.remoteSessionId, {super.screenCapture});
 }
