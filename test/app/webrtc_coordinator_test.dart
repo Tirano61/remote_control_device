@@ -28,6 +28,7 @@ import 'package:remote_control_device/features/support/presentation/bloc/support
 import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_connection_state.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_data_channel_state.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_ice_configuration.dart';
+import 'package:remote_control_device/features/screen_capture/domain/entities/screen_capture_status.dart';
 import 'package:remote_control_device/features/webrtc/presentation/bloc/webrtc_session/webrtc_session_bloc.dart';
 
 import '../fakes/device_fakes.dart';
@@ -35,6 +36,7 @@ import '../fakes/realtime_fakes.dart';
 import '../fakes/remote_session_fakes.dart';
 import '../fakes/signaling_fakes.dart';
 import '../fakes/support_fakes.dart';
+import '../fakes/screen_capture_fakes.dart';
 import '../fakes/webrtc_fakes.dart';
 
 /// The whole path a real assistance takes, with only the socket, the HTTP
@@ -51,6 +53,7 @@ void main() {
   late FakeSupportRepository supportRepository;
   late FakeRemoteSessionRepository remoteSessionRepository;
   late FakeWebRtcPeerConnectionFactory peerFactory;
+  late FakeScreenCaptureClient screenCapture;
   late DeviceTokenStore tokenStore;
   late DeviceCredentialRevocation credentialRevocation;
 
@@ -112,12 +115,14 @@ void main() {
       closeRemoteSession: CloseRemoteSession(remoteSessionRepository),
     );
     signalingBloc = SignalingBloc(client: client);
+    screenCapture = FakeScreenCaptureClient();
     webRtcBloc = WebRtcSessionBloc(
       peerConnectionFactory: peerFactory,
       // The real wiring: the signaling bloc is the gateway, narrowed to the two
       // messages an answerer sends.
       signaling: signalingBloc,
       iceConfiguration: const WebRtcIceConfiguration.none(),
+      screenCapture: screenCapture,
     );
 
     realtimeCoordinator = DeviceRealtimeCoordinator(
@@ -207,6 +212,9 @@ void main() {
     expect(peerFactory.createCount, 1);
     expect(peerFactory.last.calls, [
       'setRemoteDescription',
+      // The screen goes on before the answer is written, so the SDP describes
+      // a video section this end is already sending on.
+      'attachScreenVideo',
       'createAnswer',
       'setLocalDescription',
     ]);
@@ -215,7 +223,13 @@ void main() {
     expect(client.sentAnswers.single.sdp, testLocalAnswerSdp);
     // The device answers; it never offers.
     expect(client.sentOffers, isEmpty);
-    expect(webRtcBloc.state, const WebRtcConnecting(testRemoteSessionId));
+    expect(
+      webRtcBloc.state,
+      const WebRtcConnecting(
+        testRemoteSessionId,
+        screenCapture: ScreenCaptureStatus.active,
+      ),
+    );
   });
 
   test('a relayed candidate reaches the peer connection', () async {
@@ -249,18 +263,22 @@ void main() {
     );
   });
 
-  test('an offer for a session this device is not in is dropped twice over',
-      () async {
-    await reachJoined();
+  test(
+    'an offer for a session this device is not in is dropped twice over',
+    () async {
+      await reachJoined();
 
-    await client.deliver(offerReceived(remoteSessionId: testOtherRemoteSessionId));
-    await settle();
+      await client.deliver(
+        offerReceived(remoteSessionId: testOtherRemoteSessionId),
+      );
+      await settle();
 
-    // `SignalingBloc` drops it at the session filter and it never reaches the
-    // WebRTC layer; the WebRTC layer would refuse it too.
-    expect(peerFactory.createCount, 0);
-    expect(webRtcBloc.state, const WebRtcIdle());
-  });
+      // `SignalingBloc` drops it at the session filter and it never reaches the
+      // WebRTC layer; the WebRTC layer would refuse it too.
+      expect(peerFactory.createCount, 0);
+      expect(webRtcBloc.state, const WebRtcIdle());
+    },
+  );
 
   test('an answer relayed to this device is ignored, not applied', () async {
     await reachJoined();
@@ -320,75 +338,83 @@ void main() {
     expect(peer.isClosed, isTrue);
   });
 
-  test('a session moving to ACTIVE leaves the peer connection untouched',
-      () async {
-    await reachJoined();
-    await client.deliver(offerReceived());
-    await settle();
-    final peer = peerFactory.last;
-    peer.pushConnectionState(WebRtcConnectionState.connected);
-    final channel = peer.pushDataChannel();
-    await settle();
-    channel.pushState(WebRtcDataChannelState.open);
-    await settle();
-    expect(webRtcBloc.state.isRemoteConnectionEstablished, isTrue);
-    expect(remoteSessionBloc.state, isA<RemoteSessionConnecting>());
-    final joined = signalingBloc.state;
-    final joins = client.joinedSessionIds.length;
+  test(
+    'a session moving to ACTIVE leaves the peer connection untouched',
+    () async {
+      await reachJoined();
+      await client.deliver(offerReceived());
+      await settle();
+      final peer = peerFactory.last;
+      peer.pushConnectionState(WebRtcConnectionState.connected);
+      final channel = peer.pushDataChannel();
+      await settle();
+      channel.pushState(WebRtcDataChannelState.open);
+      await settle();
+      expect(webRtcBloc.state.isRemoteConnectionEstablished, isTrue);
+      expect(remoteSessionBloc.state, isA<RemoteSessionConnecting>());
+      final joined = signalingBloc.state;
+      final joins = client.joinedSessionIds.length;
 
-    // This is exactly what the web does next: seeing its own connection up and
-    // the control channel open, it calls POST /remote-sessions/:id/activate.
-    // The backend commits ACTIVE and announces it here.
-    remoteSessionRepository.currentResult = activatedRemoteSession;
-    await client.emit(
-      const RealtimeRemoteSessionActivated(testRemoteSessionId),
-    );
-    await settle();
+      // This is exactly what the web does next: seeing its own connection up and
+      // the control channel open, it calls POST /remote-sessions/:id/activate.
+      // The backend commits ACTIVE and announces it here.
+      remoteSessionRepository.currentResult = activatedRemoteSession;
+      await client.emit(
+        const RealtimeRemoteSessionActivated(testRemoteSessionId),
+      );
+      await settle();
 
-    expect(remoteSessionBloc.state, isA<RemoteSessionActive>());
-    // ACTIVE is a backend fact about the connection that already exists. It is
-    // not a cue to negotiate anything, and nothing here treats it as one.
-    expect(peer.isClosed, isFalse);
-    expect(channel.isClosed, isFalse);
-    expect(webRtcBloc.state, WebRtcConnected(
-      testRemoteSessionId,
-      controlChannel: WebRtcDataChannelState.open,
-    ));
-    expect(peerFactory.createCount, 1);
-    expect(client.sentAnswers, hasLength(1));
-    expect(client.sentOffers, isEmpty);
-    // And the signaling room is not re-entered: it was never left, and the
-    // contract accepts CONNECTING and ACTIVE alike as a live session.
-    expect(client.joinedSessionIds, hasLength(joins));
-    expect(signalingBloc.state, joined);
-  });
+      expect(remoteSessionBloc.state, isA<RemoteSessionActive>());
+      // ACTIVE is a backend fact about the connection that already exists. It is
+      // not a cue to negotiate anything, and nothing here treats it as one.
+      expect(peer.isClosed, isFalse);
+      expect(channel.isClosed, isFalse);
+      expect(
+        webRtcBloc.state,
+        const WebRtcConnected(
+          testRemoteSessionId,
+          controlChannel: WebRtcDataChannelState.open,
+          screenCapture: ScreenCaptureStatus.active,
+        ),
+      );
+      expect(peerFactory.createCount, 1);
+      expect(client.sentAnswers, hasLength(1));
+      expect(client.sentOffers, isEmpty);
+      // And the signaling room is not re-entered: it was never left, and the
+      // contract accepts CONNECTING and ACTIVE alike as a live session.
+      expect(client.joinedSessionIds, hasLength(joins));
+      expect(signalingBloc.state, joined);
+    },
+  );
 
-  test('an ACTIVE session recovered on a restart keeps the same negotiation',
-      () async {
-    // The whole path in the order the real system produces it: the session is
-    // still CONNECTING when the offer arrives, the peer comes up, and only
-    // then does the backend row move — through a plain read, with no event at
-    // all, which is what a tablet that was offline or restarted would do.
-    await reachJoined();
-    await client.deliver(offerReceived());
-    await settle();
-    final peer = peerFactory.last;
-    peer.pushConnectionState(WebRtcConnectionState.connected);
-    final channel = peer.pushDataChannel();
-    await settle();
-    channel.pushState(WebRtcDataChannelState.open);
-    await settle();
+  test(
+    'an ACTIVE session recovered on a restart keeps the same negotiation',
+    () async {
+      // The whole path in the order the real system produces it: the session is
+      // still CONNECTING when the offer arrives, the peer comes up, and only
+      // then does the backend row move — through a plain read, with no event at
+      // all, which is what a tablet that was offline or restarted would do.
+      await reachJoined();
+      await client.deliver(offerReceived());
+      await settle();
+      final peer = peerFactory.last;
+      peer.pushConnectionState(WebRtcConnectionState.connected);
+      final channel = peer.pushDataChannel();
+      await settle();
+      channel.pushState(WebRtcDataChannelState.open);
+      await settle();
 
-    remoteSessionRepository.currentResult = activatedRemoteSession;
-    remoteSessionBloc.add(const RemoteSessionSyncRequested());
-    await settle();
+      remoteSessionRepository.currentResult = activatedRemoteSession;
+      remoteSessionBloc.add(const RemoteSessionSyncRequested());
+      await settle();
 
-    expect(remoteSessionBloc.state, isA<RemoteSessionActive>());
-    expect(peer.isClosed, isFalse);
-    expect(channel.isClosed, isFalse);
-    expect(webRtcBloc.state.isRemoteConnectionEstablished, isTrue);
-    expect(peerFactory.createCount, 1);
-  });
+      expect(remoteSessionBloc.state, isA<RemoteSessionActive>());
+      expect(peer.isClosed, isFalse);
+      expect(channel.isClosed, isFalse);
+      expect(webRtcBloc.state.isRemoteConnectionEstablished, isTrue);
+      expect(peerFactory.createCount, 1);
+    },
+  );
 
   test('a socket that drops mid-negotiation abandons it', () async {
     await reachJoined();
@@ -400,7 +426,13 @@ void main() {
     await settle();
 
     expect(signalingBloc.state, const SignalingIdle());
-    expect(webRtcBloc.state, const WebRtcIdle());
+    // The peer connection goes; the screen does not. The backend still holds
+    // the remote session, and the web will offer again after its own rejoin.
+    expect(
+      webRtcBloc.state,
+      const WebRtcIdle(screenCapture: ScreenCaptureStatus.active),
+    );
+    expect(screenCapture.stopCount, 0);
     expect(peer.isClosed, isTrue);
   });
 
@@ -439,7 +471,13 @@ void main() {
     // F5 destroys the browser's peer connection. This side sees it fail.
     first.pushConnectionState(WebRtcConnectionState.failed);
     await settle();
-    expect(webRtcBloc.state, const WebRtcFailed(testRemoteSessionId));
+    expect(
+      webRtcBloc.state,
+      const WebRtcFailed(
+        testRemoteSessionId,
+        screenCapture: ScreenCaptureStatus.active,
+      ),
+    );
 
     // The web comes back, rejoins, and creates a brand new offer. A previous
     // generation that failed is no reason to refuse it — that is exactly the
@@ -451,7 +489,16 @@ void main() {
     expect(peerFactory.createCount, 2);
     expect(client.sentAnswers, hasLength(2));
     expect(peerFactory.last.remoteDescriptions.single.sdp, testSecondOfferSdp);
-    expect(webRtcBloc.state, const WebRtcConnecting(testRemoteSessionId));
+    expect(
+      webRtcBloc.state,
+      const WebRtcConnecting(
+        testRemoteSessionId,
+        screenCapture: ScreenCaptureStatus.active,
+      ),
+    );
+    // Two negotiations, one capture: the user authorised their screen once.
+    expect(screenCapture.requests, [testRemoteSessionId, testRemoteSessionId]);
+    expect(screenCapture.stopCount, 0);
     // The device answered twice and offered never.
     expect(client.sentOffers, isEmpty);
   });
