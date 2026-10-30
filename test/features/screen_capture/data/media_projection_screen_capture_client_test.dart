@@ -33,16 +33,20 @@ void main() {
   // ------------------------------------------------------------- the order
 
   group('the Android 14 order', () {
-    test('is consent, then the foreground service, then the capture', () async {
-      final result = await client.requestAndStart(session);
+    test(
+      'is consent, then the foreground service, READY, then the capture',
+      () async {
+        final result = await client.requestAndStart(session);
 
-      expect(result, isA<ScreenCaptureStarted>());
-      expect(platform.calls, [
-        'consent.request',
-        'foregroundService.start',
-        'mediaSource.open',
-      ]);
-    });
+        expect(result, isA<ScreenCaptureStarted>());
+        expect(platform.calls, [
+          'consent.request',
+          'foregroundService.start',
+          'foregroundService.ready',
+          'mediaSource.open',
+        ]);
+      },
+    );
 
     test(
       'never starts the foreground service before consent is given',
@@ -66,6 +70,203 @@ void main() {
         await client.requestAndStart(session);
 
         expect(platform.calls, isNot(contains('mediaSource.open')));
+      },
+    );
+  });
+
+  // ---------------------------------------------- the service being READY
+
+  group('the foreground service READY', () {
+    // Asking Android to start a service and the service being foreground are
+    // two different moments. A capture opened between them is refused with a
+    // SecurityException -- seen on a tablet, on a second consecutive session.
+
+    test('the capture waits for READY, not for the request to start', () async {
+      platform.foregroundServiceReadyGate = Completer<void>();
+
+      final pending = client.requestAndStart(session);
+      await _flush();
+
+      expect(platform.calls, ['consent.request', 'foregroundService.start']);
+      expect(_opens(platform), 0);
+
+      platform.foregroundServiceReadyGate!.complete();
+      final result = await pending;
+
+      expect(result, isA<ScreenCaptureStarted>());
+      expect(_opens(platform), 1);
+      expect(platform.calls, [
+        'consent.request',
+        'foregroundService.start',
+        'foregroundService.ready',
+        'mediaSource.open',
+      ]);
+    });
+
+    test(
+      'a service that fails on its way up never reaches the capture',
+      () async {
+        // Accepted by startForegroundService, refused at startForeground.
+        platform.foregroundServiceReadyGate = Completer<void>();
+
+        final pending = client.requestAndStart(session);
+        await _flush();
+        platform.foregroundServiceReadyGate!.completeError(
+          StateError('SecurityException'),
+        );
+        final result = await pending;
+
+        expect(
+          result,
+          const ScreenCaptureUnavailable(
+            ScreenCaptureFailure.foregroundServiceRefused,
+          ),
+        );
+        expect(_opens(platform), 0);
+        expect(platform.foregroundServiceRunning, isFalse);
+        expect(client.isActive, isFalse);
+      },
+    );
+
+    test('a service that never answers is a failure, not a hang', () async {
+      client = MediaProjectionScreenCaptureClient(
+        consent: platform.consent,
+        foregroundService: platform.foregroundService,
+        mediaSource: platform.mediaSource,
+        foregroundServiceReadyTimeout: const Duration(milliseconds: 20),
+      );
+      platform.foregroundServiceReadyGate = Completer<void>();
+
+      final result = await client.requestAndStart(session);
+      await _flush();
+
+      expect(
+        result,
+        const ScreenCaptureUnavailable(
+          ScreenCaptureFailure.foregroundServiceNotReady,
+        ),
+      );
+      expect(platform.calls, [
+        'consent.request',
+        'foregroundService.start',
+        'foregroundService.stop',
+      ]);
+      expect(_opens(platform), 0);
+      expect(client.isActive, isFalse);
+    });
+
+    test('a stop while the service is coming up abandons the start', () async {
+      // The remote session closed while Android was still bringing the
+      // service up. Nothing may be captured for it afterwards.
+      platform.foregroundServiceReadyGate = Completer<void>();
+
+      final pending = client.requestAndStart(session);
+      await _flush();
+      await client.stop();
+      final result = await pending;
+
+      expect(
+        result,
+        const ScreenCaptureUnavailable(ScreenCaptureFailure.cancelled),
+      );
+      expect(_opens(platform), 0);
+      expect(
+        platform.calls.where((call) => call == 'foregroundService.stop'),
+        hasLength(1),
+      );
+      expect(client.isActive, isFalse);
+    });
+
+    test('a stop during the dialog leaves the service alone', () async {
+      platform.consentGate = Completer<void>();
+
+      final pending = client.requestAndStart(session);
+      await _flush();
+      await client.stop();
+      platform.consentGate!.complete();
+      final result = await pending;
+
+      expect(
+        result,
+        const ScreenCaptureUnavailable(ScreenCaptureFailure.cancelled),
+      );
+      expect(platform.calls, ['consent.request']);
+    });
+  });
+
+  // ------------------------------------------- consecutive remote sessions
+
+  group('consecutive sessions', () {
+    test('session B waits for its own READY, not for session A\'s', () async {
+      await client.requestAndStart(session);
+      await client.stop();
+      platform.calls.clear();
+
+      platform.foregroundServiceReadyGate = Completer<void>();
+      final pending = client.requestAndStart(otherSession);
+      await _flush();
+
+      // A's service went READY, and was stopped. B's is a new start and has
+      // said nothing yet, so there is no capture yet.
+      expect(platform.calls, ['consent.request', 'foregroundService.start']);
+      expect(_opens(platform), 0);
+
+      platform.foregroundServiceReadyGate!.complete();
+      final result = await pending;
+
+      expect(result, isA<ScreenCaptureStarted>());
+      expect(_opens(platform), 1);
+      expect(platform.captures, hasLength(2));
+      expect(client.remoteSessionId, otherSession);
+    });
+
+    test('three sessions in a row each go consent, READY, capture', () async {
+      for (final id in [session, otherSession, session]) {
+        platform.calls.clear();
+
+        final result = await client.requestAndStart(id);
+        expect(result, isA<ScreenCaptureStarted>());
+        expect(platform.calls, [
+          'consent.request',
+          'foregroundService.start',
+          'foregroundService.ready',
+          'mediaSource.open',
+        ]);
+
+        platform.calls.clear();
+        await client.stop();
+        expect(platform.calls, ['capture.dispose', 'foregroundService.stop']);
+      }
+
+      expect(platform.captures, hasLength(3));
+      expect(
+        platform.captures.every((capture) => capture.disposeCount == 1),
+        isTrue,
+      );
+      expect(platform.foregroundServiceRunning, isFalse);
+    });
+
+    test(
+      'a closed session leaves nothing the next one can trip over',
+      () async {
+        await client.requestAndStart(session);
+        final first = platform.lastCapture;
+
+        // The remote session closes.
+        await client.stop();
+        expect(first.isDisposed, isTrue);
+        expect(first.isListened, isFalse);
+        expect(platform.foregroundServiceRunning, isFalse);
+
+        // The next one starts from nothing.
+        await client.requestAndStart(otherSession);
+        expect(platform.lastCapture, isNot(same(first)));
+
+        // The old capture "ending" now is noise from a capture nobody holds.
+        first.endFromPlatform();
+        await _flush();
+        expect(client.isActive, isTrue);
+        expect(client.remoteSessionId, otherSession);
       },
     );
   });
@@ -124,6 +325,7 @@ void main() {
         expect(platform.calls, [
           'consent.request',
           'foregroundService.start',
+          'foregroundService.ready',
           'mediaSource.open',
           'foregroundService.stop',
         ]);
@@ -245,6 +447,7 @@ void main() {
           'foregroundService.stop',
           'consent.request',
           'foregroundService.start',
+          'foregroundService.ready',
           'mediaSource.open',
         ]);
         expect(client.remoteSessionId, otherSession);
@@ -261,6 +464,7 @@ void main() {
       expect(platform.calls, [
         'consent.request',
         'foregroundService.start',
+        'foregroundService.ready',
         'mediaSource.open',
       ]);
       expect(platform.captures, hasLength(2));
@@ -331,3 +535,13 @@ void main() {
     });
   });
 }
+
+/// Lets every pending microtask and zero-delay timer run.
+Future<void> _flush() async {
+  for (var i = 0; i < 5; i++) {
+    await Future<void>.delayed(Duration.zero);
+  }
+}
+
+int _opens(FakeScreenCapturePlatform platform) =>
+    platform.calls.where((call) => call == 'mediaSource.open').length;

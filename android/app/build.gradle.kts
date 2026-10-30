@@ -42,3 +42,14 @@ android {
 flutter {
     source = "../.."
 }
+
+dependencies {
+    // The screen capturer (ScreenCapturer.kt) is an org.webrtc.VideoCapturer. flutter_webrtc
+    // ships libwebrtc as an `implementation` dependency, so it is in the APK but not on this
+    // module's compile classpath. compileOnly, and the plugin's exact version: the classes that
+    // run are the plugin's own copy, and the two must be the same library.
+    compileOnly("io.github.webrtc-sdk:android:150.7871.01")
+
+    // JVM unit tests for the capture geometry (src/test).
+    testImplementation("junit:junit:4.13.2")
+}

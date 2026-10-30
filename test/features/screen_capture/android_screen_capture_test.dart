@@ -154,36 +154,57 @@ void main() {
   });
 
   group('the capture this application asks Android for', () {
-    late String source;
+    // The capture is ScreenCapturer.kt, not flutter_webrtc's getDisplayMedia:
+    // the plugin's capturer deformed landscape frames (see SCREEN_SHARING.md).
+    // So what it may and may not open is asserted on the Kotlin that opens it.
+    const kotlinDir =
+        'android/app/src/main/kotlin/com/example/'
+        'remote_control_device';
+    late String session;
+    late String consent;
+    late String allKotlin;
 
     setUpAll(() async {
-      source = await File(
-        'lib/features/screen_capture/data/flutter_webrtc_screen_media.dart',
+      session = await File('$kotlinDir/ScreenCaptureSession.kt').readAsString();
+      consent = await File(
+        '$kotlinDir/ScreenCaptureConsentRequester.kt',
       ).readAsString();
+      final files = Directory(
+        kotlinDir,
+      ).listSync().whereType<File>().where((file) => file.path.endsWith('.kt'));
+      allKotlin = [for (final file in files) file.readAsStringSync()].join();
     });
 
     test('is video only', () {
-      // The one place `getDisplayMedia` is called. Asserted on the source
-      // because the constraints reach Android through a plugin's own method
-      // channel, and a host test would be asserting Windows behaviour: the
-      // plugin rewrites `video: true` on desktop and leaves it alone on
-      // Android.
-      expect(source, contains("'video': true"));
-      expect(source, contains("'audio': false"));
-      expect(source, isNot(contains("'audio': true")));
+      expect(session, contains('createVideoSource'));
+      expect(allKotlin, isNot(contains('createAudioSource')));
+      expect(allKotlin, isNot(contains('createAudioTrack')));
     });
 
     test('never opens a camera or a microphone', () {
-      expect(source, isNot(contains('getUserMedia')));
-      expect(source, isNot(contains('openCamera')));
+      for (final api in const [
+        'CameraManager',
+        'Camera2Enumerator',
+        'AudioRecord',
+        'getUserMedia',
+      ]) {
+        expect(allKotlin, isNot(contains(api)), reason: api);
+      }
     });
 
     test('asks for the whole display rather than a single app', () {
-      // fullScreenOnly removes the "share one app" option from Android 14's
+      // On Android 14 this removes the "share one app" option from the
       // dialog. A technician walking someone through their tablet needs the
       // device, and a single-app share goes black the moment the user leaves
       // it — which reads as a broken session rather than as a choice.
-      expect(source, contains('fullScreenOnly: true'));
+      expect(consent, contains('createConfigForDefaultDisplay()'));
+    });
+
+    test('never resizes its virtual display', () {
+      // Resizing it is what deformed the landscape frames on the tablet: the
+      // platform kept mirroring for the size it was created with.
+      expect(allKotlin, isNot(contains('virtualDisplay.resize')));
+      expect(allKotlin, isNot(contains('?.resize(')));
     });
   });
 

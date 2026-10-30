@@ -29,7 +29,7 @@ enum ScreenCaptureStatus {
   denied,
 
   /// The capture could not be started or could not be attached — the
-  /// foreground service was refused, `getDisplayMedia` failed, or the offer
+  /// foreground service was refused, the capture failed, or the offer
   /// carried no video section to answer on.
   failed,
 }

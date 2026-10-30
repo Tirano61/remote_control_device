@@ -1,126 +1,132 @@
+import 'dart:developer' as developer;
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
+// The plugin's native track type. It is what `getDisplayMedia` itself builds
+// from a track id, and it is not exported by name; a track this application
+// creates natively is wrapped the same way, so the peer connection adapter
+// cannot tell the two apart.
+// ignore: implementation_imports
+import 'package:flutter_webrtc/src/native/media_stream_track_impl.dart'
+    show MediaStreamTrackNative;
+import 'package:remote_control_device/features/screen_capture/data/method_channel_media_projection_service.dart';
 import 'package:remote_control_device/features/screen_capture/domain/entities/screen_video_track.dart';
 import 'package:remote_control_device/features/screen_capture/domain/screen_capture_platform.dart';
 
 /// The part of screen capture that only a tablet can verify.
 ///
-/// Two calls into `flutter_webrtc` and nothing else — no order, no reuse, no
-/// cleanup, no retry. All of those are decisions and they live in
-/// `MediaProjectionScreenCaptureClient`, where they can be tested; what is
-/// left here is the translation that needs a real `MediaProjection` to run at
-/// all.
-///
-/// What the installed plugin actually offers, checked against
-/// `flutter_webrtc 1.6.2+hotfix.2` rather than remembered:
+/// The capture is not `navigator.mediaDevices.getDisplayMedia` any more. What
+/// `flutter_webrtc 1.6.2+hotfix.2` does with it on Android, read from the
+/// installed package:
 ///
 /// ```text
-/// Helper.requestCapturePermission({bool fullScreenOnly = false})
-///     -> MethodChannel("FlutterWebRTC.Method").requestCapturePermission
-///     -> shows MediaProjectionManager.createScreenCaptureIntent()
-///     -> stores the granted Intent in GetUserMediaImpl.mediaProjectionData
-///     -> answers true / false
-///
-/// navigator.mediaDevices.getDisplayMedia(constraints)
-///     -> reuses that stored Intent when it is there, and only shows the
-///        dialog itself when it is not
+/// getDisplayMedia   OrientationAwareScreenCapturer.startCapture(
+///                       Display.getRealSize())     <- the CURRENT size
+/// startCapture      in landscape: swaps width and height AGAIN
+///                   -> VirtualDisplay 800x1280 on a 1280x800 screen
+/// first frame       changeCaptureFormat -> VirtualDisplay.resize(1280x800)
 /// ```
 ///
-/// That second line is why this application does not manage a
-/// `MediaProjectionManager` of its own: the plugin already holds the token and
-/// already reuses it, and a second one would mean two consents for one share.
-/// What the plugin does *not* do is run a foreground service — that is this
-/// application's obligation under Android 14, and it is a separate port.
-
-/// Android's capture consent dialog.
-class FlutterWebRtcScreenCaptureConsent implements ScreenCaptureConsent {
-  const FlutterWebRtcScreenCaptureConsent();
-
-  /// `fullScreenOnly` asks Android 14+ for
-  /// `MediaProjectionConfig.createConfigForDefaultDisplay()`, which removes
-  /// the "share one app" option from the dialog.
-  ///
-  /// Deliberate for this product: a technician assisting someone on a tablet
-  /// is walking them through the device, not through one application, and a
-  /// single-app share would show a black screen the moment the user leaves
-  /// it — which reads as a broken session rather than as a choice they made.
-  /// On older Android versions the flag has no effect and the platform's own
-  /// dialog is shown.
-  @override
-  Future<bool> request() =>
-      rtc.Helper.requestCapturePermission(fullScreenOnly: true);
-}
-
-/// `getDisplayMedia`, video only.
+/// On the tablet that resize left the platform mirroring for the old size, and
+/// landscape frames came out as the left 62.5 % of the screen stretched 1.6×.
+/// Android 14 allows one virtual display per projection, so the same resize is
+/// also every rotation. None of it is reachable from Dart, and none of it can
+/// be fixed on the receiving side without inventing pixels.
+///
+/// So the capture is `ScreenCapturer.kt`: a square virtual display, never
+/// resized, cropped per frame to the screen as it is right now. It produces an
+/// ordinary libwebrtc video track, registered with the plugin under its id, and
+/// this adapter wraps that id in the plugin's own track type — which is all
+/// `RTCRtpSender.replaceTrack` needs.
+///
+/// Video only, by construction: the Android side creates a video source and
+/// nothing else.
 class FlutterWebRtcScreenMediaSource implements ScreenMediaSource {
   const FlutterWebRtcScreenMediaSource();
 
+  static const String startCaptureMethod = 'startScreenCapture';
+  static const String stopCaptureMethod = 'stopScreenCapture';
+
+  static const String _loggerName = 'screen';
+
+  static MethodChannel get _channel =>
+      MethodChannelMediaProjectionForegroundService.channel;
+
   @override
   Future<ScreenMediaCapture> open() async {
-    final stream = await rtc.navigator.mediaDevices.getDisplayMedia(
-      // No width, no height, no frame rate. The Android capturer already
-      // matches the display's real size and picks its own rate; pinning
-      // numbers here before a capture has been seen working on the tablets
-      // this runs on would be guessing at a trade-off nobody has measured.
-      <String, dynamic>{'video': true, 'audio': false},
+    final reply = await _channel.invokeMapMethod<String, Object?>(
+      startCaptureMethod,
     );
-    return FlutterWebRtcScreenMediaCapture(stream);
+    final trackId = reply?['trackId'];
+    if (trackId is! String || trackId.isEmpty) {
+      // A capture this side cannot name is one it cannot send or stop. Ask
+      // the Android side to release whatever it is, and fail.
+      await _stop(null);
+      throw StateError('screen capture started without a track');
+    }
+
+    // Diagnostics for the tablet: how big the display is now and how big the
+    // frames leaving it are. Never a frame, never a token.
+    if (kDebugMode) {
+      developer.log(
+        'capture geometry ${reply!['displayWidth']}x${reply['displayHeight']} '
+        '${reply['orientation']} rotation=${reply['rotation']} '
+        'dpi=${reply['densityDpi']} '
+        'virtualDisplay=${reply['virtualDisplaySide']} '
+        'sending=${reply['captureWidth']}x${reply['captureHeight']}',
+        name: _loggerName,
+      );
+    }
+
+    return FlutterWebRtcScreenMediaCapture(
+      MediaStreamTrackNative(trackId, 'screen', 'video', true, 'local'),
+    );
+  }
+
+  static Future<void> _stop(String? trackId) async {
+    try {
+      await _channel.invokeMethod<void>(stopCaptureMethod, <String, Object?>{
+        'trackId': ?trackId,
+      });
+    } catch (_) {
+      // Releasing must never throw: every teardown path calls it.
+    }
   }
 }
 
-/// A capture in progress, and the one place the real stream is held.
+/// A capture in progress, and the one place the real track is held.
 class FlutterWebRtcScreenMediaCapture implements ScreenMediaCapture {
-  FlutterWebRtcScreenMediaCapture(this._stream)
-    : _videoTracks = [
-        for (final track in _stream.getVideoTracks())
-          FlutterWebRtcScreenVideoTrack(track),
-      ];
+  FlutterWebRtcScreenMediaCapture(rtc.MediaStreamTrack track)
+    : _videoTrack = FlutterWebRtcScreenVideoTrack(track);
 
-  final rtc.MediaStream _stream;
-  final List<FlutterWebRtcScreenVideoTrack> _videoTracks;
+  final FlutterWebRtcScreenVideoTrack _videoTrack;
 
   bool _disposed = false;
 
   @override
-  List<ScreenVideoTrack> get videoTracks => _videoTracks;
+  List<ScreenVideoTrack> get videoTracks => [_videoTrack];
 
-  /// The plugin declares `MediaStreamTrack.onEnded` on every platform, so the
-  /// listener is attached wherever it is offered.
-  ///
-  /// On Android it does not currently fire: `flutter_webrtc
-  /// 1.6.2+hotfix.2` never raises an `ended` event from native code, and the
-  /// `MediaProjection.Callback.onStop` it installs deliberately does nothing.
-  /// So a user who stops the share from Android's own controls is *not*
-  /// noticed by this build; what they see is the capture ending, the
-  /// assistance carrying on, and the notification going away with the session.
-  /// Attaching it anyway costs nothing and is correct the day the plugin
-  /// starts raising it.
+  /// Kept on the track for the day it fires. Today it does not: the Android
+  /// capturer releases itself when the user presses *Stop sharing* in the
+  /// system controls, but nothing tells Dart, so what they see is the capture
+  /// ending, the assistance carrying on, and the notification going away with
+  /// the session.
   @override
   set onEnded(void Function()? listener) {
-    for (final track in _videoTracks) {
-      track.track.onEnded = listener;
-    }
+    _videoTrack.track.onEnded = listener;
   }
 
+  /// Stops this capture natively — the virtual display, the projection and
+  /// the track's registration go with it. Idempotent, and keyed by track id,
+  /// so a late release can never stop a capture that replaced this one.
   @override
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
 
-    for (final track in _videoTracks) {
-      track.track.onEnded = null;
-      try {
-        // `trackDispose` on the Android side, which also removes the screen
-        // capturer and stops MediaProjection.
-        await track.track.stop();
-      } catch (_) {
-        // A track that is already gone natively is the outcome asked for.
-      }
-    }
-    try {
-      await _stream.dispose();
-    } catch (_) {
-      // Same. Releasing must never throw: every teardown path calls it.
-    }
+    _videoTrack.track.onEnded = null;
+    await FlutterWebRtcScreenMediaSource._stop(_videoTrack.id);
   }
 }
 

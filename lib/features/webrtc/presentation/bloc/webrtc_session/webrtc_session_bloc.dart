@@ -340,7 +340,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   /// Returns having done everything it could and nothing it could not; it does
   /// not report success, because there is nothing for the caller to do
   /// differently. Whatever happens here — the user declines, the foreground
-  /// service is refused, `getDisplayMedia` fails, the offer carried no video —
+  /// service is refused, the capture fails, the offer carried no video —
   /// the answer is still created and the `control` channel still opens. The
   /// screen is an extra capability and losing it never costs the assistance.
   Future<void> _prepareScreenCapture(

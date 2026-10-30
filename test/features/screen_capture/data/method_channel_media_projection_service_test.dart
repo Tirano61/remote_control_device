@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:remote_control_device/features/screen_capture/data/method_channel_media_projection_service.dart';
@@ -71,6 +73,30 @@ void main() {
       'stopMediaProjectionForegroundService',
       'stopMediaProjectionForegroundService',
     ]);
+  });
+
+  test('start completes when Android answers READY, not before', () async {
+    // The Android side answers from the service's onStartCommand, once
+    // startForeground has returned as mediaProjection. Until then there is
+    // nothing to complete, and nothing above may open a capture.
+    final ready = Completer<void>();
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      calls.add(call);
+      await ready.future;
+      return null;
+    });
+
+    var completed = false;
+    final pending = service.start().then((_) => completed = true);
+    for (var i = 0; i < 5; i++) {
+      await Future<void>.delayed(Duration.zero);
+    }
+    expect(calls.single.method, 'startMediaProjectionForegroundService');
+    expect(completed, isFalse);
+
+    ready.complete();
+    await pending;
+    expect(completed, isTrue);
   });
 
   test('a platform refusal reaches the caller', () async {
