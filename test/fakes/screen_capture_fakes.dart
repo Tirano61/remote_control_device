@@ -59,7 +59,7 @@ class FakeScreenCapturePlatform {
   /// answers. A stop while it is pending fails it, as the Android side does.
   Completer<void>? foregroundServiceReadyGate;
 
-  /// When true, `getDisplayMedia` throws.
+  /// When true, opening the capture throws.
   bool captureThrows = false;
 
   /// The tracks the next capture yields. A real screen share is exactly one.
@@ -127,7 +127,7 @@ class FakeScreenMediaSource implements ScreenMediaSource {
   @override
   Future<ScreenMediaCapture> open() async {
     _platform.calls.add('mediaSource.open');
-    if (_platform.captureThrows) throw StateError('getDisplayMedia failed');
+    if (_platform.captureThrows) throw StateError('capture failed');
 
     final capture = FakeScreenMediaCapture(
       _platform,

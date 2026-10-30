@@ -11,9 +11,9 @@ import 'package:remote_control_device/features/screen_capture/domain/entities/sc
 ///          |  the user accepts
 ///          v
 /// MediaProjectionForegroundService  a service typed mediaProjection
-///          |  it is running
+///          |  it reports READY
 ///          v
-/// ScreenMediaSource                 getDisplayMedia
+/// ScreenMediaSource                 the capture itself
 /// ```
 ///
 /// Getting that order wrong is not a style question. Starting the foreground

@@ -168,7 +168,7 @@ class AppDependencies {
       screenCaptureClient:
           screenCaptureClient ??
           MediaProjectionScreenCaptureClient(
-            consent: const FlutterWebRtcScreenCaptureConsent(),
+            consent: const MethodChannelScreenCaptureConsent(),
             foregroundService:
                 const MethodChannelMediaProjectionForegroundService(),
             mediaSource: const FlutterWebRtcScreenMediaSource(),

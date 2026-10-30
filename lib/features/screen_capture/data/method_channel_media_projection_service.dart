@@ -43,3 +43,26 @@ class MethodChannelMediaProjectionForegroundService
   @override
   Future<void> stop() => channel.invokeMethod<void>(stopMethod);
 }
+
+/// Android's screen capture consent dialog, over the same bridge.
+///
+/// The dialog is shown by `MainActivity` and the grant it produces stays on
+/// the Android side, held for exactly one capture: it is a projection token
+/// and it never crosses this channel. What crosses is the user's answer.
+///
+/// On Android 14 and later the dialog offers the whole display only — no
+/// "share one app" option. A technician walking someone through their tablet
+/// needs the device, and a single-app share goes black the moment the user
+/// leaves that app, which reads as a broken session rather than as a choice.
+class MethodChannelScreenCaptureConsent implements ScreenCaptureConsent {
+  const MethodChannelScreenCaptureConsent();
+
+  static const String consentMethod = 'requestScreenCaptureConsent';
+
+  @override
+  Future<bool> request() async {
+    final granted = await MethodChannelMediaProjectionForegroundService.channel
+        .invokeMethod<bool>(consentMethod);
+    return granted ?? false;
+  }
+}
