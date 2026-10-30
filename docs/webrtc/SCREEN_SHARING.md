@@ -140,8 +140,8 @@ onFrame
     crop to where the picture is      TextureBuffer.cropAndScale, no copy
                                       portrait  -> 800x1280 at (240, 0)
                                       landscape -> 1280x800 at (0, 240)
-display listener (rotation)
-    re-read the display, move the crop
+rotation (display listener + configuration change)
+    re-read the display; move the crop if the reading moved
 ```
 
 Android mirrors a display into a projection's virtual display by scaling it to
@@ -159,10 +159,33 @@ which libwebrtc encodes without renegotiation and which the web already renders
 without recreating its renderer. There is no second peer connection, no second
 transceiver, no second track.
 
+#### Noticing a rotation
+
+Two signals, because one was not enough on the tablet:
+
+```text
+DisplayListener.onDisplayChanged     arrives first; the display reading is
+                                     still the OLD orientation
+Application onConfigurationChanged   arrives after; the reading is the new one
+```
+
+`Display.getRealMetrics` / `getRotation`, read from the application context,
+are adjusted by the application's `Configuration`, and Android updates that
+after it has told display listeners about the change. With the display
+listener alone the crop stayed one rotation behind — physically, 14:28 rotated
+to portrait and nothing moved, 14:30 rotated to landscape and the portrait crop
+was applied. So the capturer also registers `ComponentCallbacks2` on the
+application context, and **every** signal reads the display afresh
+(`ScreenCaptureGeometryRefresh`). A stale reading equals the current state and
+moves nothing, so it is never final; the configuration change then moves the
+crop; duplicate signals are no-ops. No timers. The tablet's log names the
+signal that carried each rotation: `capture geometry … (configuration
+changed)`.
+
 What it costs: the virtual display is 1280×1280 rather than 1280×800, a little
 more composition per frame, and a frame or two straddling a rotation may be
-cropped with the previous orientation's rectangle before the display listener
-fires.
+cropped with the previous orientation's rectangle before the configuration
+change arrives.
 
 Dimensions come from `Display.getRealMetrics` on the default display. It is
 deprecated in favour of `WindowMetrics` for sizing an app's window; that is not

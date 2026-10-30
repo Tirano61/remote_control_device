@@ -1,8 +1,10 @@
 package com.example.remote_control_device
 
 import android.app.Activity
+import android.content.ComponentCallbacks2
 import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.projection.MediaProjection
@@ -44,9 +46,16 @@ import org.webrtc.VideoSink
  * landscape 1280×800, and a rotation changes the frames' size in the same track: no new
  * track, no new transceiver, no renegotiation.
  *
+ * A rotation is noticed twice, on purpose: by a `DisplayListener` and by the application's
+ * `onConfigurationChanged`. The first arrives before the configuration the display reading
+ * depends on is updated, so on its own it read the previous orientation and left the crop one
+ * rotation behind (seen on the tablet). Each signal reads the display again and the crop
+ * follows the reading — see [ScreenCaptureGeometryRefresh].
+ *
  * Threads: [startCapture] and [stopCapture] are called from the main thread; frames, the
  * display listener and the projection callback all run on the [SurfaceTextureHelper]'s
- * thread, which is the only thread that reads or moves [framing].
+ * thread, which is the only thread that reads or moves [framing]. A configuration change
+ * arrives on the main thread and is handed to that thread as it is.
  */
 class ScreenCapturer(private val projectionGrant: Intent) : VideoCapturer, VideoSink {
 
@@ -59,6 +68,7 @@ class ScreenCapturer(private val projectionGrant: Intent) : VideoCapturer, Video
     private var virtualDisplay: VirtualDisplay? = null
     private var surface: Surface? = null
     private var framing: ScreenCaptureFraming? = null
+    private var geometryRefresh: ScreenCaptureGeometryRefresh? = null
 
     private val stopped = AtomicBoolean(false)
     private var mismatchLogged = false
@@ -83,12 +93,24 @@ class ScreenCapturer(private val projectionGrant: Intent) : VideoCapturer, Video
 
     private val displayListener = object : DisplayManager.DisplayListener {
         override fun onDisplayChanged(displayId: Int) {
-            if (displayId == Display.DEFAULT_DISPLAY) refreshGeometry()
+            if (displayId == Display.DEFAULT_DISPLAY) refreshGeometry(SIGNAL_DISPLAY)
         }
 
         override fun onDisplayAdded(displayId: Int) = Unit
 
         override fun onDisplayRemoved(displayId: Int) = Unit
+    }
+
+    private val configurationCallbacks = object : ComponentCallbacks2 {
+        override fun onConfigurationChanged(newConfig: Configuration) {
+            // Main thread. Handed to the helper's thread, which owns the crop; not delayed.
+            helper.handler.post { refreshGeometry(SIGNAL_CONFIGURATION) }
+        }
+
+        @Deprecated("Required by ComponentCallbacks; nothing to release here.")
+        override fun onLowMemory() = Unit
+
+        override fun onTrimMemory(level: Int) = Unit
     }
 
     override fun initialize(
@@ -131,6 +153,7 @@ class ScreenCapturer(private val projectionGrant: Intent) : VideoCapturer, Video
             this.surface = surface
 
             this.framing = framing
+            geometryRefresh = ScreenCaptureGeometryRefresh(framing) { readDisplayGeometry(context) }
             virtualDisplay = projection.createVirtualDisplay(
                 VIRTUAL_DISPLAY_NAME,
                 side,
@@ -151,11 +174,12 @@ class ScreenCapturer(private val projectionGrant: Intent) : VideoCapturer, Video
         Log.i(TAG, "capture geometry $geometry, virtual display ${side}x$side, sending ${framing.content}")
 
         displayManager.registerDisplayListener(displayListener, helper.handler)
+        context.registerComponentCallbacks(configurationCallbacks)
         observer.onCapturerStarted(true)
         helper.startListening(this)
-        // A rotation between reading the display above and the listener being registered
+        // A rotation between reading the display above and the listeners being registered
         // would otherwise go unnoticed until the next one.
-        helper.handler.post { refreshGeometry() }
+        helper.handler.post { refreshGeometry(SIGNAL_STARTED) }
     }
 
     override fun onFrame(frame: VideoFrame) {
@@ -203,6 +227,7 @@ class ScreenCapturer(private val projectionGrant: Intent) : VideoCapturer, Video
             Runnable {
                 helper.stopListening()
                 displayManager.unregisterDisplayListener(displayListener)
+                context.unregisterComponentCallbacks(configurationCallbacks)
                 observer.onCapturerStopped()
                 release()
                 Log.i(TAG, "capture stopped")
@@ -219,17 +244,25 @@ class ScreenCapturer(private val projectionGrant: Intent) : VideoCapturer, Video
 
     override fun isScreencast(): Boolean = true
 
-    private fun refreshGeometry() {
+    /**
+     * Reads the display again after [signal] and moves the crop if the reading moved. A reading
+     * that matches the current crop — a duplicate signal, or one that came before the
+     * configuration caught up — changes nothing, and is logged at debug level only so that the
+     * tablet's log shows which signal finally carried the rotation.
+     */
+    private fun refreshGeometry(signal: String) {
         if (stopped.get()) return
-        val framing = framing ?: return
-        val geometry = try {
-            readDisplayGeometry(context)
+        val refresh = geometryRefresh ?: return
+        val moved = try {
+            refresh.refresh()
         } catch (error: Exception) {
             Log.w(TAG, "display could not be read: ${error.javaClass.simpleName}")
             return
         }
-        if (framing.update(geometry)) {
-            Log.i(TAG, "capture geometry $geometry, sending ${framing.content}")
+        if (moved != null) {
+            Log.i(TAG, "capture geometry $moved, sending ${refresh.framing.content} ($signal)")
+        } else {
+            Log.d(TAG, "geometry unchanged ($signal)")
         }
     }
 
@@ -249,6 +282,10 @@ class ScreenCapturer(private val projectionGrant: Intent) : VideoCapturer, Video
     companion object {
         private const val TAG = "RemoteControlScreen"
         private const val VIRTUAL_DISPLAY_NAME = "RemoteControl_ScreenCapture"
+
+        private const val SIGNAL_STARTED = "started"
+        private const val SIGNAL_DISPLAY = "display changed"
+        private const val SIGNAL_CONFIGURATION = "configuration changed"
 
         // The flags flutter_webrtc uses, which are known to mirror on the tablets this runs
         // on: a public display with no content of its own mirrors the default one.

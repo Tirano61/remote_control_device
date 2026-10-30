@@ -96,3 +96,40 @@ class ScreenCaptureFraming(initial: ScreenCaptureGeometry) {
         return true
     }
 }
+
+/**
+ * When to read the display again, and what to do with what it says.
+ *
+ * Found on the tablet: `DisplayManager.DisplayListener.onDisplayChanged` arrives *before* the
+ * application's `Configuration` is updated, and `Display.getRealMetrics` / `getRotation` read
+ * from an application context are adjusted by that configuration. So the reading taken on
+ * `onDisplayChanged` is the display as it was before the rotation, and the crop stayed one
+ * rotation behind:
+ *
+ * ```text
+ * 14:28:05  rotated to portrait     onDisplayChanged reads 1280x800 -> "no change"
+ * 14:30:07  rotated to landscape    onDisplayChanged reads 800x1280 -> portrait crop
+ * ```
+ *
+ * The configuration change is the moment the reading is right, so it is a signal of its own,
+ * and the display change stays as a second one. Neither is trusted to be the last: every
+ * signal reads the display afresh and the crop follows the reading. A stale reading is
+ * therefore never final — it is the same as the current state, nothing moves, and the next
+ * signal corrects it — and a duplicate one changes nothing either. No timers: what ends the
+ * wait is Android saying the configuration changed.
+ *
+ * Pure, so the sequence that broke on the tablet is replayed on the JVM.
+ */
+class ScreenCaptureGeometryRefresh(
+    val framing: ScreenCaptureFraming,
+    private val readDisplay: () -> ScreenCaptureGeometry,
+) {
+    /**
+     * Reads the display, on any signal that it may have changed. Returns the geometry the crop
+     * moved to, or `null` when the reading is the state the crop is already in.
+     */
+    fun refresh(): ScreenCaptureGeometry? {
+        val reading = readDisplay()
+        return if (framing.update(reading)) reading else null
+    }
+}
