@@ -8,7 +8,9 @@ import io.flutter.plugin.common.MethodChannel
 /**
  * The Android half of the bridge to [MediaProjectionForegroundService].
  *
- * Two messages and nothing else. It holds no state, takes no decision and knows nothing
+ * Two messages and nothing else. It holds no state of its own — the one start waiting for
+ * the service to come up is held by the service's companion, next to the code that answers
+ * it — takes no decision and knows nothing
  * about remote sessions, WebRTC or device identity — those live in Dart, where they are
  * tested. What is here is the part Dart cannot reach: an Android `Service`.
  *
@@ -28,18 +30,23 @@ class MediaProjectionChannel(private val context: Context) : MethodChannel.Metho
     }
 
     fun detach() {
+        // A start still waiting is answered now, so no Result outlives the engine it was
+        // meant for.
+        MediaProjectionForegroundService.abandonPendingStart(MediaProjectionForegroundService.STOPPED)
         channel?.setMethodCallHandler(null)
         channel = null
     }
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
-            START_METHOD -> try {
-                MediaProjectionForegroundService.start(context)
-                result.success(null)
-            } catch (error: Exception) {
-                result.error(START_FAILED, error.javaClass.simpleName, null)
-            }
+            // Answered when the service is foreground as mediaProjection, not when it was
+            // asked to start: Dart opens the capture the moment this returns, and Android 14
+            // refuses a capture whose service is still on its way up.
+            START_METHOD -> MediaProjectionForegroundService.start(
+                context,
+                onReady = { result.success(null) },
+                onFailed = { reason -> result.error(START_FAILED, reason, null) },
+            )
 
             STOP_METHOD -> try {
                 MediaProjectionForegroundService.stop(context)

@@ -18,12 +18,22 @@ enum ScreenCaptureFailure {
   /// capture to be had without it.
   foregroundServiceRefused,
 
-  /// `getDisplayMedia` failed after consent and after the service was up.
+  /// The service was asked to start and never said it was up. A guard against
+  /// a bridge that stopped answering, not a way of waiting for one: a service
+  /// that does come up says so, and the capture waits for exactly that.
+  foregroundServiceNotReady,
+
+  /// The capture failed after consent and after the service was up.
   captureRefused,
 
   /// The capture returned, but not with the single video track a screen share
   /// is. Nothing is sent from a stream this side cannot account for.
   unexpectedTracks,
+
+  /// The capture was stopped while it was still being started — the remote
+  /// session ended with the dialog up, or while the service was coming up.
+  /// Whatever the start had switched on was switched off by that stop.
+  cancelled,
 }
 
 /// What asking for the screen produced.

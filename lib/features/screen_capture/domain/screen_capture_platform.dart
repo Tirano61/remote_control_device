@@ -40,8 +40,14 @@ abstract interface class ScreenCaptureConsent {
 /// notification it carries is how the user is told, at every moment and
 /// without opening the app, that their screen is being shared.
 abstract interface class MediaProjectionForegroundService {
-  /// Starts it. Called only after the user has consented — the platform
-  /// refuses it otherwise, and rightly so.
+  /// Starts it, and completes only once Android has confirmed it is running
+  /// in the foreground as `mediaProjection` — not when it was merely asked to
+  /// start. A capture opened in between is refused by Android 14, so this
+  /// future *is* the readiness signal the capture waits for.
+  ///
+  /// Called only after the user has consented — the platform refuses it
+  /// otherwise, and rightly so. Throws when the service could not be brought
+  /// up.
   Future<void> start();
 
   /// Stops it and removes the notification. Idempotent.

@@ -52,6 +52,13 @@ class FakeScreenCapturePlatform {
   /// When true, starting the foreground service throws.
   bool foregroundServiceStartThrows = false;
 
+  /// When set, a started foreground service does not report READY until the
+  /// test completes this — Android between `startForegroundService` and the
+  /// service's own `startForeground`, which is exactly the window a capture
+  /// must not be opened in. Never completing it is a service that never
+  /// answers. A stop while it is pending fails it, as the Android side does.
+  Completer<void>? foregroundServiceReadyGate;
+
   /// When true, `getDisplayMedia` throws.
   bool captureThrows = false;
 
@@ -98,11 +105,17 @@ class FakeMediaProjectionForegroundService
     if (_platform.foregroundServiceStartThrows) {
       throw StateError('foreground service refused');
     }
+    await _platform.foregroundServiceReadyGate?.future;
+    _platform.calls.add('foregroundService.ready');
   }
 
   @override
   Future<void> stop() async {
     _platform.calls.add('foregroundService.stop');
+    final gate = _platform.foregroundServiceReadyGate;
+    if (gate != null && !gate.isCompleted) {
+      gate.completeError(StateError('STOPPED'));
+    }
   }
 }
 
