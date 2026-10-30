@@ -43,8 +43,8 @@ The single most important thing in this document:
 1.  request screen capture permission        MediaProjection consent dialog
         │  the user accepts
 2.  start the foreground service             type = mediaProjection
-        │  it is running
-3.  getDisplayMedia                          the capture itself
+        │  Android confirms it: READY
+3.  start the capture                        ScreenCapturer.kt
         │
 4.  VideoTrack
 ```
@@ -56,6 +56,21 @@ Every other arrangement is refused by the platform, natively:
 * a capture started **before** the service is running throws a
   `SecurityException` from `MediaProjectionManager.getMediaProjection`.
 
+"Running" means `startForeground(..., MEDIA_PROJECTION)` has returned inside
+the service, **not** that `startForegroundService()` has returned. The second
+only queues the service; `onStartCommand` runs later on the main thread. A
+capture opened in that gap fails with
+
+```text
+SecurityException: Media projections require a foreground service of type
+FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+```
+
+which was seen on the tablet, intermittently, on a second consecutive session.
+So step 2 completes on the service's own READY (see
+[The foreground service](#the-foreground-service)), and nothing in the
+application waits on a timer instead.
+
 `MediaProjection` is not a permanent permission. Each capture is a session the
 user consents to, and a token is granted for one capture. This application
 never stores one, never reuses one across remote sessions, and never tries to
@@ -65,53 +80,129 @@ resurrect one after a capture has ended.
 
 ```text
 MediaProjectionScreenCaptureClient          the order, the reuse, the cleanup
-  ├── ScreenCaptureConsent                  Helper.requestCapturePermission
-  ├── MediaProjectionForegroundService      MethodChannel -> Kotlin Service
-  └── ScreenMediaSource                     navigator.mediaDevices.getDisplayMedia
+  ├── ScreenCaptureConsent                  MethodChannel -> consent dialog
+  ├── MediaProjectionForegroundService      MethodChannel -> Kotlin Service, READY
+  └── ScreenMediaSource                     MethodChannel -> ScreenCapturer.kt
 ```
 
 The client is ordinary Dart and holds every decision, so the order, the reuse
-rule and the cleanup are unit tested against fakes. The three adapters behind
-it are as thin as they can be made, because they are the part only a tablet can
-verify.
+rule, the readiness wait and the cleanup are unit tested against fakes. The
+adapters behind it are as thin as they can be made, because they are the part
+only a tablet can verify. The capture geometry is the exception: it is pure
+Kotlin and is unit tested on the JVM (`ScreenCaptureGeometryTest`).
 
-### What `flutter_webrtc 1.6.2+hotfix.2` actually provides
+### Why the capture is not `getDisplayMedia`
 
-Read out of the installed package rather than remembered:
+Read out of the installed `flutter_webrtc 1.6.2+hotfix.2`
+(`GetUserMediaImpl.getDisplayMedia`, `OrientationAwareScreenCapturer`):
 
 ```text
-Helper.requestCapturePermission({bool fullScreenOnly = false}) -> Future<bool>
-    shows MediaProjectionManager.createScreenCaptureIntent()
-    stores the granted Intent in GetUserMediaImpl.mediaProjectionData
-    fullScreenOnly -> MediaProjectionConfig.createConfigForDefaultDisplay()
-                      on API 34+, which removes the "share one app" option
+getDisplayMedia
+    Display.getRealSize(size)                 the CURRENT size: 1280x800 sideways
+    capturer.startCapture(size.x, size.y)
 
-navigator.mediaDevices.getDisplayMedia(constraints) -> Future<MediaStream>
-    reuses that stored Intent when there is one, and only shows the dialog
-    itself when there is not
+OrientationAwareScreenCapturer.startCapture
+    if !portrait: width = height; height = width    swapped AGAIN -> 800x1280
+    mediaProjection.createVirtualDisplay(800, 1280)
+
+onFrame (every frame)
+    portrait? = getRealMetrics().height > width
+    if the size "changed": changeCaptureFormat(1280, 800)
+        -> VirtualDisplay.resize(1280, 800) + setSurface(new Surface)
 ```
 
-So the plugin already owns the projection token and already reuses it for the
-next `getDisplayMedia`. This application therefore does **not** run a
-`MediaProjectionManager` of its own — a second one would mean two consent
-dialogs for one share. What the plugin does *not* do is run a foreground
-service; that obligation is Android 14's and it is ours.
+The capturer assumes it is given the natural (portrait) size and is given the
+current one, so in landscape it creates the virtual display the wrong way round
+and fixes it with a resize on the first frame. The tablet's own system log
+shows exactly that:
 
-The constraints asked for are exactly:
-
-```dart
-{'video': true, 'audio': false}
+```text
+Display device added:   "WebRTC_ScreenCapture" 800 x 1280
+Display device changed: "WebRTC_ScreenCapture" 1280 x 800   (~100 ms later)
 ```
 
-No audio, ever. No width, height or frame rate either: the Android capturer
-already matches the display and picks its own rate, and pinning numbers before
-a capture has been watched working on these tablets would be guessing at a
-trade-off nobody has measured.
+and what reached the web — verified on the raw `<video>` frame copied to a
+canvas — was the left 62.5 % of the screen (800 / 1280) stretched 1.6×. The
+platform kept mirroring for the size the display was created with. Android 14
+allows **one** `createVirtualDisplay` per projection, so the plugin has no way
+round this except the same resize, and every rotation during a session goes
+through it too. None of it is reachable from Dart, and none of it can be fixed
+on the receiving side without inventing the 37.5 % that was never sent.
 
-`fullScreenOnly: true` is deliberate for this product. A technician assisting
-someone on a tablet is walking them through the device, not through one app,
-and a single-app share goes black the moment the user leaves it — which reads
-as a broken session rather than as a choice they made.
+### `ScreenCapturer.kt`
+
+```text
+startCapture
+    read the display now              Display.getRealMetrics, default display
+    side = max(width, height)         1280 on this tablet
+    createVirtualDisplay(side, side)  once; never resized
+onFrame
+    crop to where the picture is      TextureBuffer.cropAndScale, no copy
+                                      portrait  -> 800x1280 at (240, 0)
+                                      landscape -> 1280x800 at (0, 240)
+display listener (rotation)
+    re-read the display, move the crop
+```
+
+Android mirrors a display into a projection's virtual display by scaling it to
+fit without distortion and centring it (`ContentRecorder` on Android 14,
+`LogicalDisplay` before). A square whose side is the screen's longer side holds
+it at exactly 1:1 in either orientation, so the picture is never scaled and a
+rotation only moves it. `ScreenCaptureGeometry.contentIn` is that same
+arithmetic, rounding included, which is what makes the crop land on the picture
+and not on the bars around it.
+
+Rotation, then, changes nothing but the crop: the same virtual display, the
+same capturer, the same `VideoSource`, the same `VideoTrack` on the same
+transceiver. The frames change size inside the track — 800×1280 ↔ 1280×800 —
+which libwebrtc encodes without renegotiation and which the web already renders
+without recreating its renderer. There is no second peer connection, no second
+transceiver, no second track.
+
+What it costs: the virtual display is 1280×1280 rather than 1280×800, a little
+more composition per frame, and a frame or two straddling a rotation may be
+cropped with the previous orientation's rectangle before the display listener
+fires.
+
+Dimensions come from `Display.getRealMetrics` on the default display. It is
+deprecated in favour of `WindowMetrics` for sizing an app's window; that is not
+this. `WindowMetrics` needs a visual context and describes a window, while the
+capture runs from the application context — the user is expected to be in
+another app — and needs the whole display, which is what the platform mirrors.
+`MediaQuery` and any hard-coded size were never options.
+
+### Reaching the plugin
+
+The track still has to be a `flutter_webrtc` track: the peer connection
+adapter hands its id to `RTCRtpSender.replaceTrack`, and the plugin resolves it
+in its own table of local tracks. So `ScreenCaptureSession.kt` builds the
+`VideoSource` and `VideoTrack` with the plugin's own `PeerConnectionFactory`
+and EGL context, and registers the track with
+`MethodCallHandlerImpl.putLocalTrack`. That handler is a private field of
+`FlutterWebRTCPlugin`, read by reflection in `FlutterWebRtcLocalTracks.kt` —
+the one place this application touches plugin internals. If a future version
+renames it, the capture fails as a value (`captureRefused`) and the assistance
+carries on without the screen. On the Dart side the id is wrapped in the
+plugin's `MediaStreamTrackNative`, exactly what `getDisplayMedia` builds.
+
+`org.webrtc` is a `compileOnly` dependency of the app at the plugin's exact
+version (`io.github.webrtc-sdk:android:150.7871.01`): the classes that run are
+the plugin's.
+
+### Consent
+
+The consent dialog is shown by this application too, because the plugin keeps
+its grant in a private field for its own capturer. `MainActivity` shows
+`MediaProjectionManager.createScreenCaptureIntent(...)` and
+`ScreenCaptureConsentRequester` keeps the grant for exactly one capture: the
+capture takes it and it is forgotten. On Android 14+ the intent is built with
+`MediaProjectionConfig.createConfigForDefaultDisplay()`, which removes the
+"share one app" option — a technician walking someone through their tablet
+needs the device, and a single-app share goes black the moment the user leaves
+that app. The grant never crosses the channel and is never logged.
+
+Video only, by construction: the Android side creates a `VideoSource` and
+nothing else.
 
 ## Answering an offer
 
@@ -120,7 +211,7 @@ setRemoteDescription(offer)          the offer's m=video becomes a transceiver
     │
 flush queued remote ICE
     │
-prepare screen capture               consent -> service -> getDisplayMedia
+prepare screen capture               consent -> service READY -> capture
     │  a track exists
 attach to the offered transceiver    direction = sendonly, replaceTrack(track)
     │
@@ -189,9 +280,13 @@ every case below.
 | the device credential was revoked | torn down | stopped |
 | the application closed | torn down | stopped |
 
-"Stopped" means all of it: the track stopped, the stream disposed, the
-foreground service stopped, the notification gone. No notification outlives the
-assistance it belonged to.
+"Stopped" means all of it: the track forgotten by the plugin; the capturer,
+virtual display, projection, source and texture thread released; the
+foreground service stopped; the notification gone. No notification outlives the
+assistance it belonged to, and nothing of one session survives into the next:
+the grant is single-use, every service start carries its own token, and a
+release is keyed by track id so a late one cannot stop the capture that
+replaced it.
 
 ## When the user stops the share from Android
 
@@ -201,45 +296,88 @@ does nothing else. The remote session stays open, the control channel stays
 open, and nothing renegotiates. What to offer the user afterwards is a product
 question this build does not answer.
 
-**Known limitation.** `flutter_webrtc 1.6.2+hotfix.2` never raises an `ended`
-event from native Android code, and the `MediaProjection.Callback.onStop` it
-installs deliberately does nothing. So on a real tablet this is *not* currently
-detected: frames stop, the session carries on, and the notification goes away
-with the session rather than with the capture. The listener is attached anyway
-— it costs nothing and is correct the day the plugin starts raising it.
+**Known limitation.** `ScreenCapturer.kt` does handle
+`MediaProjection.Callback.onStop`: it releases its virtual display and stops.
+But nothing tells Dart yet, so the client is *not* told: frames stop, the
+session carries on, and the notification goes away with the session rather than
+with the capture. The listener is attached anyway, ready for the day the
+Android side raises it.
 
 ## The foreground service
 
-`MediaProjectionForegroundService.kt`, ~100 lines, and deliberately dull:
+`MediaProjectionForegroundService.kt`, deliberately dull:
 
 * creates a notification channel (API 26+, `IMPORTANCE_LOW`);
 * `startForeground(id, notification, FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)`
   on API 29+, so the type is named in the call as well as in the manifest —
   naming only one of the two is the mistake that throws on Android 14;
+* confirms `foregroundServiceType` includes `mediaProjection`, and only then
+  reports **READY**;
 * holds an ongoing, non-dismissable notification: *Asistencia remota* /
   *Compartiendo pantalla*;
 * `START_NOT_STICKY`, because a capture cannot outlive the process granted it;
 * `stopForeground(STOP_FOREGROUND_REMOVE)` on destroy.
 
-No WebRTC, no Socket.IO, no session state, no identity. `MainActivity` registers
-the channel and nothing else.
+No WebRTC, no Socket.IO, no session state, no identity.
 
-Both calls are idempotent where the answer actually lives: starting a running
-service re-enters `onStartCommand` and changes nothing, and `stopService` on a
-service that is not running is a no-op.
+### READY
 
 ```text
-Flutter                                      Android
-MethodChannelMediaProjectionForegroundService
-  remote_control_device/media_projection  ──> MediaProjectionChannel
-    startMediaProjectionForegroundService       MediaProjectionForegroundService.start
-    stopMediaProjectionForegroundService        MediaProjectionForegroundService.stop
+Dart  startMediaProjectionForegroundService ──> MediaProjectionChannel
+                                                  Service.start(onReady, onFailed)
+                                                    token = n, pending = (n, result)
+                                                    startForegroundService(intent + n)
+      ... the MethodChannel call is still open ...
+                                                  onStartCommand(intent n)
+                                                    startForeground(MEDIA_PROJECTION)
+                                                    type includes mediaProjection?
+                                                    settle(n) -> result.success
+Dart  start() completes  ──>  open the capture
 ```
 
+`MethodChannel.Result` is held until the service answers, so the Dart future
+*is* the readiness signal. Every start carries a token of its own and only the
+matching `onStartCommand` can answer it; `stop` fails a start still pending, and
+so does a newer start. A late answer for an abandoned start finds nothing to
+answer. All of this runs on the main thread — the channel handler and the
+service lifecycle both do — so there is nothing to synchronise.
+
+If `startForeground` throws, or the type is not `mediaProjection`, the start is
+answered with an error, the service stops itself, and the capture is never
+opened: `ScreenCaptureUnavailable(foregroundServiceRefused)`, and the
+assistance carries on without the screen.
+
+Dart bounds the wait at ten seconds (`foregroundServiceNotReady`). That is a
+guard against a bridge that never answers, not a way of waiting: a service that
+comes up answers as soon as it is up, and Android itself gives up on a service
+that has not reached `startForeground` in about that long.
+
+A `stop()` that arrives while a start is still in progress — the session closed
+with the dialog up, or while the service was coming up — abandons that start at
+its next step (`cancelled`); it never opens a capture afterwards and never
+touches state a later start may own.
+
+### The channel
+
+```text
+Flutter                                     Android: MediaProjectionChannel
+remote_control_device/media_projection
+  requestScreenCaptureConsent    -> bool       consent dialog; grant kept natively
+  startMediaProjectionForegroundService       answered on READY
+  startScreenCapture             -> map        trackId + geometry
+  stopScreenCapture {trackId}                 only that capture
+  stopMediaProjectionForegroundService        also fails a pending start
+```
+
+Stopping is idempotent where the answer actually lives: `stopService` on a
+service that is not running is a no-op, and a capture that is not running has
+nothing to release. When the Flutter engine goes away the channel stops the
+capture, drops the grant, answers anything still waiting and stops the service.
+
 A platform refusal — `ForegroundServiceStartNotAllowedException`,
-`SecurityException` — comes back as a `PlatformException`. It has to be
-visible: a bridge that swallowed it would let a capture begin with no service,
-which is a native crash moments later.
+`SecurityException` — comes back as a `PlatformException` carrying only the
+exception's class name. It has to be visible: a bridge that swallowed it would
+let a capture begin with no service.
 
 ## Manifest
 
@@ -316,10 +454,28 @@ Allowed, and what the code actually prints:
 ```text
 [screen] capture permission requested
 [screen] capture permission granted / denied
-[screen] foreground service started
-[screen] capture started / reused / stopped
+[screen] media projection service starting / ready
+[screen] capture starting / started / reused / stopped
+[screen] capture geometry 1280x800 landscape rotation=90 dpi=160
+         virtualDisplay=1280 sending=1280x800
 [webrtc] video track attached
 ```
+
+and natively, under the logcat tag `RemoteControlScreen`, once per event and
+never per frame:
+
+```text
+media projection service starting / ready
+screen capture permission granted / denied
+capture starting / started / stopped
+capture geometry 800x1280 portrait rotation=0 dpi=160,
+    virtual display 1280x1280, sending 800x1280@(240,0)
+capture geometry 1280x800 landscape rotation=90 dpi=160,
+    sending 1280x800@(0,240)                          (on each rotation)
+```
+
+`adb logcat -s RemoteControlScreen` is enough to check on the tablet that a
+landscape capture sends 1280×800 from (0, 240).
 
 Never: frames, SDP, ICE candidate lines, projection tokens, platform exception
 messages — an Android error string here can quote the capture intent, and a
