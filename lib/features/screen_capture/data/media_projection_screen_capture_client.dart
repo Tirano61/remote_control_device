@@ -14,8 +14,8 @@ import 'package:remote_control_device/features/screen_capture/domain/screen_capt
 /// is not taken deliberately:
 ///
 /// ```text
-/// order      consent -> foreground service -> capture. Android 14 refuses
-///            every other arrangement, natively.
+/// order      consent -> foreground service READY -> capture. Android 14
+///            refuses every other arrangement, natively.
 ///
 /// reuse      one capture per RemoteSession, reused across peer connections,
 ///            never carried into the next RemoteSession.
@@ -32,15 +32,30 @@ class MediaProjectionScreenCaptureClient implements ScreenCaptureClient {
     required ScreenCaptureConsent consent,
     required MediaProjectionForegroundService foregroundService,
     required ScreenMediaSource mediaSource,
+    Duration foregroundServiceReadyTimeout =
+        defaultForegroundServiceReadyTimeout,
   }) : _consent = consent,
        _foregroundService = foregroundService,
-       _mediaSource = mediaSource;
+       _mediaSource = mediaSource,
+       _foregroundServiceReadyTimeout = foregroundServiceReadyTimeout;
+
+  /// How long a service that was asked to start may take to say it is up.
+  ///
+  /// Not how the capture is synchronised with the service — it waits for the
+  /// service's own READY, however soon that comes. This only bounds a bridge
+  /// that never answers at all, so that it ends as a failed screen instead of
+  /// an offer nobody finishes answering. Android itself gives a service ten
+  /// seconds to reach `startForeground` before it gives up on it.
+  static const Duration defaultForegroundServiceReadyTimeout = Duration(
+    seconds: 10,
+  );
 
   static const String _loggerName = 'screen';
 
   final ScreenCaptureConsent _consent;
   final MediaProjectionForegroundService _foregroundService;
   final ScreenMediaSource _mediaSource;
+  final Duration _foregroundServiceReadyTimeout;
 
   ScreenMediaCapture? _capture;
   ScreenVideoTrack? _videoTrack;
@@ -56,6 +71,12 @@ class MediaProjectionScreenCaptureClient implements ScreenCaptureClient {
   /// second dialog on top of it.
   Future<ScreenCaptureResult>? _starting;
   String? _startingRemoteSessionId;
+
+  /// Moves on every [stop]. A start compares it after each thing it waited
+  /// for, so a start overtaken by a stop -- the session closed while the
+  /// dialog was up, or while the service was coming up -- ends there, and
+  /// touches nothing a later start may already own.
+  int _generation = 0;
 
   @override
   bool get isActive => _videoTrack != null;
@@ -98,6 +119,8 @@ class MediaProjectionScreenCaptureClient implements ScreenCaptureClient {
     // carrying one across sessions is exactly what the platform stopped
     // allowing, and what the user did not agree to.
     if (_capture != null || _foregroundServiceRunning) await stop();
+    final generation = _generation;
+    bool stoppedMeanwhile() => generation != _generation;
 
     _log('capture permission requested');
     bool granted;
@@ -111,6 +134,7 @@ class MediaProjectionScreenCaptureClient implements ScreenCaptureClient {
         ScreenCaptureFailure.consentUnavailable,
       );
     }
+    if (stoppedMeanwhile()) return _cancelled();
     if (!granted) {
       _log('capture permission denied');
       return const ScreenCaptureDenied();
@@ -120,28 +144,50 @@ class MediaProjectionScreenCaptureClient implements ScreenCaptureClient {
     // Only now. The service is typed `mediaProjection`, and Android 14 refuses
     // to start one for an application that has not been granted a projection.
     _foregroundServiceRunning = true;
+    _log('media projection service starting');
     try {
-      await _foregroundService.start();
-    } catch (_) {
+      // Completes on the service's READY, not on the request to start it.
+      await _foregroundService.start().timeout(_foregroundServiceReadyTimeout);
+    } on TimeoutException {
+      if (stoppedMeanwhile()) return _cancelled();
       await _stopForegroundService();
-      _log('foreground service could not be started');
+      _log('media projection service never became ready');
+      return const ScreenCaptureUnavailable(
+        ScreenCaptureFailure.foregroundServiceNotReady,
+      );
+    } catch (_) {
+      // A stop while the service was coming up fails the start natively; the
+      // stop already took the service down, and it is not ours to stop again.
+      if (stoppedMeanwhile()) return _cancelled();
+      await _stopForegroundService();
+      _log('media projection service could not be started');
       return const ScreenCaptureUnavailable(
         ScreenCaptureFailure.foregroundServiceRefused,
       );
     }
-    _log('foreground service started');
+    if (stoppedMeanwhile()) return _cancelled();
+    _log('media projection service ready');
 
-    // And only now. The other way round -- capture first, service after -- is
-    // the arrangement Android 14 throws a SecurityException for.
+    // And only now. Capture before the service is foreground -- including
+    // "asked to start but not there yet" -- is the arrangement Android 14
+    // throws a SecurityException for.
+    _log('capture starting');
     ScreenMediaCapture capture;
     try {
       capture = await _mediaSource.open();
     } catch (_) {
+      if (stoppedMeanwhile()) return _cancelled();
       await _stopForegroundService();
       _log('capture could not be started');
       return const ScreenCaptureUnavailable(
         ScreenCaptureFailure.captureRefused,
       );
+    }
+    if (stoppedMeanwhile()) {
+      // Opened for a session that has already been stopped. It is this
+      // start's own capture, so it is this start's to release.
+      await _dispose(capture);
+      return _cancelled();
     }
 
     final videoTracks = capture.videoTracks;
@@ -167,6 +213,11 @@ class MediaProjectionScreenCaptureClient implements ScreenCaptureClient {
 
   @override
   Future<void> stop() async {
+    _generation++;
+    // A start in flight is abandoned at its next step; a request arriving
+    // after this stop must not be handed its abandoned answer.
+    _starting = null;
+    _startingRemoteSessionId = null;
     final capture = _capture;
     _capture = null;
     _videoTrack = null;
@@ -194,6 +245,11 @@ class MediaProjectionScreenCaptureClient implements ScreenCaptureClient {
     if (_capture == null) return;
     _log('capture stopped by the platform');
     unawaited(stop());
+  }
+
+  ScreenCaptureResult _cancelled() {
+    _log('capture start abandoned: stopped while starting');
+    return const ScreenCaptureUnavailable(ScreenCaptureFailure.cancelled);
   }
 
   Future<void> _stopForegroundService() async {

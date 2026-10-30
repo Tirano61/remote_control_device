@@ -52,7 +52,14 @@ class FakeScreenCapturePlatform {
   /// When true, starting the foreground service throws.
   bool foregroundServiceStartThrows = false;
 
-  /// When true, `getDisplayMedia` throws.
+  /// When set, a started foreground service does not report READY until the
+  /// test completes this — Android between `startForegroundService` and the
+  /// service's own `startForeground`, which is exactly the window a capture
+  /// must not be opened in. Never completing it is a service that never
+  /// answers. A stop while it is pending fails it, as the Android side does.
+  Completer<void>? foregroundServiceReadyGate;
+
+  /// When true, opening the capture throws.
   bool captureThrows = false;
 
   /// The tracks the next capture yields. A real screen share is exactly one.
@@ -98,11 +105,17 @@ class FakeMediaProjectionForegroundService
     if (_platform.foregroundServiceStartThrows) {
       throw StateError('foreground service refused');
     }
+    await _platform.foregroundServiceReadyGate?.future;
+    _platform.calls.add('foregroundService.ready');
   }
 
   @override
   Future<void> stop() async {
     _platform.calls.add('foregroundService.stop');
+    final gate = _platform.foregroundServiceReadyGate;
+    if (gate != null && !gate.isCompleted) {
+      gate.completeError(StateError('STOPPED'));
+    }
   }
 }
 
@@ -114,7 +127,7 @@ class FakeScreenMediaSource implements ScreenMediaSource {
   @override
   Future<ScreenMediaCapture> open() async {
     _platform.calls.add('mediaSource.open');
-    if (_platform.captureThrows) throw StateError('getDisplayMedia failed');
+    if (_platform.captureThrows) throw StateError('capture failed');
 
     final capture = FakeScreenMediaCapture(
       _platform,
