@@ -5,8 +5,8 @@
 /// lets a command through to it.
 enum RemoteControlAccessibilityStatus { available, unavailable }
 
-/// What became of a tap.
-enum RemoteTapOutcome {
+/// What became of a gesture.
+enum RemoteGestureOutcome {
   /// Android reported the gesture completed.
   completed,
 
@@ -34,7 +34,19 @@ abstract interface class RemoteControlAccessibilityClient {
   ///
   /// Never throws. Authorising the tap is the caller's job: this runs whatever
   /// it is given, which is why only `RemoteControlCommandQueue` calls it.
-  Future<RemoteTapOutcome> tap(double normalizedX, double normalizedY);
+  Future<RemoteGestureOutcome> tap(double normalizedX, double normalizedY);
+
+  /// Draws one straight stroke between two normalized positions, taking
+  /// [durationMs], and completes when Android says what became of it.
+  ///
+  /// Never throws. Like [tap], it runs whatever it is given.
+  Future<RemoteGestureOutcome> swipe({
+    required double startX,
+    required double startY,
+    required double endX,
+    required double endY,
+    required int durationMs,
+  });
 
   /// Opens Android's accessibility settings. Never throws.
   Future<void> openAccessibilitySettings();

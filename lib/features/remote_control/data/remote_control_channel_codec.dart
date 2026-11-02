@@ -18,6 +18,7 @@ abstract final class RemoteControlChannelCodec {
   static const int protocolVersion = 1;
 
   static const String _tapType = 'tap';
+  static const String _swipeType = 'swipe';
   static const String _ackType = 'ack';
 
   /// Decodes a frame, or answers `null` when there is nothing to report.
@@ -56,16 +57,55 @@ abstract final class RemoteControlChannelCodec {
     if (type is! String) {
       return _rejected(id, RemoteControlError.invalidCommand);
     }
-    if (type != _tapType) {
-      return _rejected(id, RemoteControlError.unsupportedCommand);
-    }
+    return switch (type) {
+      _tapType => _decodeTap(id, payload),
+      _swipeType => _decodeSwipe(id, payload),
+      _ => _rejected(id, RemoteControlError.unsupportedCommand),
+    };
+  }
 
+  static RemoteControlInboundMessage _decodeTap(
+    String id,
+    Map<String, dynamic> payload,
+  ) {
     final x = _normalized(payload['x']);
     final y = _normalized(payload['y']);
     if (x == null || y == null) {
       return _rejected(id, RemoteControlError.invalidCommand);
     }
     return RemoteControlCommandReceived(RemoteTapCommand(id: id, x: x, y: y));
+  }
+
+  /// A swipe that goes nowhere is refused rather than run as a tap: the sender
+  /// has a command for that, and this one saying otherwise is a mistake on its
+  /// side worth reporting.
+  static RemoteControlInboundMessage _decodeSwipe(
+    String id,
+    Map<String, dynamic> payload,
+  ) {
+    final startX = _normalized(payload['startX']);
+    final startY = _normalized(payload['startY']);
+    final endX = _normalized(payload['endX']);
+    final endY = _normalized(payload['endY']);
+    final durationMs = _swipeDuration(payload['durationMs']);
+    if (startX == null ||
+        startY == null ||
+        endX == null ||
+        endY == null ||
+        durationMs == null ||
+        (startX == endX && startY == endY)) {
+      return _rejected(id, RemoteControlError.invalidCommand);
+    }
+    return RemoteControlCommandReceived(
+      RemoteSwipeCommand(
+        id: id,
+        startX: startX,
+        startY: startY,
+        endX: endX,
+        endY: endY,
+        durationMs: durationMs,
+      ),
+    );
   }
 
   static String encodeAck(RemoteControlAck ack) => jsonEncode(<String, Object>{
@@ -82,6 +122,17 @@ abstract final class RemoteControlChannelCodec {
     if (value is! num || !value.isFinite) return null;
     if (value < 0 || value > 1) return null;
     return value.toDouble();
+  }
+
+  /// An integer in the allowed range, or `null`. `300.0` is a double once
+  /// decoded, and is refused along with every other thing that is not an int.
+  static int? _swipeDuration(Object? value) {
+    if (value is! int) return null;
+    if (value < RemoteSwipeCommand.minDurationMs ||
+        value > RemoteSwipeCommand.maxDurationMs) {
+      return null;
+    }
+    return value;
   }
 
   static RemoteControlInboundMessage _rejected(

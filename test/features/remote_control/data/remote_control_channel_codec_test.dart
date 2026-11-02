@@ -134,11 +134,184 @@ void main() {
 
     test('an unknown type', () {
       expect(
-        decodeText('{"v":1,"type":"swipe","id":"s-1","x":0,"y":0}'),
+        decodeText('{"v":1,"type":"pinch","id":"p-1","x":0,"y":0}'),
         const RemoteControlMessageRejected(
-          's-1',
+          'p-1',
           RemoteControlError.unsupportedCommand,
         ),
+      );
+    });
+
+    test('another version is not read as a version 1 swipe', () {
+      expect(
+        decodeText(
+          '{"v":2,"type":"swipe","id":"later","startX":0.5,"startY":0.8,'
+          '"endX":0.5,"endY":0.2,"durationMs":300}',
+        ),
+        const RemoteControlMessageRejected(
+          'later',
+          RemoteControlError.unsupportedCommand,
+        ),
+      );
+    });
+  });
+
+  group('a swipe', () {
+    /// A valid swipe with one field replaced, or removed when [value] is null.
+    RemoteControlInboundMessage? decodeSwipeWith(String field, String? value) {
+      final fields = <String, String>{
+        'startX': '0.2',
+        'startY': '0.8',
+        'endX': '0.2',
+        'endY': '0.3',
+        'durationMs': '300',
+      };
+      if (value == null) {
+        fields.remove(field);
+      } else {
+        fields[field] = value;
+      }
+      final body = fields.entries.map((e) => '"${e.key}":${e.value}').join(',');
+      return decodeText('{"v":1,"type":"swipe","id":"s-1",$body}');
+    }
+
+    const invalid = RemoteControlMessageRejected(
+      's-1',
+      RemoteControlError.invalidCommand,
+    );
+
+    test('decodes to exactly the typed command', () {
+      expect(
+        decodeText(
+          '{"v":1,"type":"swipe","id":"swipe-1","startX":0.2,"startY":0.8,'
+          '"endX":0.2,"endY":0.3,"durationMs":300}',
+        ),
+        const RemoteControlCommandReceived(
+          RemoteSwipeCommand(
+            id: 'swipe-1',
+            startX: 0.2,
+            startY: 0.8,
+            endX: 0.2,
+            endY: 0.3,
+            durationMs: 300,
+          ),
+        ),
+      );
+    });
+
+    test('ignores unknown extra fields, as a tap does', () {
+      expect(
+        decodeSwipeWith('extra', '"ignored"'),
+        isA<RemoteControlCommandReceived>(),
+      );
+    });
+
+    group('durationMs', () {
+      for (final valid in const [50, 300, 2000]) {
+        test('$valid is valid', () {
+          final decoded = decodeSwipeWith('durationMs', '$valid');
+
+          expect(decoded, isA<RemoteControlCommandReceived>());
+          final command =
+              (decoded! as RemoteControlCommandReceived).command
+                  as RemoteSwipeCommand;
+          expect(command.durationMs, valid);
+        });
+      }
+
+      for (final (name, value) in const [
+        ('49, just below the range', '49'),
+        ('2001, just above the range', '2001'),
+        ('zero', '0'),
+        ('negative', '-300'),
+        ('300.0, which decodes to a double', '300.0'),
+        ('3e2, which decodes to a double', '3e2'),
+        ('a numeric string', '"300"'),
+        ('null', 'null'),
+        ('a bool', 'true'),
+        ('infinite', '1e999'),
+        ('missing', null),
+      ]) {
+        test('$name is invalid', () {
+          expect(decodeSwipeWith('durationMs', value), invalid);
+        });
+      }
+    });
+
+    for (final field in const ['startX', 'startY', 'endX', 'endY']) {
+      group(field, () {
+        for (final value in const ['0.0', '0.5', '1.0', '0', '1']) {
+          test('$value is valid', () {
+            expect(
+              decodeSwipeWith(field, value),
+              isA<RemoteControlCommandReceived>(),
+            );
+          });
+        }
+
+        for (final (name, value) in const [
+          ('below the range', '-0.1'),
+          ('above the range', '1.1'),
+          ('infinite', '1e999'),
+          ('negative infinite', '-1e999'),
+          ('a numeric string', '"0.5"'),
+          ('null', 'null'),
+          ('a bool', 'true'),
+          ('missing', null),
+        ]) {
+          test('$name is invalid, not clamped', () {
+            expect(decodeSwipeWith(field, value), invalid);
+          });
+        }
+      });
+    }
+
+    group('that goes nowhere', () {
+      test('is invalid, and does not become a tap', () {
+        expect(
+          decodeText(
+            '{"v":1,"type":"swipe","id":"s-1","startX":0.5,"startY":0.5,'
+            '"endX":0.5,"endY":0.5,"durationMs":300}',
+          ),
+          invalid,
+        );
+      });
+
+      test('is still nowhere when written differently', () {
+        expect(
+          decodeText(
+            '{"v":1,"type":"swipe","id":"s-1","startX":1,"startY":0,'
+            '"endX":1.0,"endY":-0.0,"durationMs":300}',
+          ),
+          invalid,
+        );
+      });
+
+      test('moving along one axis only is not nowhere', () {
+        expect(
+          decodeText(
+            '{"v":1,"type":"swipe","id":"s-1","startX":0.5,"startY":0.5,'
+            '"endX":0.51,"endY":0.5,"durationMs":300}',
+          ),
+          isA<RemoteControlCommandReceived>(),
+        );
+      });
+    });
+
+    test('a tap\'s x and y do not make a swipe', () {
+      expect(
+        decodeText('{"v":1,"type":"swipe","id":"s-1","x":0.5,"y":0.5}'),
+        invalid,
+      );
+    });
+
+    test('a swipe\'s fields do not make a tap', () {
+      expect(
+        decodeText(
+          '{"v":1,"type":"tap","id":"s-1","startX":0.5,"startY":0.8,'
+          '"endX":0.5,"endY":0.2,"durationMs":300}',
+        ),
+        invalid,
       );
     });
   });

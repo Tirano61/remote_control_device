@@ -37,6 +37,11 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
     }
+
+    testOptions {
+        // Log and ContextWrapper are stubs on the JVM, and the channel bridge touches both.
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 flutter {

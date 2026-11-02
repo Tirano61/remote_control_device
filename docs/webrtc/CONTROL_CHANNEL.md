@@ -24,7 +24,7 @@ Frames are UTF-8 text holding one JSON object. Binary frames are ignored.
 
 ## Protocol v1
 
-Only `tap` is supported.
+`tap` and `swipe` are supported.
 
 ### `tap` — web to device
 
@@ -58,6 +58,45 @@ They are not CSS pixels. The sender has to subtract any letterboxing around its
 
 Out-of-range values are refused, never clamped. Unknown extra fields are ignored.
 
+### `swipe` — web to device
+
+One straight stroke, from a start to a different end.
+
+```json
+{
+  "v": 1,
+  "type": "swipe",
+  "id": "swipe-123",
+  "startX": 0.5,
+  "startY": 0.8,
+  "endX": 0.5,
+  "endY": 0.2,
+  "durationMs": 350
+}
+```
+
+| Field | Type | Rule |
+| --- | --- | --- |
+| `v` | integer | `1` |
+| `type` | string | `"swipe"` |
+| `id` | string | non-empty; chosen by the sender and opaque to the device |
+| `startX`, `startY` | number | finite, `0.0 <= value <= 1.0` |
+| `endX`, `endY` | number | finite, `0.0 <= value <= 1.0` |
+| `durationMs` | integer | required, `50 <= durationMs <= 2000` |
+
+The coordinates are the same as a tap's: normalized `[0,1]` over the whole remote
+frame, origin top-left, `x` growing right and `y` growing down.
+
+`durationMs` has no default, because it decides whether this is a fling or a slow
+drag. `300.0` is not an integer and is refused.
+
+A swipe whose start equals its end is `invalid_command`. It does not become a tap:
+`tap` is the command for that. Curves, several fingers, long presses and strokes
+continued across commands do not exist.
+
+The rules on values are a tap's too: refused, never clamped, and unknown extra
+fields ignored. The ack is the same, with the same errors.
+
 ### `ack` — device to web
 
 Exactly one for each command that has an id, on the same channel.
@@ -77,7 +116,7 @@ requested.
 | --- | --- |
 | `accessibility_unavailable` | the accessibility service is not connected |
 | `session_not_active` | no `ACTIVE` remote session for this connection, or it ended while the command was queued |
-| `gesture_rejected` | Android cancelled or refused the gesture, or too many commands are queued |
+| `gesture_rejected` | Android cancelled or refused the gesture, too many commands are queued, or a swipe lands on a single pixel of this screen |
 | `invalid_command` | malformed, with a readable `id` |
 | `unsupported_command` | another `v`, or an unknown `type`, with a readable `id` |
 
@@ -100,10 +139,13 @@ An ack needs an id to refer to, so:
 | `type` missing or not a string | `invalid_command` |
 | `type` is another string | `unsupported_command` |
 | `x`/`y` missing, `null`, strings, infinite (`1e999`), out of range | `invalid_command` |
+| `startX`/`startY`/`endX`/`endY` missing, `null`, strings, infinite, out of range | `invalid_command` |
+| `durationMs` missing, `null`, a string, a double, below `50`, above `2000` | `invalid_command` |
+| a swipe whose start equals its end | `invalid_command` |
 
-## When a tap runs
+## When a command runs
 
-All of these, at the moment it is received:
+The same for a tap and a swipe. All of these, at the moment it is received:
 
 ```text
 it came from the current PeerConnection generation
@@ -112,7 +154,7 @@ the RemoteSession is ACTIVE, and is the one this negotiation belongs to
 the user has not pressed FINALIZAR ASISTENCIA
 ```
 
-A tap that arrives while the session is `CONNECTING` gets `session_not_active`
+A command that arrives while the session is `CONNECTING` gets `session_not_active`
 and no gesture. The web activates the session once it sees its own connection up,
 so it should wait for that before sending.
 
@@ -129,11 +171,16 @@ backend to confirm the close.
 
 ### After it was accepted
 
-Taps run one at a time, in order, because a second `dispatchGesture` would cancel
-the first. Up to 16 wait; beyond that they are refused with `gesture_rejected`.
+Taps and swipes share one queue and run one at a time, in the order they arrived,
+because a second `dispatchGesture` would cancel the first. Up to 16 wait, of either
+kind; beyond that they are refused with `gesture_rejected`.
 
 ```text
-                                     running gesture   queued taps
+tap A, swipe B, tap C    A runs; B waits; A ends; B runs; C waits; B ends; C runs
+```
+
+```text
+                                     running gesture   queued commands
 session leaves ACTIVE                finishes          dropped; session_not_active
 channel stops being open             finishes          dropped; no ack possible
 peer connection failed or replaced   finishes          dropped; no ack possible
@@ -167,13 +214,16 @@ remote_control/accessibility
   isAccessibilityServiceAvailable  -> bool
   performTap {x, y}                -> "completed" | "cancelled" | "rejected"
                                       | "busy" | "invalid" | "unavailable"
+  performSwipe {startX, startY, endX, endY, durationMs}
+                                   -> the same answers
   openAccessibilitySettings
   accessibilityServiceAvailabilityChanged (Android to Dart) bool
 ```
 
-`performTap` is answered from the gesture's `GestureResultCallback`, so the Dart
-future is the gesture. Dart gives up after five seconds, as a guard against a
-bridge that never answers.
+Both are answered from the gesture's `GestureResultCallback`, so the Dart future
+is the gesture. Dart gives up after five seconds, as a guard against a bridge that
+never answers. The longest swipe takes two, so a valid one finishes well inside
+that.
 
 These answers are internal to the bridge and never reach the wire. Dart reduces
 them to three outcomes, so the `ack` keeps exactly the errors documented above:
@@ -190,9 +240,11 @@ queue runs one command at a time, so it should not happen in normal operation.
 
 ### From a position to a pixel
 
-Android reads the display for every tap, with
+Android reads the display when each gesture starts, with
 `ScreenCapturer.readDisplayGeometry`: the same reading the capture crops with, so
-the two describe one screen, and a rotation needs no signal of its own.
+the two describe one screen, and a rotation between two gestures needs no signal
+of its own. A rotation during a swipe does not recalculate its stroke: Android
+finishes or cancels what it was given.
 
 ```text
 pixel = min(floor(normalized * size), size - 1)
@@ -200,6 +252,8 @@ pixel = min(floor(normalized * size), size - 1)
 1280x800, x=0.5, y=0.25    ->  (640, 200)
 1280x800, x=1.0, y=1.0     ->  (1279, 799)
 800x1280, x=0.5, y=0.5     ->  (400, 640)
+
+1280x800, swipe (0.5, 0.75) to (0.5, 0.25)    ->  (640, 600) to (640, 200)
 ```
 
 `1.0` would otherwise land one past the last pixel.
@@ -211,8 +265,19 @@ the previous orientation.
 
 ### The gesture
 
-A single stroke with no movement, 50 ms long, at screen coordinates. No view is
-involved, so it lands on whatever is on screen, including other applications.
+A single stroke at screen coordinates, starting at time zero. No view is involved,
+so it lands on whatever is on screen, including other applications.
+
+```text
+tap      moveTo(x, y)                                  50 ms
+swipe    moveTo(startX, startY), lineTo(endX, endY)    durationMs, unchanged
+```
+
+Two different positions can still land on one pixel. Android takes a stroke with
+no length for a touch held in place, which would be a long press nobody asked for,
+so that swipe does not run. It is answered `"invalid"` on the bridge, and so
+`gesture_rejected` on the wire. Only the device can know this, because it depends
+on the size of the screen.
 
 ### The service
 
@@ -310,8 +375,8 @@ adb shell ps -A | grep app_process
 adb shell dumpsys accessibility | grep "Ui Automation"
 ```
 
-Both should print nothing. For the same reason, the end-to-end tap test has to run
-without mobile-mcp: with the service suppressed, a command would not reach
+Both should print nothing. For the same reason, an end-to-end gesture test has to
+run without mobile-mcp: with the service suppressed, a command would not reach
 `dispatchGesture`. Observe with `adb logcat`, `dumpsys` and
 `adb exec-out screencap -p` instead. `adb shell input tap` does not use
 `UiAutomation`, and is enough to press this application's own buttons.
@@ -323,6 +388,13 @@ pressed through ADB, `settings put`, mobile-mcp or any other automation, even
 during a test. Pressing `HABILITAR CONTROL REMOTO` is fine, since it only opens
 Settings.
 
+### What has been seen on a device
+
+`tap` has been validated on the tablet, end to end. `swipe` has not: the web does
+not send it yet, so what stands behind it is Dart and JVM unit tests. Those stop at
+the stroke handed to the service. The part only a device can show is that
+`StrokeDescription` receives it and that Android moves the screen with it.
+
 ## Logging
 
 ```text
@@ -330,6 +402,10 @@ Settings.
 [webrtc] tap accepted
 [webrtc] tap completed <id>
 [webrtc] tap rejected <id> (gestureRejected)
+[webrtc] control command received: swipe <id>
+[webrtc] swipe accepted
+[webrtc] swipe completed <id>
+[webrtc] swipe rejected <id> (gestureRejected)
 [webrtc] control message dropped: it belongs to a previous negotiation
 ```
 
@@ -337,7 +413,8 @@ and natively, under the logcat tag `RemoteControlInput`:
 
 ```text
 accessibility service connected / disconnected
-tap completed / cancelled / rejected / busy / unavailable
+tap completed / cancelled / rejected / busy / invalid / unavailable
+swipe completed / cancelled / rejected / busy / invalid / unavailable
 ```
 
 Coordinates are not logged. Never: frames, SDP, ICE lines, tokens, secrets.
