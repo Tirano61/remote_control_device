@@ -46,6 +46,11 @@ void main() {
     client.pushStatus(RemoteControlAccessibilityStatus.unavailable);
     await settle();
     expect(bloc.state.status, RemoteControlAccessibilityStatus.unavailable);
+
+    // Enabled a second time: nothing depends on it being the first bind.
+    client.pushStatus(RemoteControlAccessibilityStatus.available);
+    await settle();
+    expect(bloc.state.status, RemoteControlAccessibilityStatus.available);
   });
 
   test('opening settings changes nothing by itself', () async {

@@ -194,6 +194,25 @@ class RemoteTapDispatcherTest {
     }
 
     @Test
+    fun `a service enabled again works like the first time`() {
+        val availability = RemoteControlAvailability()
+        val changes = mutableListOf<Boolean>()
+        availability.onChanged = { changes += it }
+
+        availability.connected(dispatcher)
+        availability.disconnected()
+        availability.connected(dispatcher)
+
+        assertEquals(listOf(true, false, true), changes)
+        assertTrue(availability.isAvailable)
+
+        availability.tap(0.5, 0.5) { outcomes += it }
+        report!!(true)
+
+        assertEquals(listOf(RemoteTapOutcome.COMPLETED), outcomes)
+    }
+
+    @Test
     fun `being told twice that the service is gone reports it once`() {
         val availability = RemoteControlAvailability()
         val changes = mutableListOf<Boolean>()
