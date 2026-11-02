@@ -60,3 +60,14 @@ final class RemoteSwipeCommand extends RemoteControlCommand {
   @override
   List<Object?> get props => [id, startX, startY, endX, endY, durationMs];
 }
+
+/// Android's Back. It names no position and depends on no screen, so it is not
+/// a touch: an [id] is all there is to it.
+final class RemoteBackCommand extends RemoteControlCommand {
+  const RemoteBackCommand({required String id}) : super(id);
+}
+
+/// Android's Home. Like [RemoteBackCommand], an [id] and nothing else.
+final class RemoteHomeCommand extends RemoteControlCommand {
+  const RemoteHomeCommand({required String id}) : super(id);
+}

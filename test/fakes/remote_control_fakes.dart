@@ -26,7 +26,12 @@ class FakeRemoteControlAccessibilityClient
   /// `(startX, startY, endX, endY, durationMs)`.
   final List<(double, double, double, double, int)> swipes = [];
 
-  /// [taps] and [swipes] together, in the order they reached the service.
+  /// Every Back and Home that actually reached the service, as `'back'` or
+  /// `'home'`. Its being empty is what "no global action" means in these tests.
+  final List<String> globalActions = [];
+
+  /// [taps], [swipes] and [globalActions] together, in the order they reached
+  /// the service.
   final List<Object> gestures = [];
 
   int settingsOpened = 0;
@@ -76,7 +81,19 @@ class FakeRemoteControlAccessibilityClient
   }
 
   @override
+  Future<RemoteGestureOutcome> performBack() => _globalAction('back');
+
+  @override
+  Future<RemoteGestureOutcome> performHome() => _globalAction('home');
+
+  @override
   Future<void> openAccessibilitySettings() async => settingsOpened++;
+
+  Future<RemoteGestureOutcome> _globalAction(String name) {
+    globalActions.add(name);
+    gestures.add(name);
+    return _answer();
+  }
 
   Future<RemoteGestureOutcome> _answer() {
     if (!holdGestures) return Future.value(outcome);
