@@ -72,12 +72,12 @@ class RemoteControlCommandQueue {
     switch (command) {
       case RemoteTapCommand(:final id, :final x, :final y):
         return switch (await _accessibility.tap(x, y)) {
-          RemoteTapOutcome.completed => RemoteControlAck.success(id),
-          RemoteTapOutcome.rejected => RemoteControlAck.failure(
+          RemoteGestureOutcome.completed => RemoteControlAck.success(id),
+          RemoteGestureOutcome.rejected => RemoteControlAck.failure(
             id,
             RemoteControlError.gestureRejected,
           ),
-          RemoteTapOutcome.unavailable => RemoteControlAck.failure(
+          RemoteGestureOutcome.unavailable => RemoteControlAck.failure(
             id,
             RemoteControlError.accessibilityUnavailable,
           ),

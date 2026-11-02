@@ -28,7 +28,7 @@ void main() {
 
   setUp(() {
     client = MethodChannelRemoteControlAccessibilityClient(
-      tapTimeout: const Duration(milliseconds: 20),
+      gestureTimeout: const Duration(milliseconds: 20),
     );
     calls = [];
   });
@@ -102,13 +102,13 @@ void main() {
     });
 
     for (final (wire, outcome) in const [
-      ('completed', RemoteTapOutcome.completed),
-      ('unavailable', RemoteTapOutcome.unavailable),
-      ('cancelled', RemoteTapOutcome.rejected),
-      ('rejected', RemoteTapOutcome.rejected),
-      ('busy', RemoteTapOutcome.rejected),
-      ('invalid', RemoteTapOutcome.rejected),
-      ('something new', RemoteTapOutcome.rejected),
+      ('completed', RemoteGestureOutcome.completed),
+      ('unavailable', RemoteGestureOutcome.unavailable),
+      ('cancelled', RemoteGestureOutcome.rejected),
+      ('rejected', RemoteGestureOutcome.rejected),
+      ('busy', RemoteGestureOutcome.rejected),
+      ('invalid', RemoteGestureOutcome.rejected),
+      ('something new', RemoteGestureOutcome.rejected),
     ]) {
       test('"$wire" means $outcome', () async {
         answerWith((_) => wire);
@@ -120,18 +120,18 @@ void main() {
     test('a platform error is a rejection, not an exception', () async {
       answerWith((_) => throw PlatformException(code: 'BOOM'));
 
-      expect(await client.tap(0.5, 0.5), RemoteTapOutcome.rejected);
+      expect(await client.tap(0.5, 0.5), RemoteGestureOutcome.rejected);
     });
 
     test('a bridge that is not there is unavailable', () async {
-      expect(await client.tap(0.5, 0.5), RemoteTapOutcome.unavailable);
+      expect(await client.tap(0.5, 0.5), RemoteGestureOutcome.unavailable);
     });
 
     test('a bridge that never answers does not hold the queue', () async {
       final never = Completer<Object?>();
       messenger.setMockMethodCallHandler(channel, (_) => never.future);
 
-      expect(await client.tap(0.5, 0.5), RemoteTapOutcome.rejected);
+      expect(await client.tap(0.5, 0.5), RemoteGestureOutcome.rejected);
     });
   });
 

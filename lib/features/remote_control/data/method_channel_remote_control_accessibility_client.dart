@@ -9,12 +9,12 @@ import 'package:remote_control_device/features/remote_control/domain/remote_cont
 /// Android side, and whether a tap may run is decided above this class.
 ///
 /// The Android side always answers a tap, including when the service goes away
-/// mid-gesture, so [tapTimeout] is a guard against a bridge that never answers:
+/// mid-gesture, so [gestureTimeout] is a guard against a bridge that never answers:
 /// a queue waiting on a lost reply would otherwise stop running commands.
 class MethodChannelRemoteControlAccessibilityClient
     implements RemoteControlAccessibilityClient {
   MethodChannelRemoteControlAccessibilityClient({
-    this.tapTimeout = const Duration(seconds: 5),
+    this.gestureTimeout = const Duration(seconds: 5),
   });
 
   static const MethodChannel channel = MethodChannel(
@@ -27,7 +27,7 @@ class MethodChannelRemoteControlAccessibilityClient
   static const String availabilityChangedMethod =
       'accessibilityServiceAvailabilityChanged';
 
-  final Duration tapTimeout;
+  final Duration gestureTimeout;
 
   /// The handler goes on when someone listens rather than at construction,
   /// which happens before the Flutter binding exists.
@@ -52,23 +52,23 @@ class MethodChannelRemoteControlAccessibilityClient
   }
 
   @override
-  Future<RemoteTapOutcome> tap(double normalizedX, double normalizedY) async {
+  Future<RemoteGestureOutcome> tap(double normalizedX, double normalizedY) async {
     try {
       final outcome = await channel
           .invokeMethod<String>(tapMethod, <String, Object>{
             'x': normalizedX,
             'y': normalizedY,
           })
-          .timeout(tapTimeout);
+          .timeout(gestureTimeout);
       return switch (outcome) {
-        'completed' => RemoteTapOutcome.completed,
-        'unavailable' => RemoteTapOutcome.unavailable,
-        _ => RemoteTapOutcome.rejected,
+        'completed' => RemoteGestureOutcome.completed,
+        'unavailable' => RemoteGestureOutcome.unavailable,
+        _ => RemoteGestureOutcome.rejected,
       };
     } on MissingPluginException {
-      return RemoteTapOutcome.unavailable;
+      return RemoteGestureOutcome.unavailable;
     } catch (_) {
-      return RemoteTapOutcome.rejected;
+      return RemoteGestureOutcome.rejected;
     }
   }
 

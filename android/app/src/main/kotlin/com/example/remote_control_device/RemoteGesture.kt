@@ -1,7 +1,7 @@
 package com.example.remote_control_device
 
 /** A pixel of the screen as it is right now, always inside it. */
-data class TapPixel(val x: Int, val y: Int)
+data class GesturePixel(val x: Int, val y: Int)
 
 /**
  * Where a normalized position lands on this screen.
@@ -10,9 +10,9 @@ data class TapPixel(val x: Int, val y: Int)
  * over [ScreenCaptureGeometry.width] and [ScreenCaptureGeometry.height]. `1.0` would land one
  * past the last pixel, which is outside the screen, so it is mapped onto the last one.
  */
-fun ScreenCaptureGeometry.tapPixel(normalizedX: Double, normalizedY: Double): TapPixel {
+fun ScreenCaptureGeometry.gesturePixel(normalizedX: Double, normalizedY: Double): GesturePixel {
     require(isNormalized(normalizedX) && isNormalized(normalizedY)) { "not a normalized position" }
-    return TapPixel(pixelOn(normalizedX, width), pixelOn(normalizedY, height))
+    return GesturePixel(pixelOn(normalizedX, width), pixelOn(normalizedY, height))
 }
 
 private fun isNormalized(value: Double): Boolean = value in 0.0..1.0
@@ -20,8 +20,8 @@ private fun isNormalized(value: Double): Boolean = value in 0.0..1.0
 private fun pixelOn(normalized: Double, size: Int): Int =
     (normalized * size).toInt().coerceAtMost(size - 1)
 
-/** What became of a tap. [wire] is what crosses the channel to Dart. */
-enum class RemoteTapOutcome(val wire: String) {
+/** What became of a gesture. [wire] is what crosses the channel to Dart. */
+enum class RemoteGestureOutcome(val wire: String) {
     /** Android reported the gesture completed. The only outcome that means it happened. */
     COMPLETED("completed"),
 
@@ -55,26 +55,26 @@ enum class RemoteTapOutcome(val wire: String) {
  * Pure, and main-thread only: the channel handler, the gesture callback and the service
  * lifecycle all run there.
  */
-class RemoteTapDispatcher(
+class RemoteGestureDispatcher(
     private val readDisplay: () -> ScreenCaptureGeometry,
-    private val dispatch: (TapPixel, (Boolean) -> Unit) -> Boolean,
+    private val dispatch: (GesturePixel, (Boolean) -> Unit) -> Boolean,
 ) {
     private var running: Running? = null
 
-    fun tap(normalizedX: Double, normalizedY: Double, answer: (RemoteTapOutcome) -> Unit) {
+    fun tap(normalizedX: Double, normalizedY: Double, answer: (RemoteGestureOutcome) -> Unit) {
         if (running != null) {
-            answer(RemoteTapOutcome.BUSY)
+            answer(RemoteGestureOutcome.BUSY)
             return
         }
         if (!isNormalized(normalizedX) || !isNormalized(normalizedY)) {
-            answer(RemoteTapOutcome.INVALID)
+            answer(RemoteGestureOutcome.INVALID)
             return
         }
 
         val pixel = try {
-            readDisplay().tapPixel(normalizedX, normalizedY)
+            readDisplay().gesturePixel(normalizedX, normalizedY)
         } catch (_: Exception) {
-            answer(RemoteTapOutcome.REJECTED)
+            answer(RemoteGestureOutcome.REJECTED)
             return
         }
 
@@ -82,27 +82,27 @@ class RemoteTapDispatcher(
         running = tap
         val accepted = try {
             dispatch(pixel) { completed ->
-                settle(tap, if (completed) RemoteTapOutcome.COMPLETED else RemoteTapOutcome.CANCELLED)
+                settle(tap, if (completed) RemoteGestureOutcome.COMPLETED else RemoteGestureOutcome.CANCELLED)
             }
         } catch (_: Exception) {
             false
         }
-        if (!accepted) settle(tap, RemoteTapOutcome.REJECTED)
+        if (!accepted) settle(tap, RemoteGestureOutcome.REJECTED)
     }
 
     /** The service is going away and will not report on the gesture it was running. */
     fun abandon() {
-        running?.let { settle(it, RemoteTapOutcome.CANCELLED) }
+        running?.let { settle(it, RemoteGestureOutcome.CANCELLED) }
     }
 
     /** Answers once: a late report about a tap already answered finds nothing to answer. */
-    private fun settle(tap: Running, outcome: RemoteTapOutcome) {
+    private fun settle(tap: Running, outcome: RemoteGestureOutcome) {
         if (running !== tap) return
         running = null
         tap.answer(outcome)
     }
 
-    private class Running(val answer: (RemoteTapOutcome) -> Unit)
+    private class Running(val answer: (RemoteGestureOutcome) -> Unit)
 }
 
 /**
@@ -113,14 +113,14 @@ class RemoteTapDispatcher(
  * and whether a command may run is decided in Dart, against the remote session.
  */
 class RemoteControlAvailability {
-    private var dispatcher: RemoteTapDispatcher? = null
+    private var dispatcher: RemoteGestureDispatcher? = null
 
     /** Told about every change. Set while a Flutter engine is attached. */
     var onChanged: ((Boolean) -> Unit)? = null
 
     val isAvailable: Boolean get() = dispatcher != null
 
-    fun connected(next: RemoteTapDispatcher) {
+    fun connected(next: RemoteGestureDispatcher) {
         dispatcher?.abandon()
         dispatcher = next
         onChanged?.invoke(true)
@@ -134,10 +134,10 @@ class RemoteControlAvailability {
         onChanged?.invoke(false)
     }
 
-    fun tap(normalizedX: Double, normalizedY: Double, answer: (RemoteTapOutcome) -> Unit) {
+    fun tap(normalizedX: Double, normalizedY: Double, answer: (RemoteGestureOutcome) -> Unit) {
         val current = dispatcher
         if (current == null) {
-            answer(RemoteTapOutcome.UNAVAILABLE)
+            answer(RemoteGestureOutcome.UNAVAILABLE)
             return
         }
         current.tap(normalizedX, normalizedY, answer)

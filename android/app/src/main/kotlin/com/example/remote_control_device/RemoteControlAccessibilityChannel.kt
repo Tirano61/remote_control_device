@@ -49,7 +49,7 @@ class RemoteControlAccessibilityChannel(
                 val x = call.argument<Double>(X)
                 val y = call.argument<Double>(Y)
                 if (x == null || y == null) {
-                    result.success(RemoteTapOutcome.INVALID.wire)
+                    result.success(RemoteGestureOutcome.INVALID.wire)
                     return
                 }
                 availability.tap(x, y) { outcome ->

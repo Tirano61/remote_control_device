@@ -24,7 +24,7 @@ class RemoteControlAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         Log.i(TAG, "accessibility service connected")
         availability.connected(
-            RemoteTapDispatcher(
+            RemoteGestureDispatcher(
                 // The application context, as the capture reads it: the two must agree on
                 // what the current screen is.
                 readDisplay = { ScreenCapturer.readDisplayGeometry(applicationContext) },
@@ -34,7 +34,7 @@ class RemoteControlAccessibilityService : AccessibilityService() {
     }
 
     /** A short stroke with no movement: a tap at screen coordinates, not on any view. */
-    private fun dispatchTap(pixel: TapPixel, onResult: (Boolean) -> Unit): Boolean {
+    private fun dispatchTap(pixel: GesturePixel, onResult: (Boolean) -> Unit): Boolean {
         val path = Path().apply { moveTo(pixel.x.toFloat(), pixel.y.toFloat()) }
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0L, TAP_DURATION_MS))

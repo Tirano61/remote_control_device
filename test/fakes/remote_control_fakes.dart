@@ -11,12 +11,12 @@ class FakeRemoteControlAccessibilityClient
   RemoteControlAccessibilityStatus status =
       RemoteControlAccessibilityStatus.available;
 
-  /// What every tap answers, unless [holdTaps] is set.
-  RemoteTapOutcome outcome = RemoteTapOutcome.completed;
+  /// What every tap answers, unless [holdGestures] is set.
+  RemoteGestureOutcome outcome = RemoteGestureOutcome.completed;
 
-  /// When true, a tap does not answer until the test calls [finishTap]. The
+  /// When true, a tap does not answer until the test calls [finishGesture]. The
   /// only way to observe what arrives while a gesture is running.
-  bool holdTaps = false;
+  bool holdGestures = false;
 
   /// Every tap that actually reached the service, as `(x, y)`. Its being empty
   /// is what "no gesture" means in these tests.
@@ -24,13 +24,13 @@ class FakeRemoteControlAccessibilityClient
 
   int settingsOpened = 0;
 
-  final List<Completer<RemoteTapOutcome>> _heldTaps = [];
+  final List<Completer<RemoteGestureOutcome>> _heldGestures = [];
   final StreamController<RemoteControlAccessibilityStatus> _statusChanges =
       StreamController<RemoteControlAccessibilityStatus>.broadcast();
 
   /// Answers the oldest tap still running.
-  void finishTap([RemoteTapOutcome result = RemoteTapOutcome.completed]) =>
-      _heldTaps.removeAt(0).complete(result);
+  void finishGesture([RemoteGestureOutcome result = RemoteGestureOutcome.completed]) =>
+      _heldGestures.removeAt(0).complete(result);
 
   /// What Android would report when the user enables or disables the service.
   void pushStatus(RemoteControlAccessibilityStatus next) {
@@ -46,11 +46,11 @@ class FakeRemoteControlAccessibilityClient
   Future<RemoteControlAccessibilityStatus> currentStatus() async => status;
 
   @override
-  Future<RemoteTapOutcome> tap(double normalizedX, double normalizedY) {
+  Future<RemoteGestureOutcome> tap(double normalizedX, double normalizedY) {
     taps.add((normalizedX, normalizedY));
-    if (!holdTaps) return Future.value(outcome);
-    final held = Completer<RemoteTapOutcome>();
-    _heldTaps.add(held);
+    if (!holdGestures) return Future.value(outcome);
+    final held = Completer<RemoteGestureOutcome>();
+    _heldGestures.add(held);
     return held.future;
   }
 

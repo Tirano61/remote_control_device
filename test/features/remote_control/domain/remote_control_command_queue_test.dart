@@ -28,21 +28,21 @@ void main() {
       queue.submit(RemoteTapCommand(id: id, x: x, y: 0.5), acks.add);
 
   test('A starts, B waits, A completes, B starts', () async {
-    accessibility.holdTaps = true;
+    accessibility.holdGestures = true;
 
     submit('a', x: 0.1);
     submit('b', x: 0.2);
     await settle();
     expect(accessibility.taps, [(0.1, 0.5)]);
 
-    accessibility.finishTap();
+    accessibility.finishGesture();
     await settle();
     expect(accessibility.taps, [(0.1, 0.5), (0.2, 0.5)]);
     expect(acks, const [RemoteControlAck.success('a')]);
   });
 
   test('discarding before B starts means B never runs', () async {
-    accessibility.holdTaps = true;
+    accessibility.holdGestures = true;
     submit('a');
     submit('b');
     await settle();
@@ -52,7 +52,7 @@ void main() {
       RemoteControlAck.failure('b', RemoteControlError.sessionNotActive),
     ]);
 
-    accessibility.finishTap();
+    accessibility.finishGesture();
     await settle();
 
     expect(accessibility.taps, hasLength(1));
@@ -71,7 +71,7 @@ void main() {
   });
 
   test('a flood is refused, not stored', () async {
-    accessibility.holdTaps = true;
+    accessibility.holdGestures = true;
     submit('running');
     await settle();
 
@@ -90,13 +90,13 @@ void main() {
   });
 
   for (final (outcome, ack) in const [
-    (RemoteTapOutcome.completed, RemoteControlAck.success('t')),
+    (RemoteGestureOutcome.completed, RemoteControlAck.success('t')),
     (
-      RemoteTapOutcome.rejected,
+      RemoteGestureOutcome.rejected,
       RemoteControlAck.failure('t', RemoteControlError.gestureRejected),
     ),
     (
-      RemoteTapOutcome.unavailable,
+      RemoteGestureOutcome.unavailable,
       RemoteControlAck.failure(
         't',
         RemoteControlError.accessibilityUnavailable,
