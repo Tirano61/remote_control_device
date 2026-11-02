@@ -69,20 +69,34 @@ class RemoteControlCommandQueue {
   }
 
   Future<RemoteControlAck> _execute(RemoteControlCommand command) async {
-    switch (command) {
-      case RemoteTapCommand(:final id, :final x, :final y):
-        return switch (await _accessibility.tap(x, y)) {
-          RemoteGestureOutcome.completed => RemoteControlAck.success(id),
-          RemoteGestureOutcome.rejected => RemoteControlAck.failure(
-            id,
-            RemoteControlError.gestureRejected,
-          ),
-          RemoteGestureOutcome.unavailable => RemoteControlAck.failure(
-            id,
-            RemoteControlError.accessibilityUnavailable,
-          ),
-        };
-    }
+    final outcome = await switch (command) {
+      RemoteTapCommand(:final x, :final y) => _accessibility.tap(x, y),
+      RemoteSwipeCommand(
+        :final startX,
+        :final startY,
+        :final endX,
+        :final endY,
+        :final durationMs,
+      ) =>
+        _accessibility.swipe(
+          startX: startX,
+          startY: startY,
+          endX: endX,
+          endY: endY,
+          durationMs: durationMs,
+        ),
+    };
+    return switch (outcome) {
+      RemoteGestureOutcome.completed => RemoteControlAck.success(command.id),
+      RemoteGestureOutcome.rejected => RemoteControlAck.failure(
+        command.id,
+        RemoteControlError.gestureRejected,
+      ),
+      RemoteGestureOutcome.unavailable => RemoteControlAck.failure(
+        command.id,
+        RemoteControlError.accessibilityUnavailable,
+      ),
+    };
   }
 }
 

@@ -304,6 +304,22 @@ class FakeWebRtcDataChannel implements WebRtcDataChannel {
       '{"v":1,"type":"tap","id":"$id","x":$x,"y":$y}',
     ),
   );
+
+  /// A well-formed swipe arriving as a text frame.
+  void pushSwipe(
+    String id, {
+    double startX = 0.5,
+    double startY = 0.8,
+    double endX = 0.5,
+    double endY = 0.2,
+    int durationMs = 300,
+  }) => pushFrame(
+    WebRtcDataChannelMessage.text(
+      '{"v":1,"type":"swipe","id":"$id",'
+      '"startX":$startX,"startY":$startY,"endX":$endX,"endY":$endY,'
+      '"durationMs":$durationMs}',
+    ),
+  );
 }
 
 /// The signaling half, recording exactly what would go on the wire.

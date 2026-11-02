@@ -32,3 +32,31 @@ final class RemoteTapCommand extends RemoteControlCommand {
   @override
   List<Object?> get props => [id, x, y];
 }
+
+/// One straight stroke across the screen, from a start to a different end.
+///
+/// The four positions are normalized exactly as in [RemoteTapCommand], and for
+/// the same reason. [durationMs] is how long the finger takes, which is what
+/// separates a fling from a slow drag, so it is never defaulted.
+final class RemoteSwipeCommand extends RemoteControlCommand {
+  const RemoteSwipeCommand({
+    required String id,
+    required this.startX,
+    required this.startY,
+    required this.endX,
+    required this.endY,
+    required this.durationMs,
+  }) : super(id);
+
+  static const int minDurationMs = 50;
+  static const int maxDurationMs = 2000;
+
+  final double startX;
+  final double startY;
+  final double endX;
+  final double endY;
+  final int durationMs;
+
+  @override
+  List<Object?> get props => [id, startX, startY, endX, endY, durationMs];
+}

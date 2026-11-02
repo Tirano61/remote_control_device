@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:remote_control_device/features/remote_control/data/method_channel_remote_control_accessibility_client.dart';
+import 'package:remote_control_device/features/remote_control/domain/entities/remote_control_command.dart';
 import 'package:remote_control_device/features/remote_control/domain/remote_control_accessibility_client.dart';
 
 /// The Dart half of the bridge, against a mock of the Android half. The channel
@@ -132,6 +133,85 @@ void main() {
       messenger.setMockMethodCallHandler(channel, (_) => never.future);
 
       expect(await client.tap(0.5, 0.5), RemoteGestureOutcome.rejected);
+    });
+  });
+
+  group('swipe', () {
+    Future<RemoteGestureOutcome> swipe() => client.swipe(
+      startX: 0.5,
+      startY: 0.75,
+      endX: 0.25,
+      endY: 0.125,
+      durationMs: 350,
+    );
+
+    test('sends normalized positions and the duration, no pixels', () async {
+      answerWith((_) => 'completed');
+
+      await swipe();
+
+      expect(calls.single.method, 'performSwipe');
+      expect(calls.single.arguments, {
+        'startX': 0.5,
+        'startY': 0.75,
+        'endX': 0.25,
+        'endY': 0.125,
+        'durationMs': 350,
+      });
+    });
+
+    for (final (wire, outcome) in const [
+      ('completed', RemoteGestureOutcome.completed),
+      ('unavailable', RemoteGestureOutcome.unavailable),
+      ('cancelled', RemoteGestureOutcome.rejected),
+      ('rejected', RemoteGestureOutcome.rejected),
+      ('busy', RemoteGestureOutcome.rejected),
+      ('invalid', RemoteGestureOutcome.rejected),
+      ('something new', RemoteGestureOutcome.rejected),
+    ]) {
+      test('"$wire" means $outcome', () async {
+        answerWith((_) => wire);
+
+        expect(await swipe(), outcome);
+      });
+    }
+
+    test('a platform error is a rejection, not an exception', () async {
+      answerWith((_) => throw PlatformException(code: 'BOOM'));
+
+      expect(await swipe(), RemoteGestureOutcome.rejected);
+    });
+
+    test('a bridge that is not there is unavailable', () async {
+      expect(await swipe(), RemoteGestureOutcome.unavailable);
+    });
+
+    test('a bridge that never answers does not hold the queue', () async {
+      final never = Completer<Object?>();
+      messenger.setMockMethodCallHandler(channel, (_) => never.future);
+
+      expect(await swipe(), RemoteGestureOutcome.rejected);
+    });
+
+    test('the guard outlasts the longest swipe the protocol allows', () {
+      expect(
+        MethodChannelRemoteControlAccessibilityClient().gestureTimeout,
+        greaterThan(
+          const Duration(milliseconds: RemoteSwipeCommand.maxDurationMs),
+        ),
+      );
+    });
+
+    test('a swipe answered before the guard expires is not refused', () async {
+      client = MethodChannelRemoteControlAccessibilityClient(
+        gestureTimeout: const Duration(seconds: 5),
+      );
+      messenger.setMockMethodCallHandler(channel, (_) async {
+        await Future<void>.delayed(const Duration(milliseconds: 40));
+        return 'completed';
+      });
+
+      expect(await swipe(), RemoteGestureOutcome.completed);
     });
   });
 

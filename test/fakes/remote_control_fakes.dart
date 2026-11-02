@@ -11,16 +11,23 @@ class FakeRemoteControlAccessibilityClient
   RemoteControlAccessibilityStatus status =
       RemoteControlAccessibilityStatus.available;
 
-  /// What every tap answers, unless [holdGestures] is set.
+  /// What every gesture answers, unless [holdGestures] is set.
   RemoteGestureOutcome outcome = RemoteGestureOutcome.completed;
 
-  /// When true, a tap does not answer until the test calls [finishGesture]. The
-  /// only way to observe what arrives while a gesture is running.
+  /// When true, a gesture does not answer until the test calls [finishGesture].
+  /// The only way to observe what arrives while a gesture is running.
   bool holdGestures = false;
 
   /// Every tap that actually reached the service, as `(x, y)`. Its being empty
   /// is what "no gesture" means in these tests.
   final List<(double, double)> taps = [];
+
+  /// Every swipe that actually reached the service, as
+  /// `(startX, startY, endX, endY, durationMs)`.
+  final List<(double, double, double, double, int)> swipes = [];
+
+  /// [taps] and [swipes] together, in the order they reached the service.
+  final List<Object> gestures = [];
 
   int settingsOpened = 0;
 
@@ -28,9 +35,10 @@ class FakeRemoteControlAccessibilityClient
   final StreamController<RemoteControlAccessibilityStatus> _statusChanges =
       StreamController<RemoteControlAccessibilityStatus>.broadcast();
 
-  /// Answers the oldest tap still running.
-  void finishGesture([RemoteGestureOutcome result = RemoteGestureOutcome.completed]) =>
-      _heldGestures.removeAt(0).complete(result);
+  /// Answers the oldest gesture still running.
+  void finishGesture([
+    RemoteGestureOutcome result = RemoteGestureOutcome.completed,
+  ]) => _heldGestures.removeAt(0).complete(result);
 
   /// What Android would report when the user enables or disables the service.
   void pushStatus(RemoteControlAccessibilityStatus next) {
@@ -47,13 +55,33 @@ class FakeRemoteControlAccessibilityClient
 
   @override
   Future<RemoteGestureOutcome> tap(double normalizedX, double normalizedY) {
-    taps.add((normalizedX, normalizedY));
+    final tap = (normalizedX, normalizedY);
+    taps.add(tap);
+    gestures.add(tap);
+    return _answer();
+  }
+
+  @override
+  Future<RemoteGestureOutcome> swipe({
+    required double startX,
+    required double startY,
+    required double endX,
+    required double endY,
+    required int durationMs,
+  }) {
+    final swipe = (startX, startY, endX, endY, durationMs);
+    swipes.add(swipe);
+    gestures.add(swipe);
+    return _answer();
+  }
+
+  @override
+  Future<void> openAccessibilitySettings() async => settingsOpened++;
+
+  Future<RemoteGestureOutcome> _answer() {
     if (!holdGestures) return Future.value(outcome);
     final held = Completer<RemoteGestureOutcome>();
     _heldGestures.add(held);
     return held.future;
   }
-
-  @override
-  Future<void> openAccessibilitySettings() async => settingsOpened++;
 }

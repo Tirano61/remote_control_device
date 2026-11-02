@@ -6,11 +6,13 @@ import 'package:remote_control_device/features/remote_control/domain/remote_cont
 /// The Flutter side of the bridge to `RemoteControlAccessibilityChannel.kt`.
 ///
 /// No state and no policy. Whether the service is connected is known on the
-/// Android side, and whether a tap may run is decided above this class.
+/// Android side, and whether a gesture may run is decided above this class.
 ///
-/// The Android side always answers a tap, including when the service goes away
-/// mid-gesture, so [gestureTimeout] is a guard against a bridge that never answers:
-/// a queue waiting on a lost reply would otherwise stop running commands.
+/// The Android side always answers a gesture, including when the service goes
+/// away mid-gesture, so [gestureTimeout] is a guard against a bridge that never
+/// answers: a queue waiting on a lost reply would otherwise stop running
+/// commands. It has to outlast the longest swipe the protocol allows, or a
+/// gesture still running would be reported as refused.
 class MethodChannelRemoteControlAccessibilityClient
     implements RemoteControlAccessibilityClient {
   MethodChannelRemoteControlAccessibilityClient({
@@ -23,6 +25,7 @@ class MethodChannelRemoteControlAccessibilityClient
 
   static const String availableMethod = 'isAccessibilityServiceAvailable';
   static const String tapMethod = 'performTap';
+  static const String swipeMethod = 'performSwipe';
   static const String settingsMethod = 'openAccessibilitySettings';
   static const String availabilityChangedMethod =
       'accessibilityServiceAvailabilityChanged';
@@ -52,13 +55,31 @@ class MethodChannelRemoteControlAccessibilityClient
   }
 
   @override
-  Future<RemoteGestureOutcome> tap(double normalizedX, double normalizedY) async {
+  Future<RemoteGestureOutcome> tap(double normalizedX, double normalizedY) =>
+      _perform(tapMethod, <String, Object>{'x': normalizedX, 'y': normalizedY});
+
+  @override
+  Future<RemoteGestureOutcome> swipe({
+    required double startX,
+    required double startY,
+    required double endX,
+    required double endY,
+    required int durationMs,
+  }) => _perform(swipeMethod, <String, Object>{
+    'startX': startX,
+    'startY': startY,
+    'endX': endX,
+    'endY': endY,
+    'durationMs': durationMs,
+  });
+
+  Future<RemoteGestureOutcome> _perform(
+    String method,
+    Map<String, Object> arguments,
+  ) async {
     try {
       final outcome = await channel
-          .invokeMethod<String>(tapMethod, <String, Object>{
-            'x': normalizedX,
-            'y': normalizedY,
-          })
+          .invokeMethod<String>(method, arguments)
           .timeout(gestureTimeout);
       return switch (outcome) {
         'completed' => RemoteGestureOutcome.completed,
