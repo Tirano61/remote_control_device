@@ -5,7 +5,7 @@ import 'package:remote_control_device/features/signaling/domain/entities/remote_
 import 'package:remote_control_device/features/signaling/presentation/bloc/signaling/signaling_bloc.dart';
 import 'package:remote_control_device/features/webrtc/presentation/bloc/webrtc_session/webrtc_session_bloc.dart';
 
-/// Feeds the WebRTC layer the three things it cannot see for itself.
+/// Feeds the WebRTC layer the things it cannot see for itself.
 ///
 /// ```text
 /// SignalingBloc.incoming   webrtc:offer          ──> the one trigger
@@ -14,11 +14,12 @@ import 'package:remote_control_device/features/webrtc/presentation/bloc/webrtc_s
 /// SignalingBloc.state      joined session id     ──> may this device relay?
 ///
 /// RemoteSessionBloc.state  live session id       ──> does the assistance exist?
+///                          active session id     ──> may a command be obeyed?
 /// ```
 ///
-/// Only the first of those starts anything. The other two are preconditions the
-/// offer is checked against, and their disappearance is what ends a
-/// negotiation — never their arrival.
+/// Only the first of those starts anything. The rest are preconditions, and the
+/// disappearance of a joined or live session is what ends a negotiation — never
+/// their arrival.
 ///
 /// `webrtc:answer` is deliberately not forwarded. This device is the answerer
 /// and creates every answer itself; one arriving from the peer would mean the
@@ -53,9 +54,7 @@ class WebRtcCoordinator {
     _webRtcBloc.add(
       WebRtcSignalingAvailabilityChanged(_joinedIdOf(_signalingBloc.state)),
     );
-    _webRtcBloc.add(
-      WebRtcRemoteSessionChanged(_liveIdOf(_remoteSessionBloc.state)),
-    );
+    _forwardRemoteSession(_remoteSessionBloc.state);
 
     _incomingSubscription = _signalingBloc.incoming.listen(_onSignalingMessage);
     _signalingSubscription = _signalingBloc.stream.listen(
@@ -64,8 +63,13 @@ class WebRtcCoordinator {
       ),
     );
     _remoteSessionSubscription = _remoteSessionBloc.stream.listen(
-      (state) => _webRtcBloc.add(WebRtcRemoteSessionChanged(_liveIdOf(state))),
+      _forwardRemoteSession,
     );
+  }
+
+  void _forwardRemoteSession(RemoteSessionState state) {
+    _webRtcBloc.add(WebRtcRemoteSessionChanged(_liveIdOf(state)));
+    _webRtcBloc.add(WebRtcActiveRemoteSessionChanged(_activeIdOf(state)));
   }
 
   void _onSignalingMessage(RemoteSignalingMessage message) {
@@ -95,6 +99,14 @@ class WebRtcCoordinator {
   /// read, a cleared identity — is "no assistance", which is the safe reading.
   static String? _liveIdOf(RemoteSessionState state) => switch (state) {
     RemoteSessionLive(:final session) => session.id,
+    _ => null,
+  };
+
+  /// The session a control command may run in, or `null`: `ACTIVE`, and not on
+  /// its way out. A user who pressed FINALIZAR ASISTENCIA has withdrawn their
+  /// consent from that moment, however long the backend takes to confirm it.
+  static String? _activeIdOf(RemoteSessionState state) => switch (state) {
+    RemoteSessionActive(:final session, closing: false) => session.id,
     _ => null,
   };
 

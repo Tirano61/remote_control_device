@@ -9,7 +9,7 @@ enum WebRtcDataChannelState {
   connecting,
 
   /// Usable. Together with a connected peer connection, this is what this stage
-  /// calls a working remote connection — nothing is sent over it yet.
+  /// calls a working remote connection.
   open,
 
   /// Closing was requested and has not finished.
