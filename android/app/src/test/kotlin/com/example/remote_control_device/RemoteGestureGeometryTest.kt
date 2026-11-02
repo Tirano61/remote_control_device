@@ -1,6 +1,7 @@
 package com.example.remote_control_device
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Test
 
@@ -48,6 +49,103 @@ class RemoteGestureGeometryTest {
         assertThrows(IllegalArgumentException::class.java) { landscape.gesturePixel(Double.NaN, 0.0) }
         assertThrows(IllegalArgumentException::class.java) {
             landscape.gesturePixel(0.0, Double.POSITIVE_INFINITY)
+        }
+    }
+
+    private fun stroke(from: GesturePixel, to: GesturePixel) = GestureStroke(from, to, 300L)
+
+    @Test
+    fun `the swipe example of the protocol`() {
+        assertEquals(
+            stroke(GesturePixel(640, 600), GesturePixel(640, 200)),
+            landscape.swipeStroke(0.5, 0.75, 0.5, 0.25, 300L),
+        )
+    }
+
+    @Test
+    fun `a swipe up`() {
+        assertEquals(
+            stroke(GesturePixel(640, 640), GesturePixel(640, 160)),
+            landscape.swipeStroke(0.5, 0.8, 0.5, 0.2, 300L),
+        )
+        assertEquals(
+            stroke(GesturePixel(400, 1024), GesturePixel(400, 256)),
+            portrait.swipeStroke(0.5, 0.8, 0.5, 0.2, 300L),
+        )
+    }
+
+    @Test
+    fun `a swipe down`() {
+        assertEquals(
+            stroke(GesturePixel(640, 160), GesturePixel(640, 640)),
+            landscape.swipeStroke(0.5, 0.2, 0.5, 0.8, 300L),
+        )
+        assertEquals(
+            stroke(GesturePixel(400, 256), GesturePixel(400, 1024)),
+            portrait.swipeStroke(0.5, 0.2, 0.5, 0.8, 300L),
+        )
+    }
+
+    @Test
+    fun `a swipe left`() {
+        assertEquals(
+            stroke(GesturePixel(960, 400), GesturePixel(320, 400)),
+            landscape.swipeStroke(0.75, 0.5, 0.25, 0.5, 300L),
+        )
+        assertEquals(
+            stroke(GesturePixel(600, 640), GesturePixel(200, 640)),
+            portrait.swipeStroke(0.75, 0.5, 0.25, 0.5, 300L),
+        )
+    }
+
+    @Test
+    fun `a swipe right`() {
+        assertEquals(
+            stroke(GesturePixel(320, 400), GesturePixel(960, 400)),
+            landscape.swipeStroke(0.25, 0.5, 0.75, 0.5, 300L),
+        )
+        assertEquals(
+            stroke(GesturePixel(200, 640), GesturePixel(600, 640)),
+            portrait.swipeStroke(0.25, 0.5, 0.75, 0.5, 300L),
+        )
+    }
+
+    @Test
+    fun `a diagonal swipe`() {
+        assertEquals(
+            stroke(GesturePixel(320, 200), GesturePixel(960, 600)),
+            landscape.swipeStroke(0.25, 0.25, 0.75, 0.75, 300L),
+        )
+        assertEquals(
+            stroke(GesturePixel(200, 320), GesturePixel(600, 960)),
+            portrait.swipeStroke(0.25, 0.25, 0.75, 0.75, 300L),
+        )
+    }
+
+    @Test
+    fun `a swipe to the far corner ends on the last pixel, not one past it`() {
+        assertEquals(
+            stroke(GesturePixel(0, 0), GesturePixel(1279, 799)),
+            landscape.swipeStroke(0.0, 0.0, 1.0, 1.0, 300L),
+        )
+        assertEquals(
+            stroke(GesturePixel(799, 1279), GesturePixel(0, 0)),
+            portrait.swipeStroke(1.0, 1.0, 0.0, 0.0, 300L),
+        )
+    }
+
+    @Test
+    fun `two positions on one pixel are no swipe, because Android would hold a touch there`() {
+        assertNull(landscape.swipeStroke(0.5, 0.5, 0.5001, 0.5001, 300L))
+    }
+
+    @Test
+    fun `a swipe off the screen is refused, not clamped`() {
+        assertThrows(IllegalArgumentException::class.java) {
+            landscape.swipeStroke(0.5, 0.5, 1.1, 0.5, 300L)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            landscape.swipeStroke(-0.1, 0.5, 0.5, 0.5, 300L)
         }
     }
 }

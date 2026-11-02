@@ -20,6 +20,31 @@ private fun isNormalized(value: Double): Boolean = value in 0.0..1.0
 private fun pixelOn(normalized: Double, size: Int): Int =
     (normalized * size).toInt().coerceAtMost(size - 1)
 
+/**
+ * The one stroke of a gesture, as `GestureDescription.StrokeDescription` will receive it.
+ *
+ * With no [end] it stays where it started, which is a tap. It always starts at time zero.
+ */
+data class GestureStroke(val start: GesturePixel, val end: GesturePixel?, val durationMs: Long)
+
+/**
+ * The stroke of a swipe on this screen, or `null` if both ends land on the same pixel.
+ *
+ * Two positions can differ and still name one pixel. Android treats a stroke with no length as
+ * a touch held in place, which for up to two seconds would be a long press nobody asked for.
+ */
+fun ScreenCaptureGeometry.swipeStroke(
+    startX: Double,
+    startY: Double,
+    endX: Double,
+    endY: Double,
+    durationMs: Long,
+): GestureStroke? {
+    val start = gesturePixel(startX, startY)
+    val end = gesturePixel(endX, endY)
+    return if (start == end) null else GestureStroke(start, end, durationMs)
+}
+
 /** What became of a gesture. [wire] is what crosses the channel to Dart. */
 enum class RemoteGestureOutcome(val wire: String) {
     /** Android reported the gesture completed. The only outcome that means it happened. */
@@ -34,7 +59,10 @@ enum class RemoteGestureOutcome(val wire: String) {
     /** A gesture is still running. `dispatchGesture` would cancel it, so this one is refused. */
     BUSY("busy"),
 
-    /** The position is not normalized. Dart already validated it; this is the boundary. */
+    /**
+     * A position is not normalized, a duration is out of range, or a swipe goes nowhere on this
+     * screen. Dart already validated what it could; this is the boundary.
+     */
     INVALID("invalid"),
 
     /** The accessibility service is not connected. */
@@ -42,52 +70,91 @@ enum class RemoteGestureOutcome(val wire: String) {
 }
 
 /**
- * Runs one tap at a time and reports what really happened to it.
+ * Runs one gesture at a time, of any kind, and reports what really happened to it.
  *
- * The display is read afresh for every tap and never kept, so a rotation between two taps needs
+ * The display is read afresh for every gesture and never kept, so a rotation between two needs
  * no signal of its own: [readDisplay] is the same reading the screen capture crops with
- * ([ScreenCapturer.readDisplayGeometry]), which is what makes both describe one screen.
+ * ([ScreenCapturer.readDisplayGeometry]), which is what makes both describe one screen. A
+ * rotation during a swipe changes nothing here: its stroke is already Android's, which finishes
+ * or cancels it.
  *
  * [dispatch] answers whether Android accepted the gesture, and later reports through its second
  * argument whether it completed. Queueing is Dart's, because only Dart knows when a session
- * ends; a second tap here is refused, since `dispatchGesture` would otherwise cancel the first.
+ * ends; a second gesture here is refused, since `dispatchGesture` would otherwise cancel the
+ * first.
  *
  * Pure, and main-thread only: the channel handler, the gesture callback and the service
  * lifecycle all run there.
  */
 class RemoteGestureDispatcher(
     private val readDisplay: () -> ScreenCaptureGeometry,
-    private val dispatch: (GesturePixel, (Boolean) -> Unit) -> Boolean,
+    private val dispatch: (GestureStroke, (Boolean) -> Unit) -> Boolean,
 ) {
     private var running: Running? = null
 
     fun tap(normalizedX: Double, normalizedY: Double, answer: (RemoteGestureOutcome) -> Unit) {
+        perform(
+            isValid = isNormalized(normalizedX) && isNormalized(normalizedY),
+            answer = answer,
+        ) { display ->
+            GestureStroke(display.gesturePixel(normalizedX, normalizedY), null, TAP_DURATION_MS)
+        }
+    }
+
+    fun swipe(
+        startX: Double,
+        startY: Double,
+        endX: Double,
+        endY: Double,
+        durationMs: Long,
+        answer: (RemoteGestureOutcome) -> Unit,
+    ) {
+        perform(
+            isValid = isNormalized(startX) && isNormalized(startY) &&
+                isNormalized(endX) && isNormalized(endY) &&
+                durationMs in MIN_SWIPE_DURATION_MS..MAX_SWIPE_DURATION_MS,
+            answer = answer,
+        ) { display ->
+            display.swipeStroke(startX, startY, endX, endY, durationMs)
+        }
+    }
+
+    /** [strokeOn] answering `null` means the gesture makes no sense on the screen as it is. */
+    private fun perform(
+        isValid: Boolean,
+        answer: (RemoteGestureOutcome) -> Unit,
+        strokeOn: (ScreenCaptureGeometry) -> GestureStroke?,
+    ) {
         if (running != null) {
             answer(RemoteGestureOutcome.BUSY)
             return
         }
-        if (!isNormalized(normalizedX) || !isNormalized(normalizedY)) {
+        if (!isValid) {
             answer(RemoteGestureOutcome.INVALID)
             return
         }
 
-        val pixel = try {
-            readDisplay().gesturePixel(normalizedX, normalizedY)
+        val stroke = try {
+            strokeOn(readDisplay())
         } catch (_: Exception) {
             answer(RemoteGestureOutcome.REJECTED)
             return
         }
+        if (stroke == null) {
+            answer(RemoteGestureOutcome.INVALID)
+            return
+        }
 
-        val tap = Running(answer)
-        running = tap
+        val gesture = Running(answer)
+        running = gesture
         val accepted = try {
-            dispatch(pixel) { completed ->
-                settle(tap, if (completed) RemoteGestureOutcome.COMPLETED else RemoteGestureOutcome.CANCELLED)
+            dispatch(stroke) { completed ->
+                settle(gesture, if (completed) RemoteGestureOutcome.COMPLETED else RemoteGestureOutcome.CANCELLED)
             }
         } catch (_: Exception) {
             false
         }
-        if (!accepted) settle(tap, RemoteGestureOutcome.REJECTED)
+        if (!accepted) settle(gesture, RemoteGestureOutcome.REJECTED)
     }
 
     /** The service is going away and will not report on the gesture it was running. */
@@ -95,14 +162,23 @@ class RemoteGestureDispatcher(
         running?.let { settle(it, RemoteGestureOutcome.CANCELLED) }
     }
 
-    /** Answers once: a late report about a tap already answered finds nothing to answer. */
-    private fun settle(tap: Running, outcome: RemoteGestureOutcome) {
-        if (running !== tap) return
+    /** Answers once: a late report about a gesture already answered finds nothing to answer. */
+    private fun settle(gesture: Running, outcome: RemoteGestureOutcome) {
+        if (running !== gesture) return
         running = null
-        tap.answer(outcome)
+        gesture.answer(outcome)
     }
 
     private class Running(val answer: (RemoteGestureOutcome) -> Unit)
+
+    private companion object {
+        /** Long enough to register as a touch, far short of a long press. */
+        const val TAP_DURATION_MS = 50L
+
+        /** The range of the protocol, in `docs/webrtc/CONTROL_CHANNEL.md`. */
+        const val MIN_SWIPE_DURATION_MS = 50L
+        const val MAX_SWIPE_DURATION_MS = 2000L
+    }
 }
 
 /**
@@ -141,5 +217,21 @@ class RemoteControlAvailability {
             return
         }
         current.tap(normalizedX, normalizedY, answer)
+    }
+
+    fun swipe(
+        startX: Double,
+        startY: Double,
+        endX: Double,
+        endY: Double,
+        durationMs: Long,
+        answer: (RemoteGestureOutcome) -> Unit,
+    ) {
+        val current = dispatcher
+        if (current == null) {
+            answer(RemoteGestureOutcome.UNAVAILABLE)
+            return
+        }
+        current.swipe(startX, startY, endX, endY, durationMs, answer)
     }
 }

@@ -28,16 +28,22 @@ class RemoteControlAccessibilityService : AccessibilityService() {
                 // The application context, as the capture reads it: the two must agree on
                 // what the current screen is.
                 readDisplay = { ScreenCapturer.readDisplayGeometry(applicationContext) },
-                dispatch = ::dispatchTap,
+                dispatch = ::dispatchStroke,
             ),
         )
     }
 
-    /** A short stroke with no movement: a tap at screen coordinates, not on any view. */
-    private fun dispatchTap(pixel: GesturePixel, onResult: (Boolean) -> Unit): Boolean {
-        val path = Path().apply { moveTo(pixel.x.toFloat(), pixel.y.toFloat()) }
+    /**
+     * One stroke at screen coordinates, not on any view: a straight line for a swipe, and with
+     * nowhere to go, a tap.
+     */
+    private fun dispatchStroke(stroke: GestureStroke, onResult: (Boolean) -> Unit): Boolean {
+        val path = Path().apply {
+            moveTo(stroke.start.x.toFloat(), stroke.start.y.toFloat())
+            stroke.end?.let { lineTo(it.x.toFloat(), it.y.toFloat()) }
+        }
         val gesture = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(path, 0L, TAP_DURATION_MS))
+            .addStroke(GestureDescription.StrokeDescription(path, 0L, stroke.durationMs))
             .build()
 
         return dispatchGesture(
@@ -73,9 +79,6 @@ class RemoteControlAccessibilityService : AccessibilityService() {
 
     companion object {
         private const val TAG = "RemoteControlInput"
-
-        /** Long enough to register as a touch, far short of a long press. */
-        private const val TAP_DURATION_MS = 50L
 
         /** One per process, because Android binds at most one instance of the service. */
         val availability = RemoteControlAvailability()

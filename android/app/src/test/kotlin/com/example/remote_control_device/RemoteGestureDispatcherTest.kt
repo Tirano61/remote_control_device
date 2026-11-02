@@ -6,8 +6,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * What happens to a tap around `dispatchGesture`, which is replaced by a fake that records the
- * pixel and lets the test report the result when Android would.
+ * What happens to a gesture around `dispatchGesture`, which is replaced by a fake that records
+ * the stroke and lets the test report the result when Android would.
  */
 class RemoteGestureDispatcherTest {
 
@@ -17,7 +17,11 @@ class RemoteGestureDispatcherTest {
     /** What `Display.getRealMetrics` / `getRotation` answer right now. */
     private var display = landscape
 
-    private val dispatched = mutableListOf<GesturePixel>()
+    private val strokes = mutableListOf<GestureStroke>()
+
+    /** Where each gesture started. */
+    private val dispatched: List<GesturePixel> get() = strokes.map { it.start }
+
     private var report: ((Boolean) -> Unit)? = null
 
     /** What `dispatchGesture` returns. */
@@ -27,14 +31,22 @@ class RemoteGestureDispatcherTest {
 
     private val dispatcher = RemoteGestureDispatcher(
         readDisplay = { display },
-        dispatch = { pixel, onResult ->
-            dispatched += pixel
+        dispatch = { stroke, onResult ->
+            strokes += stroke
             report = onResult
             accepted
         },
     )
 
     private fun tap(x: Double = 0.5, y: Double = 0.5) = dispatcher.tap(x, y) { outcomes += it }
+
+    private fun swipe(
+        startX: Double = 0.5,
+        startY: Double = 0.75,
+        endX: Double = 0.5,
+        endY: Double = 0.25,
+        durationMs: Long = 300L,
+    ) = dispatcher.swipe(startX, startY, endX, endY, durationMs) { outcomes += it }
 
     @Test
     fun `asking for the gesture is not having done it`() {
@@ -84,8 +96,8 @@ class RemoteGestureDispatcherTest {
     fun `a display that cannot be read is a rejection, and no gesture`() {
         val blind = RemoteGestureDispatcher(
             readDisplay = { throw IllegalStateException("no default display") },
-            dispatch = { pixel, _ ->
-                dispatched += pixel
+            dispatch = { stroke, _ ->
+                strokes += stroke
                 true
             },
         )
@@ -210,6 +222,195 @@ class RemoteGestureDispatcherTest {
         report!!(true)
 
         assertEquals(listOf(RemoteGestureOutcome.COMPLETED), outcomes)
+    }
+
+    @Test
+    fun `a tap is a stroke that goes nowhere, for as long as it always was`() {
+        tap()
+
+        assertEquals(listOf(GestureStroke(GesturePixel(640, 400), null, 50L)), strokes)
+    }
+
+    @Test
+    fun `asking for a swipe is not having done it`() {
+        swipe()
+
+        assertEquals(
+            listOf(GestureStroke(GesturePixel(640, 600), GesturePixel(640, 200), 300L)),
+            strokes,
+        )
+        assertTrue(outcomes.isEmpty())
+    }
+
+    @Test
+    fun `the duration reaches the stroke as it was asked for`() {
+        swipe(durationMs = 350L)
+
+        assertEquals(350L, strokes.single().durationMs)
+    }
+
+    @Test
+    fun `both ends of the allowed duration reach the stroke`() {
+        swipe(durationMs = 50L)
+        report!!(true)
+        swipe(durationMs = 2000L)
+
+        assertEquals(listOf(50L, 2000L), strokes.map { it.durationMs })
+    }
+
+    @Test
+    fun `a completed swipe is reported as completed`() {
+        swipe()
+        report!!(true)
+
+        assertEquals(listOf(RemoteGestureOutcome.COMPLETED), outcomes)
+    }
+
+    @Test
+    fun `a cancelled swipe is reported as cancelled`() {
+        swipe()
+        report!!(false)
+
+        assertEquals(listOf(RemoteGestureOutcome.CANCELLED), outcomes)
+    }
+
+    @Test
+    fun `a swipe Android refused is rejected at once`() {
+        accepted = false
+        swipe()
+
+        assertEquals(listOf(RemoteGestureOutcome.REJECTED), outcomes)
+    }
+
+    @Test
+    fun `a display that cannot be read rejects a swipe, and no gesture`() {
+        val blind = RemoteGestureDispatcher(
+            readDisplay = { throw IllegalStateException("no default display") },
+            dispatch = { stroke, _ ->
+                strokes += stroke
+                true
+            },
+        )
+
+        blind.swipe(0.5, 0.75, 0.5, 0.25, 300L) { outcomes += it }
+
+        assertEquals(listOf(RemoteGestureOutcome.REJECTED), outcomes)
+        assertTrue(strokes.isEmpty())
+    }
+
+    @Test
+    fun `a swipe that is not valid never reaches a gesture`() {
+        swipe(startX = 1.5)
+        swipe(startY = -0.1)
+        swipe(endX = Double.NaN)
+        swipe(endY = Double.POSITIVE_INFINITY)
+        swipe(durationMs = 49L)
+        swipe(durationMs = 2001L)
+
+        assertEquals(List(6) { RemoteGestureOutcome.INVALID }, outcomes)
+        assertTrue(strokes.isEmpty())
+    }
+
+    @Test
+    fun `a swipe that lands on one pixel never reaches a gesture`() {
+        swipe(startX = 0.5, startY = 0.5, endX = 0.5001, endY = 0.5001)
+
+        assertEquals(listOf(RemoteGestureOutcome.INVALID), outcomes)
+        assertTrue(strokes.isEmpty())
+    }
+
+    @Test
+    fun `no gesture of either kind starts while a swipe is running`() {
+        swipe()
+        val first = report!!
+
+        tap()
+        swipe()
+
+        assertEquals(1, strokes.size)
+        assertEquals(listOf(RemoteGestureOutcome.BUSY, RemoteGestureOutcome.BUSY), outcomes)
+
+        first(true)
+        assertEquals(RemoteGestureOutcome.COMPLETED, outcomes.last())
+    }
+
+    @Test
+    fun `a swipe is refused while a tap is running, and runs after it`() {
+        tap()
+        val first = report!!
+
+        swipe()
+
+        assertEquals(1, strokes.size)
+        assertEquals(listOf(RemoteGestureOutcome.BUSY), outcomes)
+
+        first(true)
+        swipe()
+        assertEquals(2, strokes.size)
+    }
+
+    @Test
+    fun `the service going away answers the running swipe, once`() {
+        swipe()
+        val late = report!!
+
+        dispatcher.abandon()
+        late(true)
+
+        assertEquals(listOf(RemoteGestureOutcome.CANCELLED), outcomes)
+    }
+
+    @Test
+    fun `each swipe reads the screen as it is when it starts`() {
+        display = portrait
+        swipe()
+        report!!(true)
+
+        // Turned. No signal reached the dispatcher.
+        display = landscape
+        swipe()
+
+        assertEquals(
+            listOf(
+                GestureStroke(GesturePixel(400, 960), GesturePixel(400, 320), 300L),
+                GestureStroke(GesturePixel(640, 600), GesturePixel(640, 200), 300L),
+            ),
+            strokes,
+        )
+    }
+
+    @Test
+    fun `turning during a swipe leaves its stroke as it was given to Android`() {
+        display = portrait
+        swipe()
+
+        display = landscape
+        report!!(true)
+
+        assertEquals(
+            listOf(GestureStroke(GesturePixel(400, 960), GesturePixel(400, 320), 300L)),
+            strokes,
+        )
+        assertEquals(listOf(RemoteGestureOutcome.COMPLETED), outcomes)
+    }
+
+    @Test
+    fun `a swipe with no service is unavailable, and one with it runs`() {
+        val availability = RemoteControlAvailability()
+
+        availability.swipe(0.5, 0.75, 0.5, 0.25, 300L) { outcomes += it }
+        assertEquals(listOf(RemoteGestureOutcome.UNAVAILABLE), outcomes)
+        assertTrue(strokes.isEmpty())
+
+        availability.connected(dispatcher)
+        availability.swipe(0.5, 0.75, 0.5, 0.25, 300L) { outcomes += it }
+        assertEquals(1, strokes.size)
+
+        availability.disconnected()
+        assertEquals(
+            listOf(RemoteGestureOutcome.UNAVAILABLE, RemoteGestureOutcome.CANCELLED),
+            outcomes,
+        )
     }
 
     @Test
