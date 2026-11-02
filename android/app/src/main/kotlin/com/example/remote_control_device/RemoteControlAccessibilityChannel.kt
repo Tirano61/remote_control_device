@@ -12,9 +12,9 @@ import io.flutter.plugin.common.MethodChannel
  * The Android half of the bridge to [RemoteControlAccessibilityService].
  *
  * Transport and nothing else. Whether a gesture may run is decided in Dart, in
- * `WebRtcSessionBloc`, against the remote session; by the time [TAP_METHOD] or [SWIPE_METHOD]
- * arrives the decision is made. Failures are answered as outcomes, never thrown across the
- * boundary.
+ * `WebRtcSessionBloc`, against the remote session; by the time [TAP_METHOD], [SWIPE_METHOD],
+ * [BACK_METHOD] or [HOME_METHOD] arrives the decision is made. Failures are answered as outcomes,
+ * never thrown across the boundary.
  *
  * It also pushes [AVAILABILITY_CHANGED_METHOD] the other way, because the user enables the
  * service from Settings while the application is in the background and has to find it enabled
@@ -75,6 +75,10 @@ class RemoteControlAccessibilityChannel(
                 }
             }
 
+            BACK_METHOD -> availability.back(answerGlobalAction("back", result))
+
+            HOME_METHOD -> availability.home(answerGlobalAction("home", result))
+
             SETTINGS_METHOD -> try {
                 // Only opens the screen. Enabling the service is the user's, in Android's own UI.
                 context.startActivity(
@@ -90,6 +94,16 @@ class RemoteControlAccessibilityChannel(
         }
     }
 
+    /** Android only says it took the action, so that is what the log says. */
+    private fun answerGlobalAction(
+        name: String,
+        result: MethodChannel.Result,
+    ): (RemoteGestureOutcome) -> Unit = { outcome ->
+        val said = if (outcome == RemoteGestureOutcome.COMPLETED) "accepted" else outcome.wire
+        Log.i(TAG, "$name $said")
+        result.success(outcome.wire)
+    }
+
     companion object {
         private const val TAG = "RemoteControlInput"
 
@@ -97,6 +111,8 @@ class RemoteControlAccessibilityChannel(
         const val AVAILABLE_METHOD = "isAccessibilityServiceAvailable"
         const val TAP_METHOD = "performTap"
         const val SWIPE_METHOD = "performSwipe"
+        const val BACK_METHOD = "performBack"
+        const val HOME_METHOD = "performHome"
         const val SETTINGS_METHOD = "openAccessibilitySettings"
         const val AVAILABILITY_CHANGED_METHOD = "accessibilityServiceAvailabilityChanged"
 
