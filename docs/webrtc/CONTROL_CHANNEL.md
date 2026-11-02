@@ -175,6 +175,19 @@ remote_control/accessibility
 future is the gesture. Dart gives up after five seconds, as a guard against a
 bridge that never answers.
 
+These answers are internal to the bridge and never reach the wire. Dart reduces
+them to three outcomes, so the `ack` keeps exactly the errors documented above:
+
+```text
+"completed"                                  ok: true
+"unavailable", or no bridge                  accessibility_unavailable
+"cancelled" "rejected" "busy" "invalid"      gesture_rejected
+anything else, or no answer in time          gesture_rejected
+```
+
+`busy` only guards against a second `dispatchGesture` cancelling the first. The
+queue runs one command at a time, so it should not happen in normal operation.
+
 ### From a position to a pixel
 
 Android reads the display for every tap, with
@@ -219,8 +232,13 @@ involved, so it lands on whatever is on screen, including other applications.
 ```
 
 `BIND_ACCESSIBILITY_SERVICE` is what a *binder* must hold, so only the system can
-bind it; it is not a permission this application requests. `exported="false"`
-because the system binds it regardless and nothing else needs to.
+bind it; it is not a permission this application requests.
+
+`exported="false"` because the system binds it regardless and nothing else needs
+to. Android's guide shows `exported="true"` in its example, and that is not a
+requirement: on the tablet (Android 14), this exact declaration was listed
+in Settings, bound by the system and connected, twice. It is pinned by
+`AccessibilityServiceDeclarationTest`, so changing it should be a decision.
 
 `accessibility_service_config.xml` asks for `canPerformGestures` and nothing more:
 no event types, no `canRetrieveWindowContent`, no
@@ -246,6 +264,64 @@ application when the service connects, so the line follows on the way back.
 On Android 13+ an APK that was sideloaded through a file manager or browser may
 have the service greyed out as a *restricted setting*, until the user allows it
 from the application's info screen.
+
+## Testing on a device
+
+### Enabled is not connected
+
+The toggle being on says only that the user enabled the service. It is connected
+when all of these agree:
+
+```text
+logcat -s RemoteControlInput    accessibility service connected
+dumpsys accessibility           the service inside "Bound services:{...}"
+the panel                       Control remoto: habilitado
+```
+
+The panel's line is rendered from the Dart status, which only moves on what the
+Android side reports.
+
+### mobile-mcp and UiAutomation stop the service from running
+
+**Do not use mobile-mcp, or anything else holding a `UiAutomation`, while testing
+this service.** `UiAutomation` *"suppresses accessibility services by default"*
+(`FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES`), and the helper mobile-mcp leaves on
+the device, `com.mobilenext.mobilecli.DeviceServer`, holds one.
+
+Seen on the tablet, with the same `exported="false"` manifest:
+
+```text
+helper running    Ui Automation[...] in dumpsys    toggle ON   Bound services:{}
+                                                               never connected
+helper gone       no Ui Automation in dumpsys      toggle ON   Bound services:{Service[...]}
+                                                               connected
+```
+
+Nothing reports it. `Binding services` and `Crashed services` stay empty and
+nothing appears in the log, so it looks exactly like a broken manifest, and it was
+first taken for one. The helper was not put back to confirm the cause, so this
+rests on that comparison and on Android's documentation.
+
+The helper outlives the call that started it: it exits by itself after 30 minutes
+idle (`--idle-timeout-ms=1800000`). Before any test, check that it is gone:
+
+```text
+adb shell ps -A | grep app_process
+adb shell dumpsys accessibility | grep "Ui Automation"
+```
+
+Both should print nothing. For the same reason, the end-to-end tap test has to run
+without mobile-mcp: with the service suppressed, a command would not reach
+`dispatchGesture`. Observe with `adb logcat`, `dumpsys` and
+`adb exec-out screencap -p` instead. `adb shell input tap` does not use
+`UiAutomation`, and is enough to press this application's own buttons.
+
+### Consent
+
+The toggle and the *full control* dialog are the user's, by hand. They are never
+pressed through ADB, `settings put`, mobile-mcp or any other automation, even
+during a test. Pressing `HABILITAR CONTROL REMOTO` is fine, since it only opens
+Settings.
 
 ## Logging
 
