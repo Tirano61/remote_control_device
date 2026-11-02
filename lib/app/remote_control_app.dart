@@ -9,6 +9,7 @@ import 'package:remote_control_device/app/support_coordinator.dart';
 import 'package:remote_control_device/app/webrtc_coordinator.dart';
 import 'package:remote_control_device/features/device/presentation/bloc/realtime/device_realtime_bloc.dart';
 import 'package:remote_control_device/features/device/presentation/bloc/session/device_session_bloc.dart';
+import 'package:remote_control_device/features/remote_control/presentation/bloc/remote_control_accessibility/remote_control_accessibility_bloc.dart';
 import 'package:remote_control_device/features/remote_session/presentation/bloc/remote_session/remote_session_bloc.dart';
 import 'package:remote_control_device/features/signaling/presentation/bloc/signaling/signaling_bloc.dart';
 import 'package:remote_control_device/features/support/presentation/bloc/support/support_bloc.dart';
@@ -36,6 +37,7 @@ class _RemoteControlAppState extends State<RemoteControlApp> {
   late final RemoteSessionBloc _remoteSessionBloc;
   late final SignalingBloc _signalingBloc;
   late final WebRtcSessionBloc _webRtcBloc;
+  late final RemoteControlAccessibilityBloc _remoteControlAccessibilityBloc;
   late final DeviceRealtimeCoordinator _realtimeCoordinator;
   late final SupportCoordinator _supportCoordinator;
   late final RemoteSessionCoordinator _remoteSessionCoordinator;
@@ -86,7 +88,13 @@ class _RemoteControlAppState extends State<RemoteControlApp> {
       // and the client decides how, in which order, and whether the user has
       // to be asked at all.
       screenCapture: dependencies.screenCaptureClient,
+      // Where an authorised command ends up. The bloc decides whether it runs;
+      // this only carries it out.
+      remoteControl: dependencies.remoteControlAccessibility,
     );
+    _remoteControlAccessibilityBloc = RemoteControlAccessibilityBloc(
+      client: dependencies.remoteControlAccessibility,
+    )..add(const RemoteControlAccessibilityStarted());
 
     _realtimeCoordinator = DeviceRealtimeCoordinator(
       sessionBloc: _sessionBloc,
@@ -133,6 +141,7 @@ class _RemoteControlAppState extends State<RemoteControlApp> {
     // its channel, its connection and its capture on the way out, so neither a
     // P2P link nor a MediaProjection outlives the application.
     _webRtcBloc.close();
+    _remoteControlAccessibilityBloc.close();
     _signalingBloc.close();
     _realtimeBloc.close();
     _remoteSessionBloc.close();
@@ -155,6 +164,9 @@ class _RemoteControlAppState extends State<RemoteControlApp> {
         // application-wide blocs.
         BlocProvider<SignalingBloc>.value(value: _signalingBloc),
         BlocProvider<WebRtcSessionBloc>.value(value: _webRtcBloc),
+        BlocProvider<RemoteControlAccessibilityBloc>.value(
+          value: _remoteControlAccessibilityBloc,
+        ),
       ],
       child: MaterialApp(
         title: 'Asistencia remota',

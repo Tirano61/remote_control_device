@@ -48,8 +48,8 @@ sealed class WebRtcSessionState extends Equatable {
   /// PeerConnection connected  +  control DataChannel open
   /// ```
   ///
-  /// No command has to have been exchanged — there is no control protocol yet.
-  /// Deliberately *not* widened by screen capture: a user who declined the
+  /// No command has to have been exchanged. Deliberately *not* widened by screen
+  /// capture, nor by the accessibility service: a user who declined the
   /// Android dialog has a working remote connection, and a technician holding
   /// an open control channel is connected whether or not a screen arrives.
   bool get isRemoteConnectionEstablished => false;

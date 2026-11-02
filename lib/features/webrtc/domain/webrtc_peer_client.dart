@@ -1,8 +1,9 @@
+import 'package:remote_control_device/features/remote_control/domain/entities/remote_control_ack.dart';
+import 'package:remote_control_device/features/remote_control/domain/entities/remote_control_inbound_message.dart';
 import 'package:remote_control_device/features/screen_capture/domain/entities/screen_video_track.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/peer_ice_candidate.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/screen_video_attachment.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_connection_state.dart';
-import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_data_channel_message.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_data_channel_state.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_ice_configuration.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_session_description.dart';
@@ -144,11 +145,18 @@ abstract interface class WebRtcDataChannel {
   /// Every transition of the channel's state.
   Stream<WebRtcDataChannelState> get states;
 
-  /// Frames from the peer, unparsed.
+  /// Frames from the peer, already decoded.
   ///
-  /// Exposed so that a silent channel can be told from a working one. Nothing
-  /// in this build interprets a frame, and nothing acts on one.
-  Stream<WebRtcDataChannelMessage> get messages;
+  /// A frame nothing can be answered to — binary, broken, with no id — never
+  /// appears here. What does appear is untrusted until the bloc has checked it
+  /// against the remote session.
+  Stream<RemoteControlInboundMessage> get controlMessages;
+
+  /// Answers a command on this channel.
+  ///
+  /// Never throws, and does nothing on a channel that is no longer open: an ack
+  /// that cannot be delivered is not worth failing anything over.
+  Future<void> sendControlAck(RemoteControlAck ack);
 
   /// Closes the channel. Idempotent, for the same reason as above.
   Future<void> close();

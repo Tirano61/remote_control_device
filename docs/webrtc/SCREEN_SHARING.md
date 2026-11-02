@@ -29,7 +29,7 @@ ends and relays SDP and ICE — and the screen never passes through it.
 
 ```text
 VIDEO   device ──────────────> web        (sendonly / recvonly)
-DATA    web  <──"control"──>  device      (open, carries nothing yet)
+DATA    web  <──"control"──>  device      (see CONTROL_CHANNEL.md)
 ```
 
 `remote_control_web` does not render the video yet. This stage ends with a

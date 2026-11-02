@@ -1,5 +1,8 @@
 import 'dart:async';
 
+import 'package:remote_control_device/features/remote_control/data/remote_control_channel_codec.dart';
+import 'package:remote_control_device/features/remote_control/domain/entities/remote_control_ack.dart';
+import 'package:remote_control_device/features/remote_control/domain/entities/remote_control_inbound_message.dart';
 import 'package:remote_control_device/features/signaling/domain/entities/signaling_relay_result.dart';
 import 'package:remote_control_device/features/signaling/domain/entities/webrtc_answer.dart';
 import 'package:remote_control_device/features/signaling/domain/entities/webrtc_ice_candidate.dart';
@@ -252,10 +255,15 @@ class FakeWebRtcDataChannel implements WebRtcDataChannel {
   int closeCount = 0;
   bool get isClosed => closeCount > 0;
 
+  /// Every ack the bloc asked this channel to send. Recorded whatever the
+  /// channel's state, so a late ack shows up here instead of being hidden by
+  /// the real adapter's own refusal.
+  final List<RemoteControlAck> sentAcks = [];
+
   final StreamController<WebRtcDataChannelState> _states =
       StreamController<WebRtcDataChannelState>.broadcast();
-  final StreamController<WebRtcDataChannelMessage> _messages =
-      StreamController<WebRtcDataChannelMessage>.broadcast();
+  final StreamController<RemoteControlInboundMessage> _controlMessages =
+      StreamController<RemoteControlInboundMessage>.broadcast();
 
   @override
   WebRtcDataChannelState get state => _state;
@@ -264,14 +272,18 @@ class FakeWebRtcDataChannel implements WebRtcDataChannel {
   Stream<WebRtcDataChannelState> get states => _states.stream;
 
   @override
-  Stream<WebRtcDataChannelMessage> get messages => _messages.stream;
+  Stream<RemoteControlInboundMessage> get controlMessages =>
+      _controlMessages.stream;
+
+  @override
+  Future<void> sendControlAck(RemoteControlAck ack) async => sentAcks.add(ack);
 
   @override
   Future<void> close() async {
     closeCount++;
     _state = WebRtcDataChannelState.closed;
     if (!_states.isClosed) await _states.close();
-    if (!_messages.isClosed) await _messages.close();
+    if (!_controlMessages.isClosed) await _controlMessages.close();
   }
 
   void pushState(WebRtcDataChannelState state) {
@@ -279,9 +291,19 @@ class FakeWebRtcDataChannel implements WebRtcDataChannel {
     if (!_states.isClosed) _states.add(state);
   }
 
-  void pushMessage(WebRtcDataChannelMessage message) {
-    if (!_messages.isClosed) _messages.add(message);
+  /// A frame arriving, through the same decoder the real adapter uses.
+  void pushFrame(WebRtcDataChannelMessage frame) {
+    if (_controlMessages.isClosed) return;
+    final decoded = RemoteControlChannelCodec.decode(frame);
+    if (decoded != null) _controlMessages.add(decoded);
   }
+
+  /// A well-formed tap arriving as a text frame.
+  void pushTap(String id, {double x = 0.5, double y = 0.5}) => pushFrame(
+    WebRtcDataChannelMessage.text(
+      '{"v":1,"type":"tap","id":"$id","x":$x,"y":$y}',
+    ),
+  );
 }
 
 /// The signaling half, recording exactly what would go on the wire.

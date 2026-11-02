@@ -3,16 +3,16 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:remote_control_device/core/error/failures.dart';
 import 'package:remote_control_device/features/device/presentation/bloc/realtime/device_realtime_bloc.dart';
 import 'package:remote_control_device/features/device/presentation/widgets/failure_messages.dart';
+import 'package:remote_control_device/features/remote_control/presentation/widgets/remote_control_status.dart';
 import 'package:remote_control_device/features/remote_session/presentation/bloc/remote_session/remote_session_bloc.dart';
 import 'package:remote_control_device/features/screen_capture/domain/entities/screen_capture_status.dart';
 import 'package:remote_control_device/features/webrtc/presentation/bloc/webrtc_session/webrtc_session_bloc.dart';
 
 /// What the screen shows while a remote assistance session is live.
 ///
-/// It renders a state the backend confirmed and offers exactly one action:
-/// ending the assistance. The screen may now be travelling to the technician,
-/// but nothing comes back: there is still no remote control, and the control
-/// channel carries nothing.
+/// It renders a state the backend confirmed and offers one action of its own:
+/// ending the assistance. The only other button belongs to
+/// [RemoteControlStatus], and it only opens Android's settings.
 ///
 /// Screen sharing is one discreet line and never the headline. It is a
 /// separate fact from the assistance itself — a user who declined Android's
@@ -131,6 +131,9 @@ class RemoteSessionPanel extends StatelessWidget {
             ),
           ),
         ],
+        // Hidden on the same terms as the screen line: while reconnecting or
+        // finishing, this is not what the user needs to read or act on.
+        if (!state.closing && connected) const RemoteControlStatus(),
         if (technician != null) ...[
           const SizedBox(height: 8),
           Text(
@@ -183,8 +186,6 @@ class RemoteSessionPanel extends StatelessWidget {
     if (!connected) return 'Reconectando...';
 
     return switch (state) {
-      // Deliberately not "sharing your screen": nothing is captured and nothing
-      // is controlled in this build.
       RemoteSessionActive() => 'Asistencia en curso',
       RemoteSessionConnecting() => established
           ? 'Conexión remota establecida'

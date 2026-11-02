@@ -15,6 +15,7 @@ import 'package:remote_control_device/features/screen_capture/domain/entities/sc
 import 'package:remote_control_device/features/screen_capture/domain/entities/screen_capture_status.dart';
 import 'package:remote_control_device/features/webrtc/presentation/bloc/webrtc_session/webrtc_session_bloc.dart';
 
+import '../../../fakes/remote_control_fakes.dart';
 import '../../../fakes/remote_session_fakes.dart';
 import '../../../fakes/screen_capture_fakes.dart';
 import '../../../fakes/signaling_fakes.dart';
@@ -53,6 +54,7 @@ void main() {
       signaling: signaling,
       iceConfiguration: const WebRtcIceConfiguration.none(),
       screenCapture: screenCapture,
+      remoteControl: FakeRemoteControlAccessibilityClient(),
     );
   });
 
@@ -152,6 +154,7 @@ void main() {
         signaling: signaling,
         iceConfiguration: configured,
         screenCapture: FakeScreenCaptureClient(),
+        remoteControl: FakeRemoteControlAccessibilityClient(),
       );
       addTearDown(scoped.close);
 
@@ -524,26 +527,6 @@ void main() {
         await settle();
         expect(bloc.state.controlChannel, state);
       }
-    });
-
-    test('messages are surfaced and nothing is executed', () async {
-      final peer = await negotiate();
-      final channel = peer.pushDataChannel();
-      await settle();
-      channel.pushState(WebRtcDataChannelState.open);
-      await settle();
-
-      final received = <WebRtcDataChannelMessage>[];
-      final subscription = bloc.controlMessages.listen(received.add);
-      addTearDown(subscription.cancel);
-
-      channel.pushMessage(const WebRtcDataChannelMessage.text('{"tap":1}'));
-      await settle();
-
-      // Read, never acted on: there is no control protocol and no Android side
-      // in this build.
-      expect(received, hasLength(1));
-      expect(received.single.text, '{"tap":1}');
     });
 
     test(

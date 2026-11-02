@@ -4,6 +4,12 @@ import 'dart:developer' as developer;
 import 'package:equatable/equatable.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:remote_control_device/features/remote_control/domain/entities/remote_control_ack.dart';
+import 'package:remote_control_device/features/remote_control/domain/entities/remote_control_command.dart';
+import 'package:remote_control_device/features/remote_control/domain/entities/remote_control_error.dart';
+import 'package:remote_control_device/features/remote_control/domain/entities/remote_control_inbound_message.dart';
+import 'package:remote_control_device/features/remote_control/domain/remote_control_accessibility_client.dart';
+import 'package:remote_control_device/features/remote_control/domain/remote_control_command_queue.dart';
 import 'package:remote_control_device/features/signaling/domain/entities/signaling_relay_result.dart';
 import 'package:remote_control_device/features/signaling/domain/entities/webrtc_answer.dart';
 import 'package:remote_control_device/features/signaling/domain/entities/webrtc_ice_candidate.dart';
@@ -15,7 +21,6 @@ import 'package:remote_control_device/features/webrtc/domain/control_channel.dar
 import 'package:remote_control_device/features/webrtc/domain/entities/peer_ice_candidate.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/screen_video_attachment.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_connection_state.dart';
-import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_data_channel_message.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_data_channel_state.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_ice_configuration.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_session_description.dart';
@@ -70,25 +75,42 @@ part 'webrtc_session_state.dart';
 /// paper over. When the row does move, nothing here moves with it: `ACTIVE` is
 /// a backend fact about a connection this bloc already holds, and renegotiating
 /// on it would break the very connection it reports.
+///
+/// `ACTIVE` does decide one thing here: whether a control command is obeyed. A
+/// gesture only runs with all of this true at the moment it is received:
+///
+/// ```text
+/// the command came from the current generation's control channel
+/// that channel is open
+/// the backend holds this negotiation's session ACTIVE
+/// ```
+///
+/// The accessibility service being enabled is not on that list. It stays enabled
+/// between assistances, so it says nothing about whether the user has authorised
+/// anyone today.
 class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   WebRtcSessionBloc({
     required WebRtcPeerConnectionFactory peerConnectionFactory,
     required WebRtcSignalingGateway signaling,
     required WebRtcIceConfiguration iceConfiguration,
     required ScreenCaptureClient screenCapture,
+    required RemoteControlAccessibilityClient remoteControl,
   }) : _peerConnectionFactory = peerConnectionFactory,
        _signaling = signaling,
        _iceConfiguration = iceConfiguration,
        _screenCapture = screenCapture,
+       _commandQueue = RemoteControlCommandQueue(remoteControl),
        super(const WebRtcIdle()) {
     on<WebRtcOfferReceived>(_onOfferReceived);
     on<WebRtcRemoteIceReceived>(_onRemoteIceReceived);
     on<WebRtcSignalingAvailabilityChanged>(_onSignalingAvailabilityChanged);
     on<WebRtcRemoteSessionChanged>(_onRemoteSessionChanged);
+    on<WebRtcActiveRemoteSessionChanged>(_onActiveRemoteSessionChanged);
     on<WebRtcLocalIceProduced>(_onLocalIceProduced);
     on<WebRtcConnectionStateChanged>(_onConnectionStateChanged);
     on<WebRtcDataChannelOffered>(_onDataChannelOffered);
     on<WebRtcDataChannelStateChanged>(_onDataChannelStateChanged);
+    on<WebRtcControlMessageReceived>(_onControlMessageReceived);
   }
 
   static const String _loggerName = 'webrtc';
@@ -97,6 +119,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   final WebRtcSignalingGateway _signaling;
   final WebRtcIceConfiguration _iceConfiguration;
   final ScreenCaptureClient _screenCapture;
+  final RemoteControlCommandQueue _commandQueue;
 
   /// Bumped whenever a negotiation is abandoned or replaced. Everything a peer
   /// connection reports carries the generation it belongs to, and anything that
@@ -123,6 +146,10 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   /// are preconditions for accepting an offer and neither is a trigger.
   String? _joinedRemoteSessionId;
   String? _liveRemoteSessionId;
+
+  /// The session a control command may run in, or `null`. Narrower than
+  /// [_liveRemoteSessionId]: `CONNECTING` is live, and it is not this.
+  String? _activeRemoteSessionId;
 
   bool _remoteDescriptionApplied = false;
 
@@ -164,17 +191,6 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   /// changing ends it. Those are two different lifetimes and this is the field
   /// that keeps them apart.
   String? _screenCaptureSessionId;
-
-  /// Frames received on the `control` channel, unparsed and un-acted-upon.
-  ///
-  /// Published so a silent channel can be told from a working one, and so the
-  /// prompt that introduces the control protocol has somewhere to attach. This
-  /// build executes nothing: no tap, no swipe, no Back, no Home, no text.
-  final StreamController<WebRtcDataChannelMessage> _controlMessages =
-      StreamController<WebRtcDataChannelMessage>.broadcast();
-
-  Stream<WebRtcDataChannelMessage> get controlMessages =>
-      _controlMessages.stream;
 
   // ----------------------------------------------------------------- offer
 
@@ -613,6 +629,18 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     emit(WebRtcIdle(screenCapture: _screenCaptureStatus));
   }
 
+  Future<void> _onActiveRemoteSessionChanged(
+    WebRtcActiveRemoteSessionChanged event,
+    Emitter<WebRtcSessionState> emit,
+  ) async {
+    _activeRemoteSessionId = event.remoteSessionId;
+    if (!_isControlAuthorized) _commandQueue.discardPending();
+  }
+
+  bool get _isControlAuthorized =>
+      _activeRemoteSessionId != null &&
+      _activeRemoteSessionId == _negotiationSessionId;
+
   // ------------------------------------------------------- peer connection
 
   Future<void> _onConnectionStateChanged(
@@ -694,11 +722,10 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
         (channelState) =>
             add(WebRtcDataChannelStateChanged(event.generation, channelState)),
       ),
-      // Read, never executed. There is no control protocol in this build.
-      channel.messages.listen((message) {
-        if (_controlMessages.isClosed) return;
-        _controlMessages.add(message);
-      }),
+      channel.controlMessages.listen(
+        (message) =>
+            add(WebRtcControlMessageReceived(event.generation, message)),
+      ),
     ]);
 
     if (channel.state == WebRtcDataChannelState.open) {
@@ -717,8 +744,90 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     _controlChannelState = event.channelState;
     if (event.channelState == WebRtcDataChannelState.open) {
       _log('control data channel open');
+    } else {
+      _commandQueue.discardPending();
     }
     emit(_restate());
+  }
+
+  // ---------------------------------------------------------- remote control
+
+  /// Decides what becomes of a frame from the `control` channel.
+  ///
+  /// Nothing awaits between the checks and [RemoteControlCommandQueue.submit],
+  /// so what was checked is still true when the command is queued. From then on
+  /// anything that ends the authorisation discards the queue.
+  Future<void> _onControlMessageReceived(
+    WebRtcControlMessageReceived event,
+    Emitter<WebRtcSessionState> emit,
+  ) async {
+    final generation = event.generation;
+    if (generation != _generation) {
+      _log('control message dropped: it belongs to a previous negotiation');
+      return;
+    }
+    final channel = _controlChannel;
+    if (channel == null) return;
+
+    switch (event.message) {
+      case RemoteControlMessageRejected(:final id, :final error):
+        _log('control command rejected: $id (${error.name})');
+        _sendControlAck(
+          generation,
+          channel,
+          RemoteControlAck.failure(id, error),
+        );
+
+      case RemoteControlCommandReceived(:final command):
+        final name = switch (command) {
+          RemoteTapCommand() => 'tap',
+        };
+        _log('control command received: $name ${command.id}');
+
+        if (channel.state != WebRtcDataChannelState.open) {
+          _log('$name rejected: the control channel is not open');
+          return;
+        }
+        if (!_isControlAuthorized) {
+          _log('$name rejected: the remote session is not active');
+          _sendControlAck(
+            generation,
+            channel,
+            RemoteControlAck.failure(
+              command.id,
+              RemoteControlError.sessionNotActive,
+            ),
+          );
+          return;
+        }
+
+        _log('$name accepted');
+        _commandQueue.submit(command, (ack) {
+          _log(
+            ack.ok
+                ? '$name completed ${ack.id}'
+                : '$name rejected ${ack.id} (${ack.error?.name})',
+          );
+          _sendControlAck(generation, channel, ack);
+        });
+    }
+  }
+
+  /// Sends [ack] on the channel its command arrived on, if that is still the
+  /// channel in use and it is still open. An ack can settle long after the
+  /// command that caused it, and by then the channel may be closed or replaced.
+  void _sendControlAck(
+    int generation,
+    WebRtcDataChannel channel,
+    RemoteControlAck ack,
+  ) {
+    if (generation != _generation ||
+        !identical(channel, _controlChannel) ||
+        channel.state != WebRtcDataChannelState.open) {
+      _log('control ack dropped: its channel is gone');
+      return;
+    }
+    unawaited(channel.sendControlAck(ack));
   }
 
   /// Stamps the two facts the bloc tracks beside the negotiation — the
@@ -814,6 +923,11 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   /// a lost signaling room and a dropped credential all lead here and none of
   /// them can know whether it is first.
   Future<void> _releasePeer() async {
+    // Before the channel goes: no queued command outlives the connection it
+    // came in on. A gesture already running cannot be recalled and is left to
+    // finish, and its ack finds the generation moved on.
+    _commandQueue.discardPending();
+
     final subscriptions = [..._peerSubscriptions, ..._channelSubscriptions];
     _peerSubscriptions.clear();
     _channelSubscriptions.clear();
@@ -857,7 +971,6 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     // process that authorised it would be a notification the user cannot get
     // rid of, over a MediaProjection nothing is reading.
     await _stopScreenCapture();
-    await _controlMessages.close();
     return super.close();
   }
 }
