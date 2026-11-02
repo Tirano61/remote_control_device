@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:remote_control_device/app/device_realtime_coordinator.dart';
 import 'package:remote_control_device/app/remote_session_coordinator.dart';
@@ -14,6 +16,8 @@ import 'package:remote_control_device/features/device/domain/usecases/load_devic
 import 'package:remote_control_device/features/device/domain/usecases/renew_device_token.dart';
 import 'package:remote_control_device/features/device/presentation/bloc/realtime/device_realtime_bloc.dart';
 import 'package:remote_control_device/features/device/presentation/bloc/session/device_session_bloc.dart';
+import 'package:remote_control_device/features/remote_control/domain/entities/remote_control_ack.dart';
+import 'package:remote_control_device/features/remote_control/domain/entities/remote_control_error.dart';
 import 'package:remote_control_device/features/remote_session/domain/usecases/close_remote_session.dart';
 import 'package:remote_control_device/features/remote_session/domain/usecases/load_current_remote_session.dart';
 import 'package:remote_control_device/features/remote_session/presentation/bloc/remote_session/remote_session_bloc.dart';
@@ -33,6 +37,7 @@ import 'package:remote_control_device/features/webrtc/presentation/bloc/webrtc_s
 
 import '../fakes/device_fakes.dart';
 import '../fakes/realtime_fakes.dart';
+import '../fakes/remote_control_fakes.dart';
 import '../fakes/remote_session_fakes.dart';
 import '../fakes/signaling_fakes.dart';
 import '../fakes/support_fakes.dart';
@@ -54,6 +59,7 @@ void main() {
   late FakeRemoteSessionRepository remoteSessionRepository;
   late FakeWebRtcPeerConnectionFactory peerFactory;
   late FakeScreenCaptureClient screenCapture;
+  late FakeRemoteControlAccessibilityClient accessibility;
   late DeviceTokenStore tokenStore;
   late DeviceCredentialRevocation credentialRevocation;
 
@@ -116,6 +122,7 @@ void main() {
     );
     signalingBloc = SignalingBloc(client: client);
     screenCapture = FakeScreenCaptureClient();
+    accessibility = FakeRemoteControlAccessibilityClient();
     webRtcBloc = WebRtcSessionBloc(
       peerConnectionFactory: peerFactory,
       // The real wiring: the signaling bloc is the gateway, narrowed to the two
@@ -123,6 +130,7 @@ void main() {
       signaling: signalingBloc,
       iceConfiguration: const WebRtcIceConfiguration.none(),
       screenCapture: screenCapture,
+      remoteControl: accessibility,
     );
 
     realtimeCoordinator = DeviceRealtimeCoordinator(
@@ -501,5 +509,118 @@ void main() {
     expect(screenCapture.stopCount, 0);
     // The device answered twice and offered never.
     expect(client.sentOffers, isEmpty);
+  });
+
+  group('a tap and the remote session it arrives in', () {
+    /// The peer up and the control channel open, with the session still
+    /// `CONNECTING`: the moment just before the web activates it.
+    Future<FakeWebRtcDataChannel> reachOpenChannel() async {
+      await reachJoined();
+      await client.deliver(offerReceived());
+      await settle();
+      final peer = peerFactory.last;
+      peer.pushConnectionState(WebRtcConnectionState.connected);
+      final channel = peer.pushDataChannel();
+      await settle();
+      channel.pushState(WebRtcDataChannelState.open);
+      await settle();
+      return channel;
+    }
+
+    Future<void> activate() async {
+      remoteSessionRepository.currentResult = activatedRemoteSession;
+      await client.emit(
+        const RealtimeRemoteSessionActivated(testRemoteSessionId),
+      );
+      await settle();
+    }
+
+    test('CONNECTING: no gesture, session_not_active', () async {
+      final channel = await reachOpenChannel();
+
+      channel.pushTap('t-1');
+      await settle();
+
+      expect(accessibility.taps, isEmpty);
+      expect(channel.sentAcks, const [
+        RemoteControlAck.failure('t-1', RemoteControlError.sessionNotActive),
+      ]);
+    });
+
+    test('ACTIVE: the same channel now runs the gesture', () async {
+      final channel = await reachOpenChannel();
+      await activate();
+
+      channel.pushTap('t-1');
+      await settle();
+
+      expect(accessibility.taps, [(0.5, 0.5)]);
+      expect(channel.sentAcks, const [RemoteControlAck.success('t-1')]);
+    });
+
+    test(
+      'pressing FINALIZAR stops the gestures before the backend answers',
+      () async {
+        final channel = await reachOpenChannel();
+        await activate();
+        final closing = Completer<void>();
+        remoteSessionRepository.closeGate = closing;
+
+        remoteSessionBloc.add(const RemoteSessionCloseRequested());
+        await settle();
+        expect(remoteSessionBloc.state, isA<RemoteSessionActive>());
+
+        channel.pushTap('after-end');
+        await settle();
+
+        expect(accessibility.taps, isEmpty);
+        expect(channel.sentAcks, const [
+          RemoteControlAck.failure(
+            'after-end',
+            RemoteControlError.sessionNotActive,
+          ),
+        ]);
+
+        closing.complete();
+      },
+    );
+
+    test(
+      'a session the backend closed runs nothing that arrives late',
+      () async {
+        final channel = await reachOpenChannel();
+        await activate();
+
+        remoteSessionRepository.currentResult = noRemoteSession;
+        await client.emit(
+          const RealtimeRemoteSessionClosed(testRemoteSessionId),
+        );
+        await settle();
+
+        channel.pushTap('late');
+        await settle();
+
+        expect(accessibility.taps, isEmpty);
+        expect(channel.isClosed, isTrue);
+      },
+    );
+
+    test('a tap does not disturb the screen capture', () async {
+      final channel = await reachOpenChannel();
+      await activate();
+
+      channel.pushTap('t-1');
+      await settle();
+
+      expect(screenCapture.stopCount, 0);
+      expect(
+        webRtcBloc.state,
+        const WebRtcConnected(
+          testRemoteSessionId,
+          controlChannel: WebRtcDataChannelState.open,
+          screenCapture: ScreenCaptureStatus.active,
+        ),
+      );
+    });
   });
 }

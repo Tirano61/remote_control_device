@@ -624,6 +624,10 @@ emulator
 physical Android device
 ```
 
+Do not use mobile-mcp while testing the AccessibilityService. It leaves a `UiAutomation` helper on the device that keeps the service from binding, with no error anywhere. See `docs/webrtc/CONTROL_CHANNEL.md`, "Testing on a device".
+
+Never toggle the AccessibilityService or answer its consent dialog through automation. Ask the user to do it by hand.
+
 ---
 
 # Project prompt convention

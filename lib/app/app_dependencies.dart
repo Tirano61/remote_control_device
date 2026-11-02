@@ -22,6 +22,8 @@ import 'package:remote_control_device/features/device/domain/usecases/clear_devi
 import 'package:remote_control_device/features/device/domain/usecases/enroll_device.dart';
 import 'package:remote_control_device/features/device/domain/usecases/load_device_credentials.dart';
 import 'package:remote_control_device/features/device/domain/usecases/renew_device_token.dart';
+import 'package:remote_control_device/features/remote_control/data/method_channel_remote_control_accessibility_client.dart';
+import 'package:remote_control_device/features/remote_control/domain/remote_control_accessibility_client.dart';
 import 'package:remote_control_device/features/remote_session/data/datasources/remote_session_remote_data_source.dart';
 import 'package:remote_control_device/features/screen_capture/data/flutter_webrtc_screen_media.dart';
 import 'package:remote_control_device/features/screen_capture/data/media_projection_screen_capture_client.dart';
@@ -69,6 +71,7 @@ class AppDependencies {
     required this.peerConnectionFactory,
     required this.iceConfiguration,
     required this.screenCaptureClient,
+    required this.remoteControlAccessibility,
   });
 
   factory AppDependencies.bootstrap({
@@ -78,6 +81,7 @@ class AppDependencies {
     DeviceRealtimeChannel? realtimeChannel,
     WebRtcPeerConnectionFactory? peerConnectionFactory,
     ScreenCaptureClient? screenCaptureClient,
+    RemoteControlAccessibilityClient? remoteControlAccessibility,
   }) {
     final resolvedConfig = config ?? AppConfig.fromEnvironment();
     final tokenStore = InMemoryDeviceTokenStore();
@@ -173,6 +177,9 @@ class AppDependencies {
                 const MethodChannelMediaProjectionForegroundService(),
             mediaSource: const FlutterWebRtcScreenMediaSource(),
           ),
+      remoteControlAccessibility:
+          remoteControlAccessibility ??
+          MethodChannelRemoteControlAccessibilityClient(),
     );
   }
 
@@ -235,4 +242,9 @@ class AppDependencies {
   /// reason as the factory above — a unit test cannot show an Android consent
   /// dialog, let alone answer it.
   final ScreenCaptureClient screenCaptureClient;
+
+  /// Android's `AccessibilityService`, behind its port. Shared by the WebRTC
+  /// bloc, which runs commands through it, and by the status line that tells
+  /// the user whether it is enabled.
+  final RemoteControlAccessibilityClient remoteControlAccessibility;
 }

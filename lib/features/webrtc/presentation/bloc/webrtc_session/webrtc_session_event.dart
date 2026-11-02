@@ -78,6 +78,21 @@ final class WebRtcRemoteSessionChanged extends WebRtcSessionEvent {
   List<Object?> get props => [remoteSessionId];
 }
 
+/// The session a control command may run in changed: [remoteSessionId] is the
+/// `ACTIVE` session the user has not asked to end, or `null` when there is none.
+///
+/// Separate from [WebRtcRemoteSessionChanged], which also covers `CONNECTING` and
+/// decides whether a peer connection may exist at all. This one moves nothing in
+/// the negotiation: it only decides whether a command is obeyed.
+final class WebRtcActiveRemoteSessionChanged extends WebRtcSessionEvent {
+  const WebRtcActiveRemoteSessionChanged(this.remoteSessionId);
+
+  final String? remoteSessionId;
+
+  @override
+  List<Object?> get props => [remoteSessionId];
+}
+
 // -------------------------------------------------------------- from a peer
 
 /// Internal. A callback from a peer connection, tagged with the generation that
@@ -136,4 +151,16 @@ final class WebRtcDataChannelStateChanged extends WebRtcPeerEvent {
 
   @override
   List<Object?> get props => [generation, channelState];
+}
+
+/// The accepted `control` channel delivered a frame. Tagged like every other
+/// callback, because a command from a generation that is over must never
+/// become a gesture.
+final class WebRtcControlMessageReceived extends WebRtcPeerEvent {
+  const WebRtcControlMessageReceived(super.generation, this.message);
+
+  final RemoteControlInboundMessage message;
+
+  @override
+  List<Object?> get props => [generation, message];
 }

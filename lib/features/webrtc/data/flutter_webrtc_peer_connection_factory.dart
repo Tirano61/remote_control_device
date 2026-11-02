@@ -3,6 +3,9 @@ import 'dart:developer' as developer;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
+import 'package:remote_control_device/features/remote_control/data/remote_control_channel_codec.dart';
+import 'package:remote_control_device/features/remote_control/domain/entities/remote_control_ack.dart';
+import 'package:remote_control_device/features/remote_control/domain/entities/remote_control_inbound_message.dart';
 import 'package:remote_control_device/features/screen_capture/data/flutter_webrtc_screen_media.dart';
 import 'package:remote_control_device/features/screen_capture/domain/entities/screen_video_track.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/peer_ice_candidate.dart';
@@ -280,12 +283,13 @@ class _FlutterWebRtcDataChannel implements WebRtcDataChannel {
       if (!_states.isClosed) _states.add(mapped);
     };
     _channel.onMessage = (message) {
-      if (_messages.isClosed) return;
-      _messages.add(
+      if (_controlMessages.isClosed) return;
+      final decoded = RemoteControlChannelCodec.decode(
         message.isBinary
             ? WebRtcDataChannelMessage.binary(message.binary)
             : WebRtcDataChannelMessage.text(message.text),
       );
+      if (decoded != null) _controlMessages.add(decoded);
     };
   }
 
@@ -293,8 +297,8 @@ class _FlutterWebRtcDataChannel implements WebRtcDataChannel {
 
   final StreamController<WebRtcDataChannelState> _states =
       StreamController<WebRtcDataChannelState>.broadcast();
-  final StreamController<WebRtcDataChannelMessage> _messages =
-      StreamController<WebRtcDataChannelMessage>.broadcast();
+  final StreamController<RemoteControlInboundMessage> _controlMessages =
+      StreamController<RemoteControlInboundMessage>.broadcast();
 
   late WebRtcDataChannelState _state;
   bool _closed = false;
@@ -319,7 +323,21 @@ class _FlutterWebRtcDataChannel implements WebRtcDataChannel {
   Stream<WebRtcDataChannelState> get states => _states.stream;
 
   @override
-  Stream<WebRtcDataChannelMessage> get messages => _messages.stream;
+  Stream<RemoteControlInboundMessage> get controlMessages =>
+      _controlMessages.stream;
+
+  @override
+  Future<void> sendControlAck(RemoteControlAck ack) async {
+    if (_closed || _state != WebRtcDataChannelState.open) return;
+    try {
+      await _channel.send(
+        rtc.RTCDataChannelMessage(RemoteControlChannelCodec.encodeAck(ack)),
+      );
+    } catch (_) {
+      // The channel closed under it. The other end is gone, and nothing about
+      // that is this ack's to report.
+    }
+  }
 
   @override
   Future<void> close() async {
@@ -336,7 +354,7 @@ class _FlutterWebRtcDataChannel implements WebRtcDataChannel {
     _state = WebRtcDataChannelState.closed;
 
     if (!_states.isClosed) await _states.close();
-    if (!_messages.isClosed) await _messages.close();
+    if (!_controlMessages.isClosed) await _controlMessages.close();
   }
 
   static WebRtcDataChannelState _stateOf(rtc.RTCDataChannelState? state) =>

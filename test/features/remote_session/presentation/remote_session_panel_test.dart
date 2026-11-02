@@ -10,6 +10,9 @@ import 'package:remote_control_device/features/device/domain/usecases/load_devic
 import 'package:remote_control_device/features/device/domain/usecases/renew_device_token.dart';
 import 'package:remote_control_device/features/device/presentation/bloc/realtime/device_realtime_bloc.dart';
 import 'package:remote_control_device/features/device/presentation/pages/ready_page.dart';
+import 'package:remote_control_device/features/remote_control/domain/remote_control_accessibility_client.dart';
+import 'package:remote_control_device/features/remote_control/presentation/bloc/remote_control_accessibility/remote_control_accessibility_bloc.dart';
+import 'package:remote_control_device/features/remote_control/presentation/widgets/remote_control_status.dart';
 import 'package:remote_control_device/features/remote_session/domain/usecases/close_remote_session.dart';
 import 'package:remote_control_device/features/remote_session/domain/usecases/load_current_remote_session.dart';
 import 'package:remote_control_device/features/remote_session/presentation/bloc/remote_session/remote_session_bloc.dart';
@@ -31,6 +34,7 @@ import 'package:remote_control_device/core/result/result.dart';
 
 import '../../../fakes/device_fakes.dart';
 import '../../../fakes/realtime_fakes.dart';
+import '../../../fakes/remote_control_fakes.dart';
 import '../../../fakes/remote_session_fakes.dart';
 import '../../../fakes/support_fakes.dart';
 import '../../../fakes/screen_capture_fakes.dart';
@@ -51,6 +55,8 @@ void main() {
   late FakeWebRtcPeerConnectionFactory peerFactory;
   late FakeScreenCaptureClient screenCapture;
   late FakeWebRtcSignalingGateway webRtcSignaling;
+  late FakeRemoteControlAccessibilityClient accessibility;
+  late RemoteControlAccessibilityBloc remoteControlAccessibilityBloc;
 
   /// Built inside the test body on purpose: a bloc created in `setUp` lives in
   /// a different zone from the one `testWidgets` drives, and `pump` would never
@@ -89,16 +95,22 @@ void main() {
     peerFactory = FakeWebRtcPeerConnectionFactory();
     webRtcSignaling = FakeWebRtcSignalingGateway();
     screenCapture = FakeScreenCaptureClient();
+    accessibility = FakeRemoteControlAccessibilityClient();
     webRtcBloc = WebRtcSessionBloc(
       peerConnectionFactory: peerFactory,
       signaling: webRtcSignaling,
       iceConfiguration: const WebRtcIceConfiguration.none(),
       screenCapture: screenCapture,
+      remoteControl: accessibility,
     );
+    remoteControlAccessibilityBloc = RemoteControlAccessibilityBloc(
+      client: accessibility,
+    )..add(const RemoteControlAccessibilityStarted());
     addTearDown(supportBloc.close);
     addTearDown(remoteSessionBloc.close);
     addTearDown(realtimeBloc.close);
     addTearDown(webRtcBloc.close);
+    addTearDown(remoteControlAccessibilityBloc.close);
   }
 
   Widget harness() => MultiBlocProvider(
@@ -107,6 +119,9 @@ void main() {
       BlocProvider<RemoteSessionBloc>.value(value: remoteSessionBloc),
       BlocProvider<DeviceRealtimeBloc>.value(value: realtimeBloc),
       BlocProvider<WebRtcSessionBloc>.value(value: webRtcBloc),
+      BlocProvider<RemoteControlAccessibilityBloc>.value(
+        value: remoteControlAccessibilityBloc,
+      ),
     ],
     child: const MaterialApp(home: ReadyPage(device: testIdentity)),
   );
@@ -163,11 +178,74 @@ void main() {
     // The support panel is no longer in charge.
     expect(find.text('Preparando la asistencia...'), findsNothing);
     expect(find.byKey(SupportPanel.requestButtonKey), findsNothing);
-    // Nothing this build cannot actually do is announced -- and the screen is
-    // not mentioned before there is an offer to answer, because nothing has
-    // been captured and the user has not been asked for anything.
+    // The screen is not mentioned before there is an offer to answer, because
+    // nothing has been captured and the user has not been asked for anything.
     expect(find.byKey(RemoteSessionPanel.screenCaptureLineKey), findsNothing);
-    expect(find.textContaining('control'), findsNothing);
+  });
+
+  group('remote control line', () {
+    Future<void> pumpLive(WidgetTester tester) async {
+      await pumpAccepted(tester);
+      remoteSessionRepository.currentResult = connectingRemoteSession;
+      remoteSessionBloc.add(const RemoteSessionAnnounced(testRemoteSessionId));
+      await settle(tester);
+    }
+
+    testWidgets('an enabled service is one line and no button', (tester) async {
+      await pumpLive(tester);
+
+      expect(find.text('Control remoto: habilitado'), findsOneWidget);
+      expect(find.byKey(RemoteControlStatus.enableButtonKey), findsNothing);
+    });
+
+    testWidgets('a disabled service offers the way to Android settings', (
+      tester,
+    ) async {
+      await pumpLive(tester);
+      accessibility.pushStatus(RemoteControlAccessibilityStatus.unavailable);
+      await settle(tester);
+
+      expect(
+        find.text('Control remoto: requiere habilitar accesibilidad'),
+        findsOneWidget,
+      );
+      expect(find.text('HABILITAR CONTROL REMOTO'), findsOneWidget);
+
+      await tester.tap(find.byKey(RemoteControlStatus.enableButtonKey));
+      await settle(tester);
+
+      // All it does is open the screen: the status moves only when Android says
+      // the user enabled the service there.
+      expect(accessibility.settingsOpened, 1);
+      expect(
+        find.text('Control remoto: requiere habilitar accesibilidad'),
+        findsOneWidget,
+      );
+
+      accessibility.pushStatus(RemoteControlAccessibilityStatus.available);
+      await settle(tester);
+
+      expect(find.text('Control remoto: habilitado'), findsOneWidget);
+      expect(find.byKey(RemoteControlStatus.enableButtonKey), findsNothing);
+    });
+
+    testWidgets('it is not shown before an assistance exists', (tester) async {
+      await pumpAccepted(tester);
+
+      expect(find.byKey(RemoteControlStatus.lineKey), findsNothing);
+    });
+
+    testWidgets('it steps aside while the tablet is reconnecting', (
+      tester,
+    ) async {
+      await pumpLive(tester);
+      expect(find.byKey(RemoteControlStatus.lineKey), findsOneWidget);
+
+      client.push(const RealtimeDisconnected());
+      await settle(tester);
+
+      expect(find.byKey(RemoteControlStatus.lineKey), findsNothing);
+    });
   });
 
   /// Negotiates a peer connection the way the coordinator would, and pushes it

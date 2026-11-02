@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Gestures and nothing else. No accessibilityEventTypes, so no event is ever delivered, and no
+     canRetrieveWindowContent, so nothing on screen can be read: a tap needs neither. -->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:canPerformGestures="true"
+    android:description="@string/remote_control_accessibility_description" />
