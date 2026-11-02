@@ -57,6 +57,26 @@
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
 
+        <!-- Performs the remote tap. The user enables it in Android's accessibility settings;
+             nothing here can do that for them.
+
+             BIND_ACCESSIBILITY_SERVICE is the permission a binder must hold, so only the system
+             can bind it. It is not a permission this application requests.
+
+             exported="false": the system binds it regardless, and nothing else needs to. -->
+        <service
+            android:name=".RemoteControlAccessibilityService"
+            android:exported="false"
+            android:label="@string/remote_control_accessibility_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

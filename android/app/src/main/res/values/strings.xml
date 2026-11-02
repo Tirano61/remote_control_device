@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="remote_control_accessibility_label">Control remoto de asistencia</string>
+    <string name="remote_control_accessibility_description">Permite que el técnico toque la pantalla de este dispositivo durante una asistencia remota que usted haya autorizado. Fuera de una asistencia no se ejecuta ningún gesto. No lee el contenido de las ventanas.</string>
+</resources>
