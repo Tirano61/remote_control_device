@@ -781,6 +781,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
       case RemoteControlCommandReceived(:final command):
         final name = switch (command) {
           RemoteTapCommand() => 'tap',
+          RemoteSwipeCommand() => 'swipe',
         };
         _log('control command received: $name ${command.id}');
 

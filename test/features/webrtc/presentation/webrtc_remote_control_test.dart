@@ -210,7 +210,7 @@ void main() {
   group('outcomes reach the ack', () {
     test('a rejected gesture', () async {
       final channel = await reachOpenChannel();
-      accessibility.outcome = RemoteTapOutcome.rejected;
+      accessibility.outcome = RemoteGestureOutcome.rejected;
 
       channel.pushTap('t-1');
       await settle();
@@ -222,7 +222,7 @@ void main() {
 
     test('a service that is gone, without a crash', () async {
       final channel = await reachOpenChannel();
-      accessibility.outcome = RemoteTapOutcome.unavailable;
+      accessibility.outcome = RemoteGestureOutcome.unavailable;
 
       channel.pushTap('t-1');
       await settle();
@@ -237,7 +237,7 @@ void main() {
 
     test('nothing is acknowledged before Android answers', () async {
       final channel = await reachOpenChannel();
-      accessibility.holdTaps = true;
+      accessibility.holdGestures = true;
 
       channel.pushTap('t-1');
       await settle();
@@ -245,7 +245,7 @@ void main() {
       expect(accessibility.taps, hasLength(1));
       expect(channel.sentAcks, isEmpty);
 
-      accessibility.finishTap();
+      accessibility.finishGesture();
       await settle();
 
       expect(channel.sentAcks, const [RemoteControlAck.success('t-1')]);
@@ -290,7 +290,7 @@ void main() {
 
     test('a tap queued before the peer failed never runs', () async {
       final channel = await reachOpenChannel();
-      accessibility.holdTaps = true;
+      accessibility.holdGestures = true;
       channel.pushTap('running');
       channel.pushTap('queued');
       await settle();
@@ -298,7 +298,7 @@ void main() {
 
       factory.last.pushConnectionState(WebRtcConnectionState.failed);
       await settle();
-      accessibility.finishTap();
+      accessibility.finishGesture();
       await settle();
 
       expect(accessibility.taps, hasLength(1));
@@ -309,7 +309,7 @@ void main() {
       'an ack does not cross to the channel that replaced its own',
       () async {
         final oldChannel = await reachOpenChannel();
-        accessibility.holdTaps = true;
+        accessibility.holdGestures = true;
         oldChannel.pushTap('running');
         await settle();
 
@@ -324,7 +324,7 @@ void main() {
         newChannel.pushState(WebRtcDataChannelState.open);
         await settle();
 
-        accessibility.finishTap();
+        accessibility.finishGesture();
         await settle();
 
         expect(oldChannel.sentAcks, isEmpty);
@@ -333,16 +333,213 @@ void main() {
     );
   });
 
+  group('a swipe', () {
+    test('ACTIVE, this peer, channel open: the gesture runs', () async {
+      final channel = await reachOpenChannel();
+
+      channel.pushSwipe(
+        's-1',
+        startX: 0.2,
+        startY: 0.8,
+        endX: 0.2,
+        endY: 0.3,
+        durationMs: 350,
+      );
+      await settle();
+
+      expect(accessibility.swipes, [(0.2, 0.8, 0.2, 0.3, 350)]);
+      expect(accessibility.taps, isEmpty);
+      expect(channel.sentAcks, const [RemoteControlAck.success('s-1')]);
+    });
+
+    test('CONNECTING: no gesture, session_not_active', () async {
+      final channel = await reachOpenChannel(active: false);
+
+      channel.pushSwipe('s-1');
+      await settle();
+
+      expect(accessibility.gestures, isEmpty);
+      expect(channel.sentAcks, const [
+        RemoteControlAck.failure('s-1', RemoteControlError.sessionNotActive),
+      ]);
+    });
+
+    test('ACTIVE for another session is not this session', () async {
+      final channel = await reachOpenChannel(active: false);
+      bloc.add(
+        const WebRtcActiveRemoteSessionChanged(testOtherRemoteSessionId),
+      );
+      await settle();
+
+      channel.pushSwipe('s-1');
+      await settle();
+
+      expect(accessibility.gestures, isEmpty);
+      expect(
+        channel.sentAcks.single.error,
+        RemoteControlError.sessionNotActive,
+      );
+    });
+
+    test('a session that stopped being ACTIVE runs nothing more', () async {
+      final channel = await reachOpenChannel();
+      bloc.add(const WebRtcActiveRemoteSessionChanged(null));
+      await settle();
+
+      channel.pushSwipe('s-1');
+      await settle();
+
+      expect(accessibility.gestures, isEmpty);
+      expect(
+        channel.sentAcks.single.error,
+        RemoteControlError.sessionNotActive,
+      );
+    });
+
+    test('on a channel that is not open it runs nothing', () async {
+      final channel = await reachOpenChannel();
+      channel.pushState(WebRtcDataChannelState.closing);
+      await settle();
+
+      channel.pushSwipe('s-1');
+      await settle();
+
+      expect(accessibility.gestures, isEmpty);
+      expect(channel.sentAcks, isEmpty);
+    });
+
+    test('a malformed one is answered and never runs', () async {
+      final channel = await reachOpenChannel();
+
+      channel.pushSwipe('short', durationMs: 49);
+      channel.pushSwipe(
+        'nowhere',
+        startX: 0.5,
+        startY: 0.5,
+        endX: 0.5,
+        endY: 0.5,
+      );
+      await settle();
+
+      expect(accessibility.gestures, isEmpty);
+      expect(channel.sentAcks, const [
+        RemoteControlAck.failure('short', RemoteControlError.invalidCommand),
+        RemoteControlAck.failure('nowhere', RemoteControlError.invalidCommand),
+      ]);
+    });
+
+    test('a refused gesture is gesture_rejected', () async {
+      final channel = await reachOpenChannel();
+      accessibility.outcome = RemoteGestureOutcome.rejected;
+
+      channel.pushSwipe('s-1');
+      await settle();
+
+      expect(channel.sentAcks, const [
+        RemoteControlAck.failure('s-1', RemoteControlError.gestureRejected),
+      ]);
+    });
+
+    test('a service that is gone is accessibility_unavailable', () async {
+      final channel = await reachOpenChannel();
+      accessibility.outcome = RemoteGestureOutcome.unavailable;
+
+      channel.pushSwipe('s-1');
+      await settle();
+
+      expect(channel.sentAcks, const [
+        RemoteControlAck.failure(
+          's-1',
+          RemoteControlError.accessibilityUnavailable,
+        ),
+      ]);
+    });
+
+    test('nothing is acknowledged before Android answers', () async {
+      final channel = await reachOpenChannel();
+      accessibility.holdGestures = true;
+
+      channel.pushSwipe('s-1');
+      await settle();
+
+      expect(accessibility.swipes, hasLength(1));
+      expect(channel.sentAcks, isEmpty);
+
+      accessibility.finishGesture();
+      await settle();
+
+      expect(channel.sentAcks, const [RemoteControlAck.success('s-1')]);
+    });
+
+    group('generations', () {
+      test('a message from a previous generation never runs', () async {
+        final channel = await reachOpenChannel();
+
+        bloc.add(
+          const WebRtcControlMessageReceived(
+            0,
+            RemoteControlCommandReceived(
+              RemoteSwipeCommand(
+                id: 'stale',
+                startX: 0.5,
+                startY: 0.8,
+                endX: 0.5,
+                endY: 0.2,
+                durationMs: 300,
+              ),
+            ),
+          ),
+        );
+        await settle();
+
+        expect(accessibility.gestures, isEmpty);
+        expect(channel.sentAcks, isEmpty);
+      });
+
+      test('the channel of a replaced peer delivers nothing', () async {
+        final oldChannel = await reachOpenChannel();
+
+        factory.last.pushConnectionState(WebRtcConnectionState.failed);
+        await settle();
+        bloc.add(WebRtcOfferReceived(offerFor(sdp: testSecondOfferSdp)));
+        await settle();
+        expect(factory.createCount, 2);
+
+        oldChannel.pushSwipe('stale');
+        await settle();
+
+        expect(accessibility.gestures, isEmpty);
+        expect(oldChannel.sentAcks, isEmpty);
+      });
+
+      test('a swipe queued before the peer failed never runs', () async {
+        final channel = await reachOpenChannel();
+        accessibility.holdGestures = true;
+        channel.pushTap('running');
+        channel.pushSwipe('queued');
+        await settle();
+
+        factory.last.pushConnectionState(WebRtcConnectionState.failed);
+        await settle();
+        accessibility.finishGesture();
+        await settle();
+
+        expect(accessibility.swipes, isEmpty);
+        expect(channel.sentAcks, isEmpty);
+      });
+    });
+  });
+
   group('a closed channel', () {
     test('gets no late ack', () async {
       final channel = await reachOpenChannel();
-      accessibility.holdTaps = true;
+      accessibility.holdGestures = true;
       channel.pushTap('t-1');
       await settle();
 
       channel.pushState(WebRtcDataChannelState.closed);
       await settle();
-      accessibility.finishTap();
+      accessibility.finishGesture();
       await settle();
 
       expect(channel.sentAcks, isEmpty);
@@ -352,7 +549,7 @@ void main() {
   group('the queue', () {
     test('one gesture at a time, in order', () async {
       final channel = await reachOpenChannel();
-      accessibility.holdTaps = true;
+      accessibility.holdGestures = true;
 
       channel.pushTap('a', x: 0.1);
       channel.pushTap('b', x: 0.2);
@@ -362,14 +559,14 @@ void main() {
       expect(accessibility.taps, [(0.1, 0.5)]);
       expect(channel.sentAcks, isEmpty);
 
-      accessibility.finishTap();
+      accessibility.finishGesture();
       await settle();
 
       // A is answered, and only then B starts.
       expect(accessibility.taps, [(0.1, 0.5), (0.2, 0.5)]);
       expect(channel.sentAcks, const [RemoteControlAck.success('a')]);
 
-      accessibility.finishTap();
+      accessibility.finishGesture();
       await settle();
 
       expect(channel.sentAcks, const [
@@ -380,7 +577,7 @@ void main() {
 
     test('the session ending drops what has not started', () async {
       final channel = await reachOpenChannel();
-      accessibility.holdTaps = true;
+      accessibility.holdGestures = true;
       channel.pushTap('a');
       channel.pushTap('b');
       await settle();
@@ -389,7 +586,7 @@ void main() {
       await settle();
 
       // A cannot be recalled, and is left to finish.
-      accessibility.finishTap();
+      accessibility.finishGesture();
       await settle();
 
       // B never ran, and the web was told so while the channel could say it.
@@ -400,18 +597,90 @@ void main() {
       ]);
     });
 
+    test('tap, swipe, tap run one at a time through one queue', () async {
+      final channel = await reachOpenChannel();
+      accessibility.holdGestures = true;
+
+      channel.pushTap('a', x: 0.1);
+      channel.pushSwipe('b');
+      channel.pushTap('c', x: 0.9);
+      await settle();
+      expect(accessibility.gestures, [(0.1, 0.5)]);
+      expect(channel.sentAcks, isEmpty);
+
+      accessibility.finishGesture();
+      await settle();
+      expect(accessibility.gestures, [(0.1, 0.5), (0.5, 0.8, 0.5, 0.2, 300)]);
+      expect(channel.sentAcks, const [RemoteControlAck.success('a')]);
+
+      accessibility.finishGesture();
+      await settle();
+      expect(accessibility.gestures, [
+        (0.1, 0.5),
+        (0.5, 0.8, 0.5, 0.2, 300),
+        (0.9, 0.5),
+      ]);
+
+      accessibility.finishGesture();
+      await settle();
+      expect(channel.sentAcks, const [
+        RemoteControlAck.success('a'),
+        RemoteControlAck.success('b'),
+        RemoteControlAck.success('c'),
+      ]);
+    });
+
+    test('the session ending drops a swipe that has not started', () async {
+      final channel = await reachOpenChannel();
+      accessibility.holdGestures = true;
+      channel.pushTap('a');
+      channel.pushSwipe('b');
+      await settle();
+
+      bloc.add(const WebRtcActiveRemoteSessionChanged(null));
+      await settle();
+      accessibility.finishGesture();
+      await settle();
+
+      expect(accessibility.taps, hasLength(1));
+      expect(accessibility.swipes, isEmpty);
+      expect(channel.sentAcks, const [
+        RemoteControlAck.failure('b', RemoteControlError.sessionNotActive),
+        RemoteControlAck.success('a'),
+      ]);
+    });
+
+    test('a running swipe is left to finish when the session ends', () async {
+      final channel = await reachOpenChannel();
+      accessibility.holdGestures = true;
+      channel.pushSwipe('a');
+      channel.pushSwipe('b');
+      await settle();
+
+      bloc.add(const WebRtcActiveRemoteSessionChanged(null));
+      await settle();
+      accessibility.finishGesture();
+      await settle();
+
+      expect(accessibility.swipes, hasLength(1));
+      expect(channel.sentAcks, const [
+        RemoteControlAck.failure('b', RemoteControlError.sessionNotActive),
+        RemoteControlAck.success('a'),
+      ]);
+    });
+
     test('the next authorised tap runs after a dropped queue', () async {
       final channel = await reachOpenChannel();
-      accessibility.holdTaps = true;
+      accessibility.holdGestures = true;
       channel.pushTap('a');
       channel.pushTap('b');
       await settle();
       bloc.add(const WebRtcActiveRemoteSessionChanged(null));
       await settle();
-      accessibility.finishTap();
+      accessibility.finishGesture();
       await settle();
 
-      accessibility.holdTaps = false;
+      accessibility.holdGestures = false;
       bloc.add(const WebRtcActiveRemoteSessionChanged(testRemoteSessionId));
       await settle();
       channel.pushTap('c');

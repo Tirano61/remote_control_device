@@ -27,22 +27,131 @@ void main() {
   void submit(String id, {double x = 0.5}) =>
       queue.submit(RemoteTapCommand(id: id, x: x, y: 0.5), acks.add);
 
+  RemoteSwipeCommand swipeCommand(String id) => RemoteSwipeCommand(
+    id: id,
+    startX: 0.1,
+    startY: 0.9,
+    endX: 0.1,
+    endY: 0.2,
+    durationMs: 300,
+  );
+
+  const swipeCall = (0.1, 0.9, 0.1, 0.2, 300);
+
+  group('taps and swipes share one line', () {
+    test('tap A, swipe B, tap C run in order, never together', () async {
+      accessibility.holdGestures = true;
+
+      submit('a', x: 0.3);
+      queue.submit(swipeCommand('b'), acks.add);
+      submit('c', x: 0.7);
+      await settle();
+      expect(accessibility.gestures, [(0.3, 0.5)]);
+
+      accessibility.finishGesture();
+      await settle();
+      expect(accessibility.gestures, [(0.3, 0.5), swipeCall]);
+      expect(acks, const [RemoteControlAck.success('a')]);
+
+      accessibility.finishGesture();
+      await settle();
+      expect(accessibility.gestures, [(0.3, 0.5), swipeCall, (0.7, 0.5)]);
+      expect(acks, const [
+        RemoteControlAck.success('a'),
+        RemoteControlAck.success('b'),
+      ]);
+
+      accessibility.finishGesture();
+      await settle();
+      expect(acks, const [
+        RemoteControlAck.success('a'),
+        RemoteControlAck.success('b'),
+        RemoteControlAck.success('c'),
+      ]);
+    });
+
+    test('a pending swipe is dropped with the rest', () async {
+      accessibility.holdGestures = true;
+      queue.submit(swipeCommand('a'), acks.add);
+      queue.submit(swipeCommand('b'), acks.add);
+      submit('c');
+      await settle();
+
+      queue.discardPending();
+      accessibility.finishGesture();
+      await settle();
+
+      expect(accessibility.gestures, [swipeCall]);
+      expect(acks, const [
+        RemoteControlAck.failure('b', RemoteControlError.sessionNotActive),
+        RemoteControlAck.failure('c', RemoteControlError.sessionNotActive),
+        RemoteControlAck.success('a'),
+      ]);
+    });
+
+    test('swipes count against the same limit as taps', () async {
+      accessibility.holdGestures = true;
+      submit('running');
+      await settle();
+
+      for (var i = 0; i < RemoteControlCommandQueue.maxPending; i++) {
+        i.isEven
+            ? submit('queued-$i')
+            : queue.submit(swipeCommand('queued-$i'), acks.add);
+      }
+      queue.submit(swipeCommand('one-too-many'), acks.add);
+
+      expect(acks, const [
+        RemoteControlAck.failure(
+          'one-too-many',
+          RemoteControlError.gestureRejected,
+        ),
+      ]);
+      expect(accessibility.gestures, hasLength(1));
+    });
+  });
+
+  for (final (outcome, ack) in const [
+    (RemoteGestureOutcome.completed, RemoteControlAck.success('s')),
+    (
+      RemoteGestureOutcome.rejected,
+      RemoteControlAck.failure('s', RemoteControlError.gestureRejected),
+    ),
+    (
+      RemoteGestureOutcome.unavailable,
+      RemoteControlAck.failure(
+        's',
+        RemoteControlError.accessibilityUnavailable,
+      ),
+    ),
+  ]) {
+    test('$outcome on a swipe becomes the matching ack', () async {
+      accessibility.outcome = outcome;
+
+      queue.submit(swipeCommand('s'), acks.add);
+      await settle();
+
+      expect(acks, [ack]);
+      expect(accessibility.swipes, [swipeCall]);
+    });
+  }
+
   test('A starts, B waits, A completes, B starts', () async {
-    accessibility.holdTaps = true;
+    accessibility.holdGestures = true;
 
     submit('a', x: 0.1);
     submit('b', x: 0.2);
     await settle();
     expect(accessibility.taps, [(0.1, 0.5)]);
 
-    accessibility.finishTap();
+    accessibility.finishGesture();
     await settle();
     expect(accessibility.taps, [(0.1, 0.5), (0.2, 0.5)]);
     expect(acks, const [RemoteControlAck.success('a')]);
   });
 
   test('discarding before B starts means B never runs', () async {
-    accessibility.holdTaps = true;
+    accessibility.holdGestures = true;
     submit('a');
     submit('b');
     await settle();
@@ -52,7 +161,7 @@ void main() {
       RemoteControlAck.failure('b', RemoteControlError.sessionNotActive),
     ]);
 
-    accessibility.finishTap();
+    accessibility.finishGesture();
     await settle();
 
     expect(accessibility.taps, hasLength(1));
@@ -71,7 +180,7 @@ void main() {
   });
 
   test('a flood is refused, not stored', () async {
-    accessibility.holdTaps = true;
+    accessibility.holdGestures = true;
     submit('running');
     await settle();
 
@@ -90,13 +199,13 @@ void main() {
   });
 
   for (final (outcome, ack) in const [
-    (RemoteTapOutcome.completed, RemoteControlAck.success('t')),
+    (RemoteGestureOutcome.completed, RemoteControlAck.success('t')),
     (
-      RemoteTapOutcome.rejected,
+      RemoteGestureOutcome.rejected,
       RemoteControlAck.failure('t', RemoteControlError.gestureRejected),
     ),
     (
-      RemoteTapOutcome.unavailable,
+      RemoteGestureOutcome.unavailable,
       RemoteControlAck.failure(
         't',
         RemoteControlError.accessibilityUnavailable,
