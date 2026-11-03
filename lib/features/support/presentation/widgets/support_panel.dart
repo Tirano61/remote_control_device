@@ -23,6 +23,7 @@ class SupportPanel extends StatelessWidget {
   static const Key acceptButtonKey = Key('support-accept-button');
   static const Key rejectButtonKey = Key('support-reject-button');
   static const Key retryButtonKey = Key('support-retry-button');
+  static const Key controlDisclosureKey = Key('support-control-disclosure');
 
   @override
   Widget build(BuildContext context) {
@@ -172,6 +173,8 @@ class _AssignedPanel extends StatelessWidget {
           style: theme.textTheme.headlineSmall,
         ),
         const SizedBox(height: 12),
+        const _ControlDisclosure(key: SupportPanel.controlDisclosureKey),
+        const SizedBox(height: 16),
         Text('¿Desea permitir la asistencia?', style: theme.textTheme.bodyLarge),
         if (failure != null) _Note(FailureMessages.forSupport(failure!)),
         const SizedBox(height: 24),
@@ -203,6 +206,62 @@ class _AssignedPanel extends StatelessWidget {
               ),
             ),
           ],
+        ),
+      ],
+    );
+  }
+}
+
+/// What pressing `PERMITIR` allows, for this assistance only.
+///
+/// Android does not ask again when an update widens the accessibility service,
+/// so this is where the user learns about text input. It has to stay true of
+/// what the code does: the field is whichever one has focus, which the
+/// technician can also move with a tap; the text replaces what was there; and
+/// the shared picture shows whatever a field displays.
+class _ControlDisclosure extends StatelessWidget {
+  const _ControlDisclosure({super.key});
+
+  static const List<String> _abilities = [
+    'Ver la pantalla que se comparta.',
+    'Tocar y deslizar sobre la pantalla.',
+    'Usar Atrás, Inicio y Recientes.',
+    'Introducir texto en el campo que esté seleccionado, reemplazando su '
+        'contenido.',
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          'Durante esta asistencia, el técnico podrá:',
+          style: theme.textTheme.bodyMedium,
+        ),
+        const SizedBox(height: 8),
+        for (final ability in _abilities)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 4),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('•  ', style: theme.textTheme.bodyMedium),
+                Expanded(
+                  child: Text(ability, style: theme.textTheme.bodyMedium),
+                ),
+              ],
+            ),
+          ),
+        const SizedBox(height: 8),
+        Text(
+          'Aparte de lo que se vea en la pantalla compartida, el sistema no '
+          'envía al técnico el contenido actual de sus campos de texto. No lee '
+          'las ventanas de forma continua ni las supervisa fuera de una '
+          'asistencia activa.',
+          style: theme.textTheme.bodyMedium,
         ),
       ],
     );
