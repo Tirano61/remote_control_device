@@ -277,6 +277,135 @@ void main() {
     }
   });
 
+  group('set_text shares that line', () {
+    void submitText(String id, [String text = 'Hola']) =>
+        queue.submit(RemoteSetTextCommand(id: id, text: text), acks.add);
+
+    test('tap, set_text, home run in that order', () async {
+      accessibility.holdGestures = true;
+
+      submit('a', x: 0.3);
+      submitText('b');
+      queue.submit(const RemoteHomeCommand(id: 'c'), acks.add);
+      await settle();
+      expect(accessibility.gestures, [(0.3, 0.5)]);
+
+      accessibility.finishGesture();
+      await settle();
+      expect(accessibility.gestures, [(0.3, 0.5), ('set_text', 'Hola')]);
+      expect(acks, const [RemoteControlAck.success('a')]);
+
+      accessibility.finishGesture();
+      await settle();
+      expect(accessibility.gestures, [
+        (0.3, 0.5),
+        ('set_text', 'Hola'),
+        'home',
+      ]);
+
+      accessibility.finishGesture();
+      await settle();
+      expect(acks, const [
+        RemoteControlAck.success('a'),
+        RemoteControlAck.success('b'),
+        RemoteControlAck.success('c'),
+      ]);
+    });
+
+    test('it does not start before the tap that gives the focus', () async {
+      accessibility.holdGestures = true;
+
+      submit('tap');
+      submitText('text');
+      await settle();
+      expect(accessibility.setTexts, isEmpty);
+      expect(acks, isEmpty);
+
+      accessibility.finishGesture();
+      await settle();
+
+      expect(acks, const [RemoteControlAck.success('tap')]);
+      expect(accessibility.setTexts, ['Hola']);
+    });
+
+    test('a pending set_text is dropped with the rest', () async {
+      accessibility.holdGestures = true;
+      submit('a');
+      submitText('b');
+      await settle();
+
+      queue.discardPending();
+      accessibility.finishGesture();
+      await settle();
+
+      expect(accessibility.setTexts, isEmpty);
+      expect(acks, const [
+        RemoteControlAck.failure('b', RemoteControlError.sessionNotActive),
+        RemoteControlAck.success('a'),
+      ]);
+    });
+
+    test('it counts against the same limit', () async {
+      accessibility.holdGestures = true;
+      submit('running');
+      await settle();
+
+      for (var i = 0; i < RemoteControlCommandQueue.maxPending; i++) {
+        submitText('queued-$i');
+      }
+      submitText('one-too-many');
+
+      expect(acks, const [
+        RemoteControlAck.failure(
+          'one-too-many',
+          RemoteControlError.gestureRejected,
+        ),
+      ]);
+      expect(accessibility.setTexts, isEmpty);
+    });
+
+    for (final (outcome, ack) in const [
+      (RemoteTextOutcome.completed, RemoteControlAck.success('t')),
+      (
+        RemoteTextOutcome.targetUnavailable,
+        RemoteControlAck.failure('t', RemoteControlError.textTargetUnavailable),
+      ),
+      (
+        RemoteTextOutcome.rejected,
+        RemoteControlAck.failure('t', RemoteControlError.textRejected),
+      ),
+      (
+        RemoteTextOutcome.unavailable,
+        RemoteControlAck.failure(
+          't',
+          RemoteControlError.accessibilityUnavailable,
+        ),
+      ),
+    ]) {
+      test('$outcome becomes the matching ack', () async {
+        accessibility.textOutcome = outcome;
+
+        submitText('t');
+        await settle();
+
+        expect(acks, [ack]);
+      });
+    }
+
+    test('a failed set_text does not stop what follows', () async {
+      accessibility.textOutcome = RemoteTextOutcome.targetUnavailable;
+
+      submitText('a');
+      submit('b');
+      await settle();
+
+      expect(acks, const [
+        RemoteControlAck.failure('a', RemoteControlError.textTargetUnavailable),
+        RemoteControlAck.success('b'),
+      ]);
+    });
+  });
+
   for (final (outcome, ack) in const [
     (RemoteGestureOutcome.completed, RemoteControlAck.success('s')),
     (
