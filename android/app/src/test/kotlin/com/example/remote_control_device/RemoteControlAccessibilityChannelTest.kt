@@ -52,8 +52,31 @@ class RemoteControlAccessibilityChannelTest {
                 globalActions += action
                 globalActionAccepted
             },
+            activeWindow = { window },
         ),
     )
+
+    /** What the service would find as the active window. */
+    private var window: RemoteTextWindow? = null
+
+    /** A window whose focused field records what it is given, and takes it or does not. */
+    private val written = mutableListOf<String>()
+
+    private fun windowWithField(accepts: Boolean = true) = object : RemoteTextWindow {
+        override fun findInputFocus() = object : RemoteTextNode {
+            override val isEditable = true
+            override val isEnabled = true
+
+            override fun setText(text: String): Boolean {
+                written += text
+                return accepts
+            }
+
+            override fun release() = Unit
+        }
+
+        override fun release() = Unit
+    }
 
     private fun swipeArguments(): MutableMap<String, Any?> = mutableMapOf(
         "startX" to 0.5,
@@ -192,6 +215,82 @@ class RemoteControlAccessibilityChannelTest {
         assertEquals(listOf(GestureStroke(GesturePixel(640, 200), null, 50L)), strokes)
         report!!(true)
         assertEquals(listOf<Any?>("completed"), answers)
+    }
+
+    @Test
+    fun `performSetText reaches the focused field with its exact text`() {
+        connect()
+        window = windowWithField()
+
+        call("performSetText", mapOf("text" to "Hola 👋\náéíóú ñ"))
+
+        assertEquals(listOf("Hola 👋\náéíóú ñ"), written)
+        assertEquals(listOf<Any?>("completed"), answers)
+    }
+
+    @Test
+    fun `performSetText with an empty text writes an empty text`() {
+        connect()
+        window = windowWithField()
+
+        call("performSetText", mapOf("text" to ""))
+
+        assertEquals(listOf(""), written)
+        assertEquals(listOf<Any?>("completed"), answers)
+    }
+
+    @Test
+    fun `a field that refuses the text answers rejected`() {
+        connect()
+        window = windowWithField(accepts = false)
+
+        call("performSetText", mapOf("text" to "Hola"))
+
+        assertEquals(listOf<Any?>("rejected"), answers)
+    }
+
+    @Test
+    fun `no window answers targetUnavailable`() {
+        connect()
+
+        call("performSetText", mapOf("text" to "Hola"))
+
+        assertEquals(listOf<Any?>("targetUnavailable"), answers)
+    }
+
+    @Test
+    fun `a set_text with no service answers unavailable`() {
+        window = windowWithField()
+
+        call("performSetText", mapOf("text" to "Hola"))
+
+        assertEquals(listOf<Any?>("unavailable"), answers)
+        assertTrue(written.isEmpty())
+    }
+
+    @Test
+    fun `a set_text while a swipe runs answers busy, and writes nothing`() {
+        connect()
+        window = windowWithField()
+
+        call("performSwipe", swipeArguments())
+        call("performSetText", mapOf("text" to "Hola"))
+
+        assertEquals(listOf<Any?>("busy"), answers)
+        assertTrue(written.isEmpty())
+    }
+
+    @Test
+    fun `a text that is missing or not a string answers invalid, and writes nothing`() {
+        connect()
+        window = windowWithField()
+
+        call("performSetText", emptyMap())
+        call("performSetText", null)
+        call("performSetText", mapOf("text" to 7))
+
+        assertEquals(List<Any?>(3) { "invalid" }, answers)
+        assertTrue(written.isEmpty())
     }
 
     @Test
