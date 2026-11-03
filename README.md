@@ -97,8 +97,8 @@ permanent credential whenever the app restarts.
 
 Support requests, remote sessions, signaling and WebRTC are in place too. During
 an assistance the technician sees the remote screen (MediaProjection) and can send
-`tap`, `swipe`, `back` and `home` (AccessibilityService). `back` and `home` have only
-been tested on the Android side so far, because the web does not send them yet. See
+`tap`, `swipe`, `back`, `home` and `recents` (AccessibilityService). `recents` has only
+been tested on the Android side so far, because the web does not send it yet. See
 [docs/webrtc/CONTROL_CHANNEL.md](docs/webrtc/CONTROL_CHANNEL.md).
 
 Not implemented yet: kiosk mode.
@@ -123,12 +123,12 @@ activation form.
 
 ### Background behaviour
 
-There is no foreground service yet, so Android may suspend the process once the
+The only foreground service is `MediaProjectionForegroundService`, which runs
+while the screen is being shared and holds no socket of its own (see
+[docs/webrtc/SCREEN_SHARING.md](docs/webrtc/SCREEN_SHARING.md#the-foreground-service)).
+Outside a capture nothing holds the process, so Android may suspend it once the
 app leaves the foreground: the socket then drops and the backend reports the
-device `OFFLINE` until it is reopened. That is acceptable while the app only
-announces presence. Keeping the channel alive in the background belongs to the
-remote-support flow, where it actually matters, and will need a
-`ForegroundService`.
+device `OFFLINE` until it is reopened.
 
 ## Checks
 
