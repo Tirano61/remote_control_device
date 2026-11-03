@@ -444,19 +444,28 @@ class RemoteGestureDispatcherTest {
     }
 
     @Test
-    fun `the two actions are the ones Android defines`() {
-        // The constants are inlined from android.jar. Spelled out so that a change there, or the
-        // two being swapped above, has something to disagree with.
+    fun `recents is GLOBAL_ACTION_RECENTS`() {
+        dispatcher.recents { outcomes += it }
+
+        assertEquals(listOf(AccessibilityService.GLOBAL_ACTION_RECENTS), globalActions)
+    }
+
+    @Test
+    fun `the three actions are the ones Android defines`() {
+        // The constants are inlined from android.jar. Spelled out so that a change there, or two
+        // of them being swapped above, has something to disagree with.
         assertEquals(1, AccessibilityService.GLOBAL_ACTION_BACK)
         assertEquals(2, AccessibilityService.GLOBAL_ACTION_HOME)
+        assertEquals(3, AccessibilityService.GLOBAL_ACTION_RECENTS)
     }
 
     @Test
     fun `performGlobalAction answering true is completed, at once`() {
         dispatcher.back { outcomes += it }
         dispatcher.home { outcomes += it }
+        dispatcher.recents { outcomes += it }
 
-        assertEquals(List(2) { RemoteGestureOutcome.COMPLETED }, outcomes)
+        assertEquals(List(3) { RemoteGestureOutcome.COMPLETED }, outcomes)
     }
 
     @Test
@@ -465,8 +474,9 @@ class RemoteGestureDispatcherTest {
 
         dispatcher.back { outcomes += it }
         dispatcher.home { outcomes += it }
+        dispatcher.recents { outcomes += it }
 
-        assertEquals(List(2) { RemoteGestureOutcome.REJECTED }, outcomes)
+        assertEquals(List(3) { RemoteGestureOutcome.REJECTED }, outcomes)
     }
 
     @Test
@@ -478,8 +488,9 @@ class RemoteGestureDispatcherTest {
         )
 
         throwing.back { outcomes += it }
+        throwing.recents { outcomes += it }
 
-        assertEquals(listOf(RemoteGestureOutcome.REJECTED), outcomes)
+        assertEquals(List(2) { RemoteGestureOutcome.REJECTED }, outcomes)
     }
 
     @Test
@@ -496,15 +507,17 @@ class RemoteGestureDispatcherTest {
 
         blind.back { outcomes += it }
         blind.home { outcomes += it }
+        blind.recents { outcomes += it }
 
         assertEquals(0, reads)
-        assertEquals(List(2) { RemoteGestureOutcome.COMPLETED }, outcomes)
+        assertEquals(List(3) { RemoteGestureOutcome.COMPLETED }, outcomes)
     }
 
     @Test
     fun `a global action is no stroke`() {
         dispatcher.back { outcomes += it }
         dispatcher.home { outcomes += it }
+        dispatcher.recents { outcomes += it }
 
         assertTrue(strokes.isEmpty())
     }
@@ -516,9 +529,10 @@ class RemoteGestureDispatcherTest {
 
         dispatcher.home { outcomes += it }
         dispatcher.back { outcomes += it }
+        dispatcher.recents { outcomes += it }
 
         assertTrue(globalActions.isEmpty())
-        assertEquals(List(2) { RemoteGestureOutcome.BUSY }, outcomes)
+        assertEquals(List(3) { RemoteGestureOutcome.BUSY }, outcomes)
 
         first(true)
         assertEquals(RemoteGestureOutcome.COMPLETED, outcomes.last())
@@ -528,13 +542,32 @@ class RemoteGestureDispatcherTest {
     }
 
     @Test
+    fun `a recents runs once the gesture it was refused under has finished`() {
+        tap()
+        val first = report!!
+
+        dispatcher.recents { outcomes += it }
+        assertTrue(globalActions.isEmpty())
+
+        first(true)
+        dispatcher.recents { outcomes += it }
+
+        assertEquals(listOf(AccessibilityService.GLOBAL_ACTION_RECENTS), globalActions)
+        assertEquals(
+            listOf(RemoteGestureOutcome.BUSY, RemoteGestureOutcome.COMPLETED, RemoteGestureOutcome.COMPLETED),
+            outcomes,
+        )
+    }
+
+    @Test
     fun `a global action leaves nothing running`() {
         dispatcher.home { outcomes += it }
+        dispatcher.recents { outcomes += it }
 
         tap()
 
         assertEquals(1, strokes.size)
-        assertEquals(listOf(RemoteGestureOutcome.COMPLETED), outcomes)
+        assertEquals(List(2) { RemoteGestureOutcome.COMPLETED }, outcomes)
     }
 
     @Test
@@ -543,22 +576,29 @@ class RemoteGestureDispatcherTest {
 
         availability.back { outcomes += it }
         availability.home { outcomes += it }
+        availability.recents { outcomes += it }
 
-        assertEquals(List(2) { RemoteGestureOutcome.UNAVAILABLE }, outcomes)
+        assertEquals(List(3) { RemoteGestureOutcome.UNAVAILABLE }, outcomes)
         assertTrue(globalActions.isEmpty())
 
         availability.connected(dispatcher)
         availability.back { outcomes += it }
         availability.home { outcomes += it }
+        availability.recents { outcomes += it }
         assertEquals(
-            listOf(AccessibilityService.GLOBAL_ACTION_BACK, AccessibilityService.GLOBAL_ACTION_HOME),
+            listOf(
+                AccessibilityService.GLOBAL_ACTION_BACK,
+                AccessibilityService.GLOBAL_ACTION_HOME,
+                AccessibilityService.GLOBAL_ACTION_RECENTS,
+            ),
             globalActions,
         )
 
         availability.disconnected()
         availability.home { outcomes += it }
-        assertEquals(RemoteGestureOutcome.UNAVAILABLE, outcomes.last())
-        assertEquals(2, globalActions.size)
+        availability.recents { outcomes += it }
+        assertEquals(List(2) { RemoteGestureOutcome.UNAVAILABLE }, outcomes.takeLast(2))
+        assertEquals(3, globalActions.size)
     }
 
     @Test

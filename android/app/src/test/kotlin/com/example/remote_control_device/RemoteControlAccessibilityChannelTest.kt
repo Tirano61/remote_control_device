@@ -67,17 +67,22 @@ class RemoteControlAccessibilityChannelTest {
         channel.onMethodCall(MethodCall(method, arguments), result)
 
     @Test
-    fun `performBack and performHome reach their global actions, with no arguments`() {
+    fun `performBack, performHome and performRecents reach their global actions, with no arguments`() {
         connect()
 
         call("performBack", null)
         call("performHome", null)
+        call("performRecents", null)
 
         assertEquals(
-            listOf(AccessibilityService.GLOBAL_ACTION_BACK, AccessibilityService.GLOBAL_ACTION_HOME),
+            listOf(
+                AccessibilityService.GLOBAL_ACTION_BACK,
+                AccessibilityService.GLOBAL_ACTION_HOME,
+                AccessibilityService.GLOBAL_ACTION_RECENTS,
+            ),
             globalActions,
         )
-        assertEquals(listOf<Any?>("completed", "completed"), answers)
+        assertEquals(listOf<Any?>("completed", "completed", "completed"), answers)
         assertTrue(strokes.isEmpty())
     }
 
@@ -88,16 +93,18 @@ class RemoteControlAccessibilityChannelTest {
 
         call("performBack", null)
         call("performHome", null)
+        call("performRecents", null)
 
-        assertEquals(listOf<Any?>("rejected", "rejected"), answers)
+        assertEquals(listOf<Any?>("rejected", "rejected", "rejected"), answers)
     }
 
     @Test
     fun `a global action with no service answers unavailable`() {
         call("performBack", null)
         call("performHome", null)
+        call("performRecents", null)
 
-        assertEquals(listOf<Any?>("unavailable", "unavailable"), answers)
+        assertEquals(listOf<Any?>("unavailable", "unavailable", "unavailable"), answers)
         assertTrue(globalActions.isEmpty())
     }
 
@@ -107,8 +114,9 @@ class RemoteControlAccessibilityChannelTest {
 
         call("performSwipe", swipeArguments())
         call("performHome", null)
+        call("performRecents", null)
 
-        assertEquals(listOf<Any?>("busy"), answers)
+        assertEquals(listOf<Any?>("busy", "busy"), answers)
         assertTrue(globalActions.isEmpty())
     }
 
