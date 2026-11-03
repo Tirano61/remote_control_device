@@ -60,15 +60,22 @@ enum class RemoteGestureOutcome(val wire: String) {
     /** Android cancelled it, or the service went away while it was running. */
     CANCELLED("cancelled"),
 
-    /** `dispatchGesture` or `performGlobalAction` refused it, or the display could not be read. */
+    /**
+     * `dispatchGesture`, `performGlobalAction` or `ACTION_SET_TEXT` refused it, or something it
+     * needed from Android could not be read.
+     */
     REJECTED("rejected"),
+
+    /** A `set_text` found no active window, no input focus, or a node it may not write to. */
+    TARGET_UNAVAILABLE("targetUnavailable"),
 
     /** A gesture is still running. `dispatchGesture` would cancel it, so this one is refused. */
     BUSY("busy"),
 
     /**
-     * A position is not normalized, a duration is out of range, or a swipe goes nowhere on this
-     * screen. Dart already validated what it could; this is the boundary.
+     * A position is not normalized, a duration is out of range, a swipe goes nowhere on this
+     * screen, or a text is too long or missing. Dart already validated what it could; this is the
+     * boundary.
      */
     INVALID("invalid"),
 
@@ -94,6 +101,9 @@ enum class RemoteGestureOutcome(val wire: String) {
  * position, so it reads no display. It answers at once and leaves nothing running, but it still
  * waits its turn: Home must not start under a swipe that has not finished.
  *
+ * [activeWindow] is consulted for a `set_text` and for nothing else: not when the service
+ * connects, and not for a gesture or a global action. See [writeToInputFocus].
+ *
  * Pure, and main-thread only: the channel handler, the gesture callback and the service
  * lifecycle all run there.
  */
@@ -101,6 +111,7 @@ class RemoteGestureDispatcher(
     private val readDisplay: () -> ScreenCaptureGeometry,
     private val dispatch: (GestureStroke, (Boolean) -> Unit) -> Boolean,
     private val performGlobalAction: (Int) -> Boolean,
+    private val activeWindow: () -> RemoteTextWindow?,
 ) {
     private var running: Running? = null
 
@@ -139,6 +150,18 @@ class RemoteGestureDispatcher(
 
     fun recents(answer: (RemoteGestureOutcome) -> Unit) =
         globalAction(AccessibilityService.GLOBAL_ACTION_RECENTS, answer)
+
+    fun setText(text: String, answer: (RemoteGestureOutcome) -> Unit) {
+        if (running != null) {
+            answer(RemoteGestureOutcome.BUSY)
+            return
+        }
+        if (text.length > MAX_TEXT_LENGTH) {
+            answer(RemoteGestureOutcome.INVALID)
+            return
+        }
+        answer(writeToInputFocus(activeWindow, text))
+    }
 
     private fun globalAction(action: Int, answer: (RemoteGestureOutcome) -> Unit) {
         if (running != null) {
@@ -212,6 +235,9 @@ class RemoteGestureDispatcher(
         /** The range of the protocol, in `docs/webrtc/CONTROL_CHANNEL.md`. */
         const val MIN_SWIPE_DURATION_MS = 50L
         const val MAX_SWIPE_DURATION_MS = 2000L
+
+        /** In UTF-16 code units, which is what both Kotlin and Dart count as a String's length. */
+        const val MAX_TEXT_LENGTH = 4096
     }
 }
 
@@ -294,5 +320,14 @@ class RemoteControlAvailability {
             return
         }
         current.recents(answer)
+    }
+
+    fun setText(text: String, answer: (RemoteGestureOutcome) -> Unit) {
+        val current = dispatcher
+        if (current == null) {
+            answer(RemoteGestureOutcome.UNAVAILABLE)
+            return
+        }
+        current.setText(text, answer)
     }
 }

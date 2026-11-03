@@ -20,4 +20,11 @@ enum RemoteControlError {
   /// The message was well formed, in a version or of a type this build does not
   /// know.
   unsupportedCommand,
+
+  /// The `set_text` was valid and had nowhere to go: no active window, nothing
+  /// with input focus, or a focused node that is not editable and enabled.
+  textTargetUnavailable,
+
+  /// There was somewhere to write, and the text could not be put there.
+  textRejected,
 }
