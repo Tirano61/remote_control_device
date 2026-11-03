@@ -218,6 +218,7 @@ void main() {
   for (final (method, perform) in [
     ('performBack', () => client.performBack()),
     ('performHome', () => client.performHome()),
+    ('performRecents', () => client.performRecents()),
   ]) {
     group(method, () {
       test('sends no arguments: no position, and no Android code', () async {

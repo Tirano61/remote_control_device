@@ -71,3 +71,8 @@ final class RemoteBackCommand extends RemoteControlCommand {
 final class RemoteHomeCommand extends RemoteControlCommand {
   const RemoteHomeCommand({required String id}) : super(id);
 }
+
+/// Android's Recents. Like [RemoteBackCommand], an [id] and nothing else.
+final class RemoteRecentsCommand extends RemoteControlCommand {
+  const RemoteRecentsCommand({required String id}) : super(id);
+}

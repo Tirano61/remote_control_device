@@ -21,6 +21,7 @@ abstract final class RemoteControlChannelCodec {
   static const String _swipeType = 'swipe';
   static const String _backType = 'back';
   static const String _homeType = 'home';
+  static const String _recentsType = 'recents';
   static const String _ackType = 'ack';
 
   /// Decodes a frame, or answers `null` when there is nothing to report.
@@ -64,6 +65,9 @@ abstract final class RemoteControlChannelCodec {
       _swipeType => _decodeSwipe(id, payload),
       _backType => RemoteControlCommandReceived(RemoteBackCommand(id: id)),
       _homeType => RemoteControlCommandReceived(RemoteHomeCommand(id: id)),
+      _recentsType => RemoteControlCommandReceived(
+        RemoteRecentsCommand(id: id),
+      ),
       _ => _rejected(id, RemoteControlError.unsupportedCommand),
     };
   }

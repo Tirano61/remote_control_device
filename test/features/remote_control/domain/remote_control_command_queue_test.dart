@@ -111,15 +111,16 @@ void main() {
     });
   });
 
-  group('back and home share that line', () {
-    test('tap, swipe, back, home, tap run in order, never together', () async {
+  group('back, home and recents share that line', () {
+    test('tap, swipe, back, home, recents, tap run in order', () async {
       accessibility.holdGestures = true;
 
       submit('a', x: 0.3);
       queue.submit(swipeCommand('b'), acks.add);
       queue.submit(const RemoteBackCommand(id: 'c'), acks.add);
       queue.submit(const RemoteHomeCommand(id: 'd'), acks.add);
-      submit('e', x: 0.7);
+      queue.submit(const RemoteRecentsCommand(id: 'e'), acks.add);
+      submit('f', x: 0.7);
       await settle();
       expect(accessibility.gestures, [(0.3, 0.5)]);
 
@@ -128,6 +129,7 @@ void main() {
         swipeCall,
         'back',
         'home',
+        'recents',
         (0.7, 0.5),
       ];
       for (var finished = 1; finished < expected.length; finished++) {
@@ -145,6 +147,7 @@ void main() {
         RemoteControlAck.success('c'),
         RemoteControlAck.success('d'),
         RemoteControlAck.success('e'),
+        RemoteControlAck.success('f'),
       ]);
     });
 
@@ -164,24 +167,45 @@ void main() {
       expect(accessibility.gestures, [swipeCall, 'home']);
     });
 
-    test('a pending back and home are dropped with the rest', () async {
+    test('recents waits for a swipe that is still running', () async {
       accessibility.holdGestures = true;
-      submit('a');
-      queue.submit(const RemoteBackCommand(id: 'b'), acks.add);
-      queue.submit(const RemoteHomeCommand(id: 'c'), acks.add);
+
+      queue.submit(swipeCommand('a'), acks.add);
+      queue.submit(const RemoteRecentsCommand(id: 'b'), acks.add);
       await settle();
 
-      queue.discardPending();
+      expect(accessibility.gestures, [swipeCall]);
+      expect(accessibility.globalActions, isEmpty);
+
       accessibility.finishGesture();
       await settle();
 
-      expect(accessibility.globalActions, isEmpty);
-      expect(acks, const [
-        RemoteControlAck.failure('b', RemoteControlError.sessionNotActive),
-        RemoteControlAck.failure('c', RemoteControlError.sessionNotActive),
-        RemoteControlAck.success('a'),
-      ]);
+      expect(accessibility.gestures, [swipeCall, 'recents']);
     });
+
+    test(
+      'a pending back, home and recents are dropped with the rest',
+      () async {
+        accessibility.holdGestures = true;
+        submit('a');
+        queue.submit(const RemoteBackCommand(id: 'b'), acks.add);
+        queue.submit(const RemoteHomeCommand(id: 'c'), acks.add);
+        queue.submit(const RemoteRecentsCommand(id: 'd'), acks.add);
+        await settle();
+
+        queue.discardPending();
+        accessibility.finishGesture();
+        await settle();
+
+        expect(accessibility.globalActions, isEmpty);
+        expect(acks, const [
+          RemoteControlAck.failure('b', RemoteControlError.sessionNotActive),
+          RemoteControlAck.failure('c', RemoteControlError.sessionNotActive),
+          RemoteControlAck.failure('d', RemoteControlError.sessionNotActive),
+          RemoteControlAck.success('a'),
+        ]);
+      },
+    );
 
     test('they count against the same limit', () async {
       accessibility.holdGestures = true;
@@ -202,9 +226,29 @@ void main() {
       expect(accessibility.globalActions, isEmpty);
     });
 
+    test('a recents counts against that limit too', () async {
+      accessibility.holdGestures = true;
+      submit('running');
+      await settle();
+
+      for (var i = 0; i < RemoteControlCommandQueue.maxPending; i++) {
+        queue.submit(RemoteRecentsCommand(id: 'queued-$i'), acks.add);
+      }
+      queue.submit(const RemoteRecentsCommand(id: 'one-too-many'), acks.add);
+
+      expect(acks, const [
+        RemoteControlAck.failure(
+          'one-too-many',
+          RemoteControlError.gestureRejected,
+        ),
+      ]);
+      expect(accessibility.globalActions, isEmpty);
+    });
+
     for (final (command, action) in const [
       (RemoteBackCommand(id: 'n'), 'back'),
       (RemoteHomeCommand(id: 'n'), 'home'),
+      (RemoteRecentsCommand(id: 'n'), 'recents'),
     ]) {
       for (final (outcome, ack) in const [
         (RemoteGestureOutcome.completed, RemoteControlAck.success('n')),

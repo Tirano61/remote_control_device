@@ -8,8 +8,8 @@ import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 
 /**
- * Puts a touch on the screen, or presses Back or Home. It holds no policy, reads nothing and asks
- * for nothing else.
+ * Puts a touch on the screen, or presses Back, Home or Recents. It holds no policy, reads nothing
+ * and asks for nothing else.
  *
  * Only the user can enable it, in Android's accessibility settings, and that says the *service*
  * may exist. It says nothing about any assistance: the service stays connected between sessions,

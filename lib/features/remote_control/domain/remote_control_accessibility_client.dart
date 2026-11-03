@@ -5,10 +5,10 @@
 /// lets a command through to it.
 enum RemoteControlAccessibilityStatus { available, unavailable }
 
-/// What became of a gesture, or of a Back or a Home.
+/// What became of a gesture, or of a Back, a Home or a Recents.
 enum RemoteGestureOutcome {
-  /// Android reported the gesture completed. For a Back or a Home it reported
-  /// taking the action: it has no way of saying when that action ends.
+  /// Android reported the gesture completed. For a Back, a Home or a Recents it
+  /// reported taking the action: it has no way of saying when that action ends.
   completed,
 
   /// Android cancelled or refused it.
@@ -58,6 +58,11 @@ abstract interface class RemoteControlAccessibilityClient {
   ///
   /// Never throws. Like [tap], it runs whatever it is given.
   Future<RemoteGestureOutcome> performHome();
+
+  /// Android's Recents, and completes when Android says whether it took it.
+  ///
+  /// Never throws. Like [tap], it runs whatever it is given.
+  Future<RemoteGestureOutcome> performRecents();
 
   /// Opens Android's accessibility settings. Never throws.
   Future<void> openAccessibilitySettings();

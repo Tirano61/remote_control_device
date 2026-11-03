@@ -30,8 +30,9 @@ Frames are UTF-8 text holding one JSON object. Binary frames are ignored.
 | `swipe` | one straight stroke | `dispatchGesture` |
 | `back` | Android's Back | `performGlobalAction(GLOBAL_ACTION_BACK)` |
 | `home` | Android's Home | `performGlobalAction(GLOBAL_ACTION_HOME)` |
+| `recents` | Android's Recents | `performGlobalAction(GLOBAL_ACTION_RECENTS)` |
 
-All four travel on the same channel, get the same `ack`, need the same `ACTIVE`
+All five travel on the same channel, get the same `ack`, need the same `ACTIVE`
 session and the same accessibility service, and wait in the same queue.
 
 ### `tap` — web to device
@@ -105,7 +106,7 @@ continued across commands do not exist.
 The rules on values are a tap's too: refused, never clamped, and unknown extra
 fields ignored. The ack is the same, with the same errors.
 
-### `back` and `home` — web to device
+### `back`, `home` and `recents` — web to device
 
 ```json
 {
@@ -123,10 +124,14 @@ fields ignored. The ack is the same, with the same errors.
 }
 ```
 
+```json
+{"v":1,"type":"recents","id":"recents-123"}
+```
+
 | Field | Type | Rule |
 | --- | --- | --- |
 | `v` | integer | `1` |
-| `type` | string | `"back"` or `"home"`, exactly |
+| `type` | string | `"back"`, `"home"` or `"recents"`, exactly |
 | `id` | string | non-empty; chosen by the sender and opaque to the device |
 
 They name no position and no duration, because they are not touches: no
@@ -154,17 +159,25 @@ Exactly one for each command that has an id, on the same channel.
 { "v": 1, "type": "ack", "id": "back-123", "ok": false, "error": "gesture_rejected" }
 ```
 
+```json
+{ "v": 1, "type": "ack", "id": "recents-123", "ok": true }
+```
+
+```json
+{ "v": 1, "type": "ack", "id": "recents-123", "ok": false, "error": "gesture_rejected" }
+```
+
 What `ok: true` promises depends on the command, because Android promises different
 things:
 
 ```text
-tap, swipe    Android reported the gesture completed, not merely that it was requested
-back, home    Android accepted the global action
+tap, swipe             Android reported the gesture completed, not merely that it was requested
+back, home, recents    Android accepted the global action
 ```
 
-`performGlobalAction` returns a boolean and has no callback. A `back` or `home` that
-was acknowledged may still be animating, and nothing says the screen ended up
-anywhere in particular. It may also have had no visible effect: Back with nothing to
+`performGlobalAction` returns a boolean and has no callback. A `back`, `home` or
+`recents` that was acknowledged may still be animating, and nothing says the screen
+ended up anywhere in particular. It may also have had no visible effect: Back with nothing to
 go back to, for instance.
 
 | `error` | Meaning |
@@ -175,8 +188,8 @@ go back to, for instance.
 | `invalid_command` | malformed, with a readable `id` |
 | `unsupported_command` | another `v`, or an unknown `type`, with a readable `id` |
 
-`gesture_rejected` is older than `back` and `home`, and its name is narrower than
-what it now covers. It stays as it is: v1 senders already depend on it, and a new
+`gesture_rejected` is older than `back`, `home` and `recents`, and its name is
+narrower than what it now covers. It stays as it is: v1 senders already depend on it, and a new
 code would be a change to the protocol for no gain to them.
 
 No stack trace or platform message ever goes on the channel. An ack may never
@@ -218,8 +231,8 @@ and does not run. The web activates the session once it sees its own connection 
 so it should wait for that before sending.
 
 The video is not one of the conditions either. If `MediaProjection` was refused or
-failed, a `back` or `home` still runs. A `tap` or `swipe` would too, though without
-a picture the technician has little to aim at.
+failed, a `back`, `home` or `recents` still runs. A `tap` or `swipe` would too,
+though without a picture the technician has little to aim at.
 
 ### Consent
 
@@ -228,7 +241,7 @@ things. The service stays enabled between sessions, so it says nothing about
 whether anyone may touch this tablet today. It is **not** one of the conditions
 above: what authorises a command is the `ACTIVE` session, which exists only after
 the user accepted that technician. Outside one, no command runs: no gesture, no
-Back and no Home.
+Back, no Home and no Recents.
 
 Pressing FINALIZAR ASISTENCIA stops commands immediately, without waiting for the
 backend to confirm the close.
@@ -241,15 +254,17 @@ start under a swipe that has not finished. Up to 16 wait, of any kind; beyond th
 they are refused with `gesture_rejected`.
 
 ```text
-tap A, swipe B, tap C             A runs; B waits; A ends; B runs; C waits; B ends; C runs
-tap A, swipe B, back C, home D    the same: A, then B, then C, then D
+tap A, swipe B, tap C                   A runs; B waits; A ends; B runs; C waits; B ends; C runs
+tap A, swipe B, back C, home D          the same: A, then B, then C, then D
+tap, swipe, back, home, recents, tap    the same, in exactly that order
 ```
 
 Nothing is estimated. The queue waits for each answer, however long it takes, so a
 command holds the line for as long as it really runs: a swipe for its `durationMs`,
-a `back` or `home` only until `performGlobalAction` returns. The next command then
-starts at once, while the system may still be animating, so a sender that wants to
-tap on what a `home` leads to should wait for the picture to show it.
+a `back`, `home` or `recents` only until `performGlobalAction` returns. The next
+command then starts at once, while the system may still be animating, so a sender
+that wants to tap on what a `home` or `recents` leads to should wait for the picture
+to show it.
 
 ```text
                                      running gesture   queued commands
@@ -259,7 +274,7 @@ peer connection failed or replaced   finishes          dropped; no ack possible
 ```
 
 A gesture already handed to Android cannot be recalled. Nothing starts after it.
-Queued `back` and `home` commands are dropped with the rest.
+Queued `back`, `home` and `recents` commands are dropped with the rest.
 
 A peer connection replaced for the same session keeps working as before: the next
 connection receives commands once its own `control` channel is open.
@@ -291,14 +306,15 @@ remote_control/accessibility
                                    -> the same answers
   performBack                      -> "completed" | "rejected" | "busy" | "unavailable"
   performHome                      -> the same answers
+  performRecents                   -> the same answers
   openAccessibilitySettings
   accessibilityServiceAvailabilityChanged (Android to Dart) bool
 ```
 
 `performTap` and `performSwipe` are answered from the gesture's
-`GestureResultCallback`, so the Dart future is the gesture. `performBack` and
-`performHome` take no arguments, and are answered from what `performGlobalAction`
-returns: `"completed"` is `true` and `"rejected"` is `false`. Dart never sees an
+`GestureResultCallback`, so the Dart future is the gesture. `performBack`,
+`performHome` and `performRecents` take no arguments, and are answered from what
+`performGlobalAction` returns: `"completed"` is `true` and `"rejected"` is `false`. Dart never sees an
 Android action code. Dart gives up after five seconds, as a guard against a bridge
 that never answers. The longest swipe takes two, so a valid one finishes well inside
 that.
@@ -358,16 +374,19 @@ so that swipe does not run. It is answered `"invalid"` on the bridge, and so
 `gesture_rejected` on the wire. Only the device can know this, because it depends
 on the size of the screen.
 
-### Back and Home
+### Back, Home and Recents
 
 ```text
-back    AccessibilityService.performGlobalAction(GLOBAL_ACTION_BACK)
-home    AccessibilityService.performGlobalAction(GLOBAL_ACTION_HOME)
+back       AccessibilityService.performGlobalAction(GLOBAL_ACTION_BACK)
+home       AccessibilityService.performGlobalAction(GLOBAL_ACTION_HOME)
+recents    AccessibilityService.performGlobalAction(GLOBAL_ACTION_RECENTS)
 ```
 
-Not a `KeyEvent`, not `input keyevent`, and not a gesture at some coordinates. No
-stroke is built and the display is not read, so they do not depend on geometry, on
-rotation or on `MediaProjection`.
+Not a `KeyEvent`, not `input keyevent`, not a gesture at some coordinates, and not an
+intent to the launcher. No stroke is built and the display is not read, so they do
+not depend on geometry, on rotation or on `MediaProjection`. A `recents` runs with no
+video at all, and its `ok: true` confirms only that Android accepted the action, not
+that the overview has finished opening.
 
 With the service not connected, `performGlobalAction` is not called and the answer
 is `"unavailable"`. The session and the video carry on regardless.
@@ -401,8 +420,8 @@ in Settings, bound by the system and connected, twice. It is pinned by
 `accessibility_service_config.xml` asks for `canPerformGestures` and nothing more:
 no event types, no `canRetrieveWindowContent`, no
 `flagRetrieveInteractiveWindows`. The service cannot read what is on screen.
-`performGlobalAction` requires no capability of its own, so `back` and `home` did
-not widen this.
+`performGlobalAction` requires no capability of its own, so `back`, `home` and
+`recents` did not widen this, and added no permission.
 
 Available means connected. If Android disconnects the service, the status becomes
 unavailable, a running gesture is answered as cancelled, and later commands get
@@ -485,13 +504,15 @@ Settings.
 
 ### What has been seen on a device
 
-`tap` and `swipe` have been validated on the tablet, end to end.
+`tap`, `swipe`, `back` and `home` have been validated on the tablet, end to end. The
+record for `back` and `home` is in `remote_control_web`, in its
+`docs/CONTROL_CHANNEL.md`.
 
-`back` and `home` have not: the web does not send them yet, so what stands behind
-them is Dart and JVM unit tests. Those stop at the action code handed to
-`performGlobalAction`. The part only a device can show is that Android goes back or
-home when it gets it. Do not stand in for the web with `adb shell input keyevent`:
-that exercises none of this path.
+`recents` has not: the web does not send it yet, so what stands behind it is Dart and
+JVM unit tests. Those stop at the action code handed to `performGlobalAction`. The
+part only a device can show is that Android opens the overview when it gets it. Do
+not stand in for the web with `adb shell input keyevent`: that exercises none of this
+path.
 
 ## Logging
 
@@ -512,12 +533,16 @@ that exercises none of this path.
 [webrtc] home accepted
 [webrtc] home accepted by android <id>
 [webrtc] home rejected <id> (gestureRejected)
+[webrtc] control command received: recents <id>
+[webrtc] recents accepted
+[webrtc] recents accepted by android <id>
+[webrtc] recents rejected <id> (gestureRejected)
 [webrtc] control message dropped: it belongs to a previous negotiation
 ```
 
 `<name> accepted` is the session gate letting the command through, for every command.
-`accepted by android` is what `back` and `home` log where a gesture logs `completed`,
-since that is all Android says about them.
+`accepted by android` is what `back`, `home` and `recents` log where a gesture logs
+`completed`, since that is all Android says about them.
 
 and natively, under the logcat tag `RemoteControlInput`:
 
@@ -527,6 +552,7 @@ tap completed / cancelled / rejected / busy / invalid / unavailable
 swipe completed / cancelled / rejected / busy / invalid / unavailable
 back accepted / rejected / busy / unavailable
 home accepted / rejected / busy / unavailable
+recents accepted / rejected / busy / unavailable
 ```
 
 Coordinates are not logged. Never: frames, SDP, ICE lines, tokens, secrets.
