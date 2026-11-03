@@ -180,6 +180,139 @@ void main() {
     expect(repository.acceptCount, 0);
   });
 
+  group('the disclosure before PERMITIR', () {
+    /// Everything the disclosure says, so the checks below ask what it conveys
+    /// and not how one sentence is worded.
+    String disclosure(WidgetTester tester) => tester
+        .widgetList<Text>(
+          find.descendant(
+            of: find.byKey(SupportPanel.controlDisclosureKey),
+            matching: find.byType(Text),
+          ),
+        )
+        .map((text) => text.data ?? '')
+        .join(' ')
+        .toLowerCase();
+
+    testWidgets('says what the technician can do, text input included', (
+      tester,
+    ) async {
+      createBlocs();
+      await tester.pumpWidget(harness());
+      await connect(tester);
+      await syncTo(tester, assignedRequest);
+
+      final said = disclosure(tester);
+      expect(said, contains('pantalla'));
+      expect(said, contains('tocar'));
+      expect(said, contains('deslizar'));
+      expect(said, contains('atrás'));
+      expect(said, contains('inicio'));
+      expect(said, contains('recientes'));
+      expect(said, contains('introducir texto'));
+      expect(said, contains('campo'));
+      expect(said, contains('seleccionado'));
+      expect(said, contains('reemplaza'));
+    });
+
+    testWidgets('says what the system does not do, and for how long', (
+      tester,
+    ) async {
+      createBlocs();
+      await tester.pumpWidget(harness());
+      await connect(tester);
+      await syncTo(tester, assignedRequest);
+
+      final said = disclosure(tester);
+      expect(said, contains('durante esta asistencia'));
+      expect(said, contains('no envía'));
+      expect(said, contains('contenido actual'));
+      expect(said, contains('de forma continua'));
+      expect(said, contains('fuera de una asistencia'));
+      // The picture does show what a field displays. Saying the content never
+      // reaches the technician without that exception would be false.
+      expect(said, contains('se vea en la pantalla compartida'));
+    });
+
+    testWidgets('promises nothing about passwords and names nothing internal', (
+      tester,
+    ) async {
+      createBlocs();
+      await tester.pumpWidget(harness());
+      await connect(tester);
+      await syncTo(tester, assignedRequest);
+
+      final said = disclosure(tester);
+      // A password field takes a set_text like any other field.
+      expect(said, isNot(contains('contraseña')));
+      for (final internal in const [
+        'accessibilitynodeinfo',
+        'focus_input',
+        'action_set_text',
+        'canretrievewindowcontent',
+        'set_text',
+      ]) {
+        expect(said, isNot(contains(internal)));
+      }
+    });
+
+    testWidgets('is on screen above the buttons, and decides nothing', (
+      tester,
+    ) async {
+      createBlocs();
+      await tester.pumpWidget(harness());
+      await connect(tester);
+      await syncTo(tester, assignedRequest);
+
+      final bottom = tester
+          .getBottomLeft(find.byKey(SupportPanel.controlDisclosureKey))
+          .dy;
+      expect(
+        bottom,
+        lessThan(
+          tester.getTopLeft(find.byKey(SupportPanel.acceptButtonKey)).dy,
+        ),
+      );
+      expect(
+        bottom,
+        lessThan(
+          tester.getTopLeft(find.byKey(SupportPanel.rejectButtonKey)).dy,
+        ),
+      );
+      expect(find.byType(Tooltip), findsNothing);
+      // No second consent to tick: PERMITIR is the one answer.
+      expect(find.byType(Checkbox), findsNothing);
+
+      // Reading it for as long as it takes changes nothing.
+      await tester.pump(const Duration(minutes: 10));
+      await settle(tester);
+      expect(repository.acceptCount, 0);
+      expect(repository.rejectCount, 0);
+      expect(find.byKey(SupportPanel.acceptButtonKey), findsOneWidget);
+    });
+
+    testWidgets('belongs to the prompt, not to the states around it', (
+      tester,
+    ) async {
+      createBlocs();
+      await tester.pumpWidget(harness());
+      await connect(tester);
+
+      await syncTo(tester, null);
+      expect(find.byKey(SupportPanel.controlDisclosureKey), findsNothing);
+
+      await syncTo(tester, waitingRequest);
+      expect(find.byKey(SupportPanel.controlDisclosureKey), findsNothing);
+
+      await syncTo(tester, assignedRequest);
+      expect(find.byKey(SupportPanel.controlDisclosureKey), findsOneWidget);
+
+      await tester.tap(find.byKey(SupportPanel.acceptButtonKey));
+      await settle(tester);
+      expect(find.byKey(SupportPanel.controlDisclosureKey), findsNothing);
+    });
+  });
+
   testWidgets('PERMITIR is what authorises the technician', (tester) async {
     createBlocs();
     await tester.pumpWidget(harness());
@@ -206,6 +339,21 @@ void main() {
 
     expect(repository.rejectCount, 1);
     expect(repository.acceptCount, 0);
+    expect(find.byKey(SupportPanel.requestButtonKey), findsOneWidget);
+  });
+
+  testWidgets('CANCELAR still withdraws after PERMITIR', (tester) async {
+    createBlocs();
+    await tester.pumpWidget(harness());
+    await connect(tester);
+    await syncTo(tester, assignedRequest);
+
+    await tester.tap(find.byKey(SupportPanel.acceptButtonKey));
+    await settle(tester);
+    await tester.tap(find.byKey(SupportPanel.cancelButtonKey));
+    await settle(tester);
+
+    expect(repository.cancelCount, 1);
     expect(find.byKey(SupportPanel.requestButtonKey), findsOneWidget);
   });
 
