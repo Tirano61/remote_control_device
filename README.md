@@ -97,8 +97,10 @@ permanent credential whenever the app restarts.
 
 Support requests, remote sessions, signaling and WebRTC are in place too. During
 an assistance the technician sees the remote screen (MediaProjection) and can send
-`tap`, `swipe`, `back`, `home` and `recents` (AccessibilityService). `recents` has only
-been tested on the Android side so far, because the web does not send it yet. See
+`tap`, `swipe`, `back`, `home`, `recents` and `set_text` (AccessibilityService).
+`recents` and `set_text` have only been tested on the Android side so far, because the
+web does not send them yet. `set_text` is why the service can retrieve window content,
+which it uses only to find the focused field during an authorised assistance. See
 [docs/webrtc/CONTROL_CHANNEL.md](docs/webrtc/CONTROL_CHANNEL.md).
 
 Not implemented yet: kiosk mode.
