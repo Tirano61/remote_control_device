@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:remote_control_device/features/remote_control/data/remote_control_channel_codec.dart';
 import 'package:remote_control_device/features/remote_control/domain/entities/remote_control_ack.dart';
@@ -334,6 +335,13 @@ class FakeWebRtcDataChannel implements WebRtcDataChannel {
   /// A well-formed recents arriving as a text frame.
   void pushRecents(String id) => pushFrame(
     WebRtcDataChannelMessage.text('{"v":1,"type":"recents","id":"$id"}'),
+  );
+
+  /// A well-formed set_text arriving as a text frame.
+  void pushSetText(String id, String text) => pushFrame(
+    WebRtcDataChannelMessage.text(
+      jsonEncode({'v': 1, 'type': 'set_text', 'id': id, 'text': text}),
+    ),
   );
 }
 

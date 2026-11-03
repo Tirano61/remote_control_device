@@ -56,12 +56,32 @@ class AccessibilityServiceDeclarationTest {
     }
 
     @Test
-    fun `it can perform gestures and nothing else`() {
+    fun `it can perform gestures and retrieve window content, and nothing else`() {
         assertEquals("true", config.androidAttribute("canPerformGestures"))
+        assertEquals("true", config.androidAttribute("canRetrieveWindowContent"))
 
-        assertFalse(config.hasAndroidAttribute("canRetrieveWindowContent"))
+        assertFalse(config.hasAndroidAttribute("canRequestTouchExplorationMode"))
+        assertFalse(config.hasAndroidAttribute("canRequestFilterKeyEvents"))
+        assertFalse(config.hasAndroidAttribute("canTakeScreenshot"))
+    }
+
+    @Test
+    fun `it observes no events and widens nothing with flags`() {
+        // No attribute at all means no event is delivered and no flag is set, so typeAllMask,
+        // flagIncludeNotImportantViews, flagReportViewIds and flagRetrieveInteractiveWindows
+        // cannot be in effect.
         assertFalse(config.hasAndroidAttribute("accessibilityEventTypes"))
         assertFalse(config.hasAndroidAttribute("accessibilityFlags"))
+
+        val source = File("src/main/res/xml/accessibility_service_config.xml").readText()
+        for (excluded in listOf(
+            "typeAllMask",
+            "flagIncludeNotImportantViews",
+            "flagReportViewIds",
+            "flagRetrieveInteractiveWindows",
+        )) {
+            assertFalse(excluded, source.contains(excluded))
+        }
     }
 
     @Test
@@ -69,6 +89,18 @@ class AccessibilityServiceDeclarationTest {
         assertTrue(service.androidAttribute("label").startsWith("@string/"))
         assertNotNull(config.androidAttribute("description"))
         assertTrue(config.androidAttribute("description").startsWith("@string/"))
+    }
+
+    @Test
+    fun `the description says what the service can do now`() {
+        val description = elements(parse("src/main/res/values/strings.xml"), "string")
+            .single { it.getAttribute("name") == "remote_control_accessibility_description" }
+            .textContent
+
+        assertTrue(description.contains("campo enfocado"))
+        assertTrue(description.contains("ventana activa"))
+        // What it said before canRetrieveWindowContent, and is no longer the whole truth.
+        assertFalse(description.contains("No lee el contenido"))
     }
 
     private fun parse(path: String): Document =

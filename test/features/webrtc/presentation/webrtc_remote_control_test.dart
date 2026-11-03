@@ -755,6 +755,303 @@ void main() {
     });
   }
 
+  // `accessibility.setTexts` being empty is what "the window was not consulted"
+  // means here: resolving the focus happens behind that call and nowhere else.
+  group('a set_text', () {
+    test('ACTIVE, this peer, channel open: the text goes through', () async {
+      final channel = await reachOpenChannel();
+
+      channel.pushSetText('text-1', 'Hola mundo');
+      await settle();
+
+      expect(accessibility.setTexts, ['Hola mundo']);
+      expect(accessibility.taps, isEmpty);
+      expect(accessibility.globalActions, isEmpty);
+      expect(channel.sentAcks, const [RemoteControlAck.success('text-1')]);
+    });
+
+    test('an empty text goes through: it empties the field', () async {
+      final channel = await reachOpenChannel();
+
+      channel.pushSetText('text-1', '');
+      await settle();
+
+      expect(accessibility.setTexts, ['']);
+      expect(channel.sentAcks, const [RemoteControlAck.success('text-1')]);
+    });
+
+    test('unicode reaches the service uncorrupted', () async {
+      final channel = await reachOpenChannel();
+
+      channel.pushSetText('a', 'áéíóú ñ');
+      channel.pushSetText('b', 'Hola 👋\n');
+      await settle();
+
+      expect(accessibility.setTexts, ['áéíóú ñ', 'Hola 👋\n']);
+    });
+
+    test('CONNECTING: session_not_active, focus not looked for', () async {
+      final channel = await reachOpenChannel(active: false);
+
+      channel.pushSetText('text-1', 'Hola');
+      await settle();
+
+      expect(accessibility.setTexts, isEmpty);
+      expect(channel.sentAcks, const [
+        RemoteControlAck.failure('text-1', RemoteControlError.sessionNotActive),
+      ]);
+    });
+
+    test(
+      'an enabled service with no ACTIVE session consults nothing',
+      () async {
+        expect(
+          accessibility.status,
+          RemoteControlAccessibilityStatus.available,
+        );
+        final channel = await reachOpenChannel(active: false);
+
+        channel.pushSetText('text-1', 'Hola');
+        await settle();
+
+        expect(accessibility.gestures, isEmpty);
+      },
+    );
+
+    test('ACTIVE for another session is not this session', () async {
+      final channel = await reachOpenChannel(active: false);
+      bloc.add(
+        const WebRtcActiveRemoteSessionChanged(testOtherRemoteSessionId),
+      );
+      await settle();
+
+      channel.pushSetText('text-1', 'Hola');
+      await settle();
+
+      expect(accessibility.setTexts, isEmpty);
+      expect(
+        channel.sentAcks.single.error,
+        RemoteControlError.sessionNotActive,
+      );
+    });
+
+    test('arriving after the session closed writes nothing', () async {
+      final channel = await reachOpenChannel();
+      bloc.add(const WebRtcActiveRemoteSessionChanged(null));
+      await settle();
+
+      channel.pushSetText('late', 'Hola');
+      await settle();
+
+      expect(accessibility.setTexts, isEmpty);
+      expect(channel.sentAcks, const [
+        RemoteControlAck.failure('late', RemoteControlError.sessionNotActive),
+      ]);
+    });
+
+    test('on a channel that is not open it writes nothing', () async {
+      final channel = await reachOpenChannel();
+      channel.pushState(WebRtcDataChannelState.closing);
+      await settle();
+
+      channel.pushSetText('text-1', 'Hola');
+      await settle();
+
+      expect(accessibility.setTexts, isEmpty);
+      expect(channel.sentAcks, isEmpty);
+    });
+
+    test('a malformed one is answered and never runs', () async {
+      final channel = await reachOpenChannel();
+
+      channel.pushFrame(
+        const WebRtcDataChannelMessage.text(
+          '{"v":1,"type":"set_text","id":"none"}',
+        ),
+      );
+      channel.pushSetText('long', 'a' * 4097);
+      await settle();
+
+      expect(accessibility.setTexts, isEmpty);
+      expect(channel.sentAcks, const [
+        RemoteControlAck.failure('none', RemoteControlError.invalidCommand),
+        RemoteControlAck.failure('long', RemoteControlError.invalidCommand),
+      ]);
+    });
+
+    for (final (outcome, error) in const [
+      (
+        RemoteTextOutcome.targetUnavailable,
+        RemoteControlError.textTargetUnavailable,
+      ),
+      (RemoteTextOutcome.rejected, RemoteControlError.textRejected),
+      (
+        RemoteTextOutcome.unavailable,
+        RemoteControlError.accessibilityUnavailable,
+      ),
+    ]) {
+      test('$outcome reaches the ack as ${error.name}', () async {
+        final channel = await reachOpenChannel();
+        accessibility.textOutcome = outcome;
+
+        channel.pushSetText('text-1', 'Hola');
+        await settle();
+
+        expect(channel.sentAcks, [RemoteControlAck.failure('text-1', error)]);
+      });
+    }
+
+    test('nothing is acknowledged before Android answers', () async {
+      final channel = await reachOpenChannel();
+      accessibility.holdGestures = true;
+
+      channel.pushSetText('text-1', 'Hola');
+      await settle();
+
+      expect(accessibility.setTexts, hasLength(1));
+      expect(channel.sentAcks, isEmpty);
+
+      accessibility.finishGesture();
+      await settle();
+
+      expect(channel.sentAcks, const [RemoteControlAck.success('text-1')]);
+    });
+
+    test('the session ending drops it before it starts', () async {
+      final channel = await reachOpenChannel();
+      accessibility.holdGestures = true;
+      channel.pushTap('a');
+      channel.pushSetText('b', 'Hola');
+      await settle();
+
+      bloc.add(const WebRtcActiveRemoteSessionChanged(null));
+      await settle();
+      accessibility.finishGesture();
+      await settle();
+
+      expect(accessibility.setTexts, isEmpty);
+      expect(channel.sentAcks, const [
+        RemoteControlAck.failure('b', RemoteControlError.sessionNotActive),
+        RemoteControlAck.success('a'),
+      ]);
+    });
+
+    test('does not need the screen to be shared', () async {
+      screenCapture.result = const ScreenCaptureUnavailable(
+        ScreenCaptureFailure.captureRefused,
+      );
+      final channel = await reachOpenChannel();
+      expect(screenCapture.isActive, isFalse);
+
+      channel.pushSetText('text-1', 'Hola');
+      await settle();
+
+      expect(accessibility.setTexts, ['Hola']);
+      expect(channel.sentAcks, const [RemoteControlAck.success('text-1')]);
+    });
+
+    test('the tap that gives the focus runs first, and is answered', () async {
+      final channel = await reachOpenChannel();
+      accessibility.holdGestures = true;
+
+      channel.pushTap('tap', x: 0.1);
+      channel.pushSetText('text', 'Hola');
+      await settle();
+      expect(accessibility.gestures, [(0.1, 0.5)]);
+      expect(channel.sentAcks, isEmpty);
+
+      accessibility.finishGesture();
+      await settle();
+      expect(channel.sentAcks, const [RemoteControlAck.success('tap')]);
+      expect(accessibility.gestures, [(0.1, 0.5), ('set_text', 'Hola')]);
+
+      accessibility.finishGesture();
+      await settle();
+      expect(channel.sentAcks, const [
+        RemoteControlAck.success('tap'),
+        RemoteControlAck.success('text'),
+      ]);
+    });
+
+    test('tap, set_text, home run in order through one queue', () async {
+      final channel = await reachOpenChannel();
+      accessibility.holdGestures = true;
+
+      channel.pushTap('a', x: 0.1);
+      channel.pushSetText('b', 'Hola');
+      channel.pushHome('c');
+      await settle();
+
+      final expected = <Object>[(0.1, 0.5), ('set_text', 'Hola'), 'home'];
+      expect(accessibility.gestures, expected.take(1));
+      for (var finished = 1; finished < expected.length; finished++) {
+        accessibility.finishGesture();
+        await settle();
+        expect(accessibility.gestures, expected.take(finished + 1));
+        expect(channel.sentAcks, hasLength(finished));
+      }
+
+      accessibility.finishGesture();
+      await settle();
+      expect(channel.sentAcks, const [
+        RemoteControlAck.success('a'),
+        RemoteControlAck.success('b'),
+        RemoteControlAck.success('c'),
+      ]);
+    });
+
+    group('generations', () {
+      test('a message from a previous generation writes nothing', () async {
+        final channel = await reachOpenChannel();
+
+        bloc.add(
+          const WebRtcControlMessageReceived(
+            0,
+            RemoteControlCommandReceived(
+              RemoteSetTextCommand(id: 'stale', text: 'Hola'),
+            ),
+          ),
+        );
+        await settle();
+
+        expect(accessibility.setTexts, isEmpty);
+        expect(channel.sentAcks, isEmpty);
+      });
+
+      test('the channel of a replaced peer delivers nothing', () async {
+        final oldChannel = await reachOpenChannel();
+
+        factory.last.pushConnectionState(WebRtcConnectionState.failed);
+        await settle();
+        bloc.add(WebRtcOfferReceived(offerFor(sdp: testSecondOfferSdp)));
+        await settle();
+        expect(factory.createCount, 2);
+
+        oldChannel.pushSetText('stale', 'Hola');
+        await settle();
+
+        expect(accessibility.setTexts, isEmpty);
+        expect(oldChannel.sentAcks, isEmpty);
+      });
+
+      test('one queued before the peer failed never runs', () async {
+        final channel = await reachOpenChannel();
+        accessibility.holdGestures = true;
+        channel.pushTap('running');
+        channel.pushSetText('queued', 'Hola');
+        await settle();
+
+        factory.last.pushConnectionState(WebRtcConnectionState.failed);
+        await settle();
+        accessibility.finishGesture();
+        await settle();
+
+        expect(accessibility.setTexts, isEmpty);
+        expect(channel.sentAcks, isEmpty);
+      });
+    });
+  });
+
   group('a closed channel', () {
     test('gets no late ack', () async {
       final channel = await reachOpenChannel();

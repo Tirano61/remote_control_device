@@ -22,6 +22,7 @@ abstract final class RemoteControlChannelCodec {
   static const String _backType = 'back';
   static const String _homeType = 'home';
   static const String _recentsType = 'recents';
+  static const String _setTextType = 'set_text';
   static const String _ackType = 'ack';
 
   /// Decodes a frame, or answers `null` when there is nothing to report.
@@ -68,6 +69,7 @@ abstract final class RemoteControlChannelCodec {
       _recentsType => RemoteControlCommandReceived(
         RemoteRecentsCommand(id: id),
       ),
+      _setTextType => _decodeSetText(id, payload),
       _ => _rejected(id, RemoteControlError.unsupportedCommand),
     };
   }
@@ -116,6 +118,22 @@ abstract final class RemoteControlChannelCodec {
     );
   }
 
+  /// The text is kept exactly as it arrived: no trimming and no normalizing. An
+  /// empty one is valid, and empties the field.
+  static RemoteControlInboundMessage _decodeSetText(
+    String id,
+    Map<String, dynamic> payload,
+  ) {
+    final text = payload['text'];
+    if (text is! String ||
+        text.length > RemoteSetTextCommand.maxRemoteTextLength) {
+      return _rejected(id, RemoteControlError.invalidCommand);
+    }
+    return RemoteControlCommandReceived(
+      RemoteSetTextCommand(id: id, text: text),
+    );
+  }
+
   static String encodeAck(RemoteControlAck ack) => jsonEncode(<String, Object>{
     'v': protocolVersion,
     'type': _ackType,
@@ -154,5 +172,7 @@ abstract final class RemoteControlChannelCodec {
     RemoteControlError.gestureRejected => 'gesture_rejected',
     RemoteControlError.invalidCommand => 'invalid_command',
     RemoteControlError.unsupportedCommand => 'unsupported_command',
+    RemoteControlError.textTargetUnavailable => 'text_target_unavailable',
+    RemoteControlError.textRejected => 'text_rejected',
   };
 }

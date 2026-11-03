@@ -31,8 +31,16 @@ class FakeRemoteControlAccessibilityClient
   /// action" means in these tests.
   final List<String> globalActions = [];
 
-  /// [taps], [swipes] and [globalActions] together, in the order they reached
-  /// the service.
+  /// What every `set_text` answers once it is let through.
+  RemoteTextOutcome textOutcome = RemoteTextOutcome.completed;
+
+  /// Every text that actually reached the service. Its being empty is what "the
+  /// active window was not consulted" means on this side of the bridge: looking
+  /// at the window happens behind this call and nowhere else.
+  final List<String> setTexts = [];
+
+  /// [taps], [swipes], [globalActions] and [setTexts] together, in the order
+  /// they reached the service. A text appears as `('set_text', text)`.
   final List<Object> gestures = [];
 
   int settingsOpened = 0;
@@ -89,6 +97,14 @@ class FakeRemoteControlAccessibilityClient
 
   @override
   Future<RemoteGestureOutcome> performRecents() => _globalAction('recents');
+
+  @override
+  Future<RemoteTextOutcome> performSetText(String text) async {
+    setTexts.add(text);
+    gestures.add(('set_text', text));
+    if (holdGestures) await _answer();
+    return textOutcome;
+  }
 
   @override
   Future<void> openAccessibilitySettings() async => settingsOpened++;

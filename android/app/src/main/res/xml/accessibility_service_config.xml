@@ -1,7 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Gestures and nothing else. No accessibilityEventTypes, so no event is ever delivered, and no
-     canRetrieveWindowContent, so nothing on screen can be read: a tap needs neither. -->
+<!-- Gestures, and looking at the active window to find what has input focus for a set_text, which
+     happens only while that command runs. No accessibilityEventTypes, so no event is ever delivered
+     and nothing watches the screen, and no accessibilityFlags, so nothing beyond the active window
+     is opened up. -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:canPerformGestures="true"
+    android:canRetrieveWindowContent="true"
     android:description="@string/remote_control_accessibility_description" />

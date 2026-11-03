@@ -69,8 +69,10 @@ class RemoteControlCommandQueue {
   }
 
   Future<RemoteControlAck> _execute(RemoteControlCommand command) async {
-    final outcome = await switch (command) {
-      RemoteTapCommand(:final x, :final y) => _accessibility.tap(x, y),
+    final error = await switch (command) {
+      RemoteTapCommand(:final x, :final y) => _gesture(
+        _accessibility.tap(x, y),
+      ),
       RemoteSwipeCommand(
         :final startX,
         :final startY,
@@ -78,29 +80,46 @@ class RemoteControlCommandQueue {
         :final endY,
         :final durationMs,
       ) =>
-        _accessibility.swipe(
-          startX: startX,
-          startY: startY,
-          endX: endX,
-          endY: endY,
-          durationMs: durationMs,
+        _gesture(
+          _accessibility.swipe(
+            startX: startX,
+            startY: startY,
+            endX: endX,
+            endY: endY,
+            durationMs: durationMs,
+          ),
         ),
-      RemoteBackCommand() => _accessibility.performBack(),
-      RemoteHomeCommand() => _accessibility.performHome(),
-      RemoteRecentsCommand() => _accessibility.performRecents(),
-    };
-    return switch (outcome) {
-      RemoteGestureOutcome.completed => RemoteControlAck.success(command.id),
-      RemoteGestureOutcome.rejected => RemoteControlAck.failure(
-        command.id,
-        RemoteControlError.gestureRejected,
-      ),
-      RemoteGestureOutcome.unavailable => RemoteControlAck.failure(
-        command.id,
-        RemoteControlError.accessibilityUnavailable,
+      RemoteBackCommand() => _gesture(_accessibility.performBack()),
+      RemoteHomeCommand() => _gesture(_accessibility.performHome()),
+      RemoteRecentsCommand() => _gesture(_accessibility.performRecents()),
+      RemoteSetTextCommand(:final text) => _setText(
+        _accessibility.performSetText(text),
       ),
     };
+    return error == null
+        ? RemoteControlAck.success(command.id)
+        : RemoteControlAck.failure(command.id, error);
   }
+
+  Future<RemoteControlError?> _gesture(
+    Future<RemoteGestureOutcome> running,
+  ) async => switch (await running) {
+    RemoteGestureOutcome.completed => null,
+    RemoteGestureOutcome.rejected => RemoteControlError.gestureRejected,
+    RemoteGestureOutcome.unavailable =>
+      RemoteControlError.accessibilityUnavailable,
+  };
+
+  Future<RemoteControlError?> _setText(
+    Future<RemoteTextOutcome> running,
+  ) async => switch (await running) {
+    RemoteTextOutcome.completed => null,
+    RemoteTextOutcome.targetUnavailable =>
+      RemoteControlError.textTargetUnavailable,
+    RemoteTextOutcome.rejected => RemoteControlError.textRejected,
+    RemoteTextOutcome.unavailable =>
+      RemoteControlError.accessibilityUnavailable,
+  };
 }
 
 class _Pending {

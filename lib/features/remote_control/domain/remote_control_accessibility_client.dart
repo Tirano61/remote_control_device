@@ -18,6 +18,24 @@ enum RemoteGestureOutcome {
   unavailable,
 }
 
+/// What became of a `set_text`. Its own type because it fails differently from
+/// a gesture: a valid one may simply have no field to write to.
+enum RemoteTextOutcome {
+  /// The focused field took the action. Nothing reads the field back, so this
+  /// does not say what it ended up holding.
+  completed,
+
+  /// No active window, nothing with input focus, or a focused node that is not
+  /// editable and enabled.
+  targetUnavailable,
+
+  /// There was somewhere to write, and the text could not be put there.
+  rejected,
+
+  /// The accessibility service is not connected.
+  unavailable,
+}
+
 /// The boundary `AccessibilityService` lives behind.
 ///
 /// Nothing here can enable the service, because nothing can: Android requires
@@ -63,6 +81,14 @@ abstract interface class RemoteControlAccessibilityClient {
   ///
   /// Never throws. Like [tap], it runs whatever it is given.
   Future<RemoteGestureOutcome> performRecents();
+
+  /// Replaces the content of the field with input focus with [text], and
+  /// completes when Android says whether it took it. Nothing about the field
+  /// comes back.
+  ///
+  /// Never throws. Like [tap], it runs whatever it is given, and this is the
+  /// only reason the Android side looks at the active window at all.
+  Future<RemoteTextOutcome> performSetText(String text);
 
   /// Opens Android's accessibility settings. Never throws.
   Future<void> openAccessibilitySettings();

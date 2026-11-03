@@ -263,6 +263,61 @@ void main() {
     });
   }
 
+  group('performSetText', () {
+    test('sends the text and nothing else about the field', () async {
+      answerWith((_) => 'completed');
+
+      await client.performSetText('Hola 👋\náéíóú ñ');
+
+      expect(calls.single.method, 'performSetText');
+      expect(calls.single.arguments, {'text': 'Hola 👋\náéíóú ñ'});
+    });
+
+    test('an empty text still crosses, as an empty text', () async {
+      answerWith((_) => 'completed');
+
+      await client.performSetText('');
+
+      expect(calls.single.arguments, {'text': ''});
+    });
+
+    for (final (wire, outcome) in const [
+      ('completed', RemoteTextOutcome.completed),
+      ('targetUnavailable', RemoteTextOutcome.targetUnavailable),
+      ('unavailable', RemoteTextOutcome.unavailable),
+      ('rejected', RemoteTextOutcome.rejected),
+      ('busy', RemoteTextOutcome.rejected),
+      ('invalid', RemoteTextOutcome.rejected),
+      ('something new', RemoteTextOutcome.rejected),
+    ]) {
+      test('"$wire" means $outcome', () async {
+        answerWith((_) => wire);
+
+        expect(await client.performSetText('Hola'), outcome);
+      });
+    }
+
+    test('a platform error is a rejection, not an exception', () async {
+      answerWith((_) => throw PlatformException(code: 'BOOM'));
+
+      expect(await client.performSetText('Hola'), RemoteTextOutcome.rejected);
+    });
+
+    test('a bridge that is not there is unavailable', () async {
+      expect(
+        await client.performSetText('Hola'),
+        RemoteTextOutcome.unavailable,
+      );
+    });
+
+    test('a bridge that never answers does not hold the queue', () async {
+      final never = Completer<Object?>();
+      messenger.setMockMethodCallHandler(channel, (_) => never.future);
+
+      expect(await client.performSetText('Hola'), RemoteTextOutcome.rejected);
+    });
+  });
+
   group('settings', () {
     test('only asks Android to open them', () async {
       answerWith((_) => null);

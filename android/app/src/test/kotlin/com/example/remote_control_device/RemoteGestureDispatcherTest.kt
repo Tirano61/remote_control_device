@@ -41,6 +41,9 @@ class RemoteGestureDispatcherTest {
         globalActionAccepted
     }
 
+    /** `set_text` has its own tests, in [RemoteSetTextTest]. */
+    private val noWindow: () -> RemoteTextWindow? = { null }
+
     private val dispatcher = RemoteGestureDispatcher(
         readDisplay = { display },
         dispatch = { stroke, onResult ->
@@ -49,6 +52,7 @@ class RemoteGestureDispatcherTest {
             accepted
         },
         performGlobalAction = recordGlobalAction,
+        activeWindow = noWindow,
     )
 
     private fun tap(x: Double = 0.5, y: Double = 0.5) = dispatcher.tap(x, y) { outcomes += it }
@@ -99,6 +103,7 @@ class RemoteGestureDispatcherTest {
             readDisplay = { display },
             dispatch = { _, _ -> throw IllegalStateException("not connected") },
             performGlobalAction = recordGlobalAction,
+            activeWindow = noWindow,
         )
 
         throwing.tap(0.5, 0.5) { outcomes += it }
@@ -115,6 +120,7 @@ class RemoteGestureDispatcherTest {
                 true
             },
             performGlobalAction = recordGlobalAction,
+            activeWindow = noWindow,
         )
 
         blind.tap(0.5, 0.5) { outcomes += it }
@@ -306,6 +312,7 @@ class RemoteGestureDispatcherTest {
                 true
             },
             performGlobalAction = recordGlobalAction,
+            activeWindow = noWindow,
         )
 
         blind.swipe(0.5, 0.75, 0.5, 0.25, 300L) { outcomes += it }
@@ -485,6 +492,7 @@ class RemoteGestureDispatcherTest {
             readDisplay = { display },
             dispatch = { _, _ -> true },
             performGlobalAction = { throw IllegalStateException("not connected") },
+            activeWindow = noWindow,
         )
 
         throwing.back { outcomes += it }
@@ -503,6 +511,7 @@ class RemoteGestureDispatcherTest {
             },
             dispatch = { _, _ -> true },
             performGlobalAction = recordGlobalAction,
+            activeWindow = noWindow,
         )
 
         blind.back { outcomes += it }

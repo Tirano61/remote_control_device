@@ -4,20 +4,23 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.content.Intent
 import android.graphics.Path
+import android.os.Build
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 
 /**
- * Puts a touch on the screen, or presses Back, Home or Recents. It holds no policy, reads nothing
- * and asks for nothing else.
+ * Puts a touch on the screen, presses Back, Home or Recents, or writes over the content of the
+ * focused field. It holds no policy and asks for nothing else.
  *
  * Only the user can enable it, in Android's accessibility settings, and that says the *service*
  * may exist. It says nothing about any assistance: the service stays connected between sessions,
  * and each command is authorised in Dart against the `ACTIVE` remote session before it gets
  * here. See `docs/webrtc/CONTROL_CHANNEL.md`.
  *
- * It receives no accessibility events and cannot read window content
- * (`res/xml/accessibility_service_config.xml`), so the only things it can do are those.
+ * It receives no accessibility events. It may retrieve window content
+ * (`res/xml/accessibility_service_config.xml`), and uses that for one thing: finding what has input
+ * focus while a `set_text` runs. It reads nothing from what it finds and keeps none of it. See
+ * "Text-input privacy boundary" in the document above.
  */
 class RemoteControlAccessibilityService : AccessibilityService() {
 
@@ -31,8 +34,23 @@ class RemoteControlAccessibilityService : AccessibilityService() {
                 readDisplay = { ScreenCapturer.readDisplayGeometry(applicationContext) },
                 dispatch = ::dispatchStroke,
                 performGlobalAction = ::performGlobalAction,
+                activeWindow = ::activeWindow,
             ),
         )
+    }
+
+    /**
+     * Without being told otherwise, Android fetches part of the hierarchy along with the root, into
+     * this process's cache. Finding the focus needs none of it, so from Android 13, where it can be
+     * asked, it fetches only the root.
+     */
+    private fun activeWindow(): RemoteTextWindow? {
+        val root = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            getRootInActiveWindow(NO_PREFETCHING)
+        } else {
+            rootInActiveWindow
+        }
+        return root?.let(::AccessibilityTextWindow)
     }
 
     /**
@@ -81,6 +99,8 @@ class RemoteControlAccessibilityService : AccessibilityService() {
 
     companion object {
         private const val TAG = "RemoteControlInput"
+
+        private const val NO_PREFETCHING = 0
 
         /** One per process, because Android binds at most one instance of the service. */
         val availability = RemoteControlAvailability()

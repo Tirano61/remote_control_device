@@ -398,6 +398,188 @@ void main() {
     });
   }
 
+  group('a set_text', () {
+    /// A set_text carrying exactly [text], encoded the way a sender would.
+    RemoteControlInboundMessage? decodeSetText(String text) => decodeText(
+      jsonEncode({'v': 1, 'type': 'set_text', 'id': 'text-1', 'text': text}),
+    );
+
+    RemoteControlCommandReceived received(String text) =>
+        RemoteControlCommandReceived(
+          RemoteSetTextCommand(id: 'text-1', text: text),
+        );
+
+    const invalid = RemoteControlMessageRejected(
+      'text-1',
+      RemoteControlError.invalidCommand,
+    );
+
+    test('decodes to exactly the typed command', () {
+      expect(
+        decodeText('{"v":1,"type":"set_text","id":"text-1","text":"Hola"}'),
+        const RemoteControlCommandReceived(
+          RemoteSetTextCommand(id: 'text-1', text: 'Hola'),
+        ),
+      );
+    });
+
+    test('with an empty text is valid: it empties the field', () {
+      expect(
+        decodeText('{"v":1,"type":"set_text","id":"text-1","text":""}'),
+        const RemoteControlCommandReceived(
+          RemoteSetTextCommand(id: 'text-1', text: ''),
+        ),
+      );
+    });
+
+    group('keeps the text exactly as it arrived', () {
+      for (final text in const [
+        'áéíóú ñ',
+        'Hola 👋',
+        '  con espacios  ',
+        'dos\nlíneas\r\ny\ttabulador',
+        'MiXtO',
+        '"comillas" \\ y barra',
+        '€ ∑ 中文',
+        // Precomposed and decomposed: they look alike, and are not to be merged.
+        'é é',
+      ]) {
+        test(jsonEncode(text), () {
+          expect(decodeSetText(text), received(text));
+        });
+      }
+
+      test('written with JSON escapes', () {
+        expect(
+          decodeText(
+            r'{"v":1,"type":"set_text","id":"text-1",'
+            r'"text":"ñ 👋"}',
+          ),
+          received('ñ 👋'),
+        );
+      });
+    });
+
+    group('length, in UTF-16 code units', () {
+      const max = RemoteSetTextCommand.maxRemoteTextLength;
+
+      test('the limit is the documented one', () => expect(max, 4096));
+
+      for (final (name, length) in const [
+        ('0', 0),
+        ('1', 1),
+        ('4096, the limit', 4096),
+      ]) {
+        test('$name is valid', () {
+          final text = 'a' * length;
+          expect(decodeSetText(text), received(text));
+        });
+      }
+
+      test('4097 is invalid', () {
+        expect(decodeSetText('a' * 4097), invalid);
+      });
+
+      test('an emoji counts as the two code units it is', () {
+        expect('👋'.length, 2);
+
+        final atTheLimit = '👋' * 2048;
+        expect(atTheLimit.length, 4096);
+        expect(decodeSetText(atTheLimit), received(atTheLimit));
+      });
+
+      test('emoji past the limit are refused, though few code points', () {
+        // 2049 code points, far under 4096 if they were what was counted.
+        expect(decodeSetText('👋' * 2049), invalid);
+        expect(decodeSetText('${'👋' * 2048}a'), invalid);
+      });
+
+      test('accents are not counted as their UTF-8 bytes', () {
+        // 8192 bytes of UTF-8, and still 4096 code units.
+        final text = 'ñ' * 4096;
+        expect(decodeSetText(text), received(text));
+      });
+    });
+
+    group('with a text that is not a string is invalid', () {
+      for (final (name, fields) in const [
+        ('missing', ''),
+        ('null', ',"text":null'),
+        ('a number', ',"text":7'),
+        ('a bool', ',"text":true'),
+        ('an object', ',"text":{"value":"Hola"}'),
+        ('an array', ',"text":["Hola"]'),
+      ]) {
+        test(name, () {
+          expect(
+            decodeText('{"v":1,"type":"set_text","id":"text-1"$fields}'),
+            invalid,
+          );
+        });
+      }
+    });
+
+    test('ignores unknown extra fields, as a tap does', () {
+      expect(
+        decodeText(
+          '{"v":1,"type":"set_text","id":"text-1","text":"Hola","x":0.5}',
+        ),
+        received('Hola'),
+      );
+    });
+
+    test('with no id to answer to is ignored', () {
+      expect(decodeText('{"v":1,"type":"set_text","text":"Hola"}'), isNull);
+      expect(
+        decodeText('{"v":1,"type":"set_text","id":"","text":"Hola"}'),
+        isNull,
+      );
+    });
+
+    test('another version is not read as version 1', () {
+      expect(
+        decodeText('{"v":2,"type":"set_text","id":"later","text":"Hola"}'),
+        const RemoteControlMessageRejected(
+          'later',
+          RemoteControlError.unsupportedCommand,
+        ),
+      );
+    });
+
+    test('in another case is another type', () {
+      expect(
+        decodeText('{"v":1,"type":"SET_TEXT","id":"text-1","text":"Hola"}'),
+        const RemoteControlMessageRejected(
+          'text-1',
+          RemoteControlError.unsupportedCommand,
+        ),
+      );
+    });
+
+    test('a key press is not one of them', () {
+      for (final type in const ['backspace', 'enter', 'paste', 'key']) {
+        expect(
+          decodeText('{"v":1,"type":"$type","id":"text-1","text":"a"}'),
+          const RemoteControlMessageRejected(
+            'text-1',
+            RemoteControlError.unsupportedCommand,
+          ),
+        );
+      }
+    });
+
+    test('never prints its text', () {
+      const secret = 'contraseña-123';
+      const command = RemoteSetTextCommand(id: 'text-1', text: secret);
+
+      expect(command.toString(), isNot(contains(secret)));
+      expect(
+        const RemoteControlCommandReceived(command).toString(),
+        isNot(contains(secret)),
+      );
+    });
+  });
+
   test('a type that is not a string is invalid, whatever else is there', () {
     expect(
       decodeText('{"v":1,"type":["back"],"id":"nav-1"}'),
@@ -495,6 +677,8 @@ void main() {
       (RemoteControlError.gestureRejected, 'gesture_rejected'),
       (RemoteControlError.invalidCommand, 'invalid_command'),
       (RemoteControlError.unsupportedCommand, 'unsupported_command'),
+      (RemoteControlError.textTargetUnavailable, 'text_target_unavailable'),
+      (RemoteControlError.textRejected, 'text_rejected'),
     ]) {
       test('failure carries $wire', () {
         expect(

@@ -13,8 +13,11 @@ import io.flutter.plugin.common.MethodChannel
  *
  * Transport and nothing else. Whether a gesture may run is decided in Dart, in
  * `WebRtcSessionBloc`, against the remote session; by the time [TAP_METHOD], [SWIPE_METHOD],
- * [BACK_METHOD], [HOME_METHOD] or [RECENTS_METHOD] arrives the decision is made. Failures are
- * answered as outcomes, never thrown across the boundary.
+ * [BACK_METHOD], [HOME_METHOD], [RECENTS_METHOD] or [SET_TEXT_METHOD] arrives the decision is made.
+ * Failures are answered as outcomes, never thrown across the boundary.
+ *
+ * The text of a [SET_TEXT_METHOD] may be a password. It goes to the service and nowhere else, and
+ * no log line here names it.
  *
  * It also pushes [AVAILABILITY_CHANGED_METHOD] the other way, because the user enables the
  * service from Settings while the application is in the background and has to find it enabled
@@ -75,11 +78,20 @@ class RemoteControlAccessibilityChannel(
                 }
             }
 
-            BACK_METHOD -> availability.back(answerGlobalAction("back", result))
+            BACK_METHOD -> availability.back(answerAction("back", result))
 
-            HOME_METHOD -> availability.home(answerGlobalAction("home", result))
+            HOME_METHOD -> availability.home(answerAction("home", result))
 
-            RECENTS_METHOD -> availability.recents(answerGlobalAction("recents", result))
+            RECENTS_METHOD -> availability.recents(answerAction("recents", result))
+
+            SET_TEXT_METHOD -> {
+                val text = call.argument<Any?>(TEXT) as? String
+                if (text == null) {
+                    result.success(RemoteGestureOutcome.INVALID.wire)
+                    return
+                }
+                availability.setText(text, answerAction("set_text", result))
+            }
 
             SETTINGS_METHOD -> try {
                 // Only opens the screen. Enabling the service is the user's, in Android's own UI.
@@ -97,7 +109,7 @@ class RemoteControlAccessibilityChannel(
     }
 
     /** Android only says it took the action, so that is what the log says. */
-    private fun answerGlobalAction(
+    private fun answerAction(
         name: String,
         result: MethodChannel.Result,
     ): (RemoteGestureOutcome) -> Unit = { outcome ->
@@ -116,6 +128,7 @@ class RemoteControlAccessibilityChannel(
         const val BACK_METHOD = "performBack"
         const val HOME_METHOD = "performHome"
         const val RECENTS_METHOD = "performRecents"
+        const val SET_TEXT_METHOD = "performSetText"
         const val SETTINGS_METHOD = "openAccessibilitySettings"
         const val AVAILABILITY_CHANGED_METHOD = "accessibilityServiceAvailabilityChanged"
 
@@ -126,6 +139,7 @@ class RemoteControlAccessibilityChannel(
         private const val END_X = "endX"
         private const val END_Y = "endY"
         private const val DURATION_MS = "durationMs"
+        private const val TEXT = "text"
 
         private const val SETTINGS_FAILED = "ACCESSIBILITY_SETTINGS_FAILED"
     }
