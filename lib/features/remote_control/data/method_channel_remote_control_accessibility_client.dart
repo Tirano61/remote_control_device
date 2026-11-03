@@ -28,6 +28,7 @@ class MethodChannelRemoteControlAccessibilityClient
   static const String swipeMethod = 'performSwipe';
   static const String backMethod = 'performBack';
   static const String homeMethod = 'performHome';
+  static const String recentsMethod = 'performRecents';
   static const String settingsMethod = 'openAccessibilitySettings';
   static const String availabilityChangedMethod =
       'accessibilityServiceAvailabilityChanged';
@@ -80,6 +81,9 @@ class MethodChannelRemoteControlAccessibilityClient
 
   @override
   Future<RemoteGestureOutcome> performHome() => _perform(homeMethod);
+
+  @override
+  Future<RemoteGestureOutcome> performRecents() => _perform(recentsMethod);
 
   Future<RemoteGestureOutcome> _perform(
     String method, [

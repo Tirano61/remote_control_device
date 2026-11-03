@@ -330,6 +330,11 @@ class FakeWebRtcDataChannel implements WebRtcDataChannel {
   void pushHome(String id) => pushFrame(
     WebRtcDataChannelMessage.text('{"v":1,"type":"home","id":"$id"}'),
   );
+
+  /// A well-formed recents arriving as a text frame.
+  void pushRecents(String id) => pushFrame(
+    WebRtcDataChannelMessage.text('{"v":1,"type":"recents","id":"$id"}'),
+  );
 }
 
 /// The signaling half, recording exactly what would go on the wire.

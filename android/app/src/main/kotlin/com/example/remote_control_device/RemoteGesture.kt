@@ -137,6 +137,9 @@ class RemoteGestureDispatcher(
     fun home(answer: (RemoteGestureOutcome) -> Unit) =
         globalAction(AccessibilityService.GLOBAL_ACTION_HOME, answer)
 
+    fun recents(answer: (RemoteGestureOutcome) -> Unit) =
+        globalAction(AccessibilityService.GLOBAL_ACTION_RECENTS, answer)
+
     private fun globalAction(action: Int, answer: (RemoteGestureOutcome) -> Unit) {
         if (running != null) {
             answer(RemoteGestureOutcome.BUSY)
@@ -282,5 +285,14 @@ class RemoteControlAvailability {
             return
         }
         current.home(answer)
+    }
+
+    fun recents(answer: (RemoteGestureOutcome) -> Unit) {
+        val current = dispatcher
+        if (current == null) {
+            answer(RemoteGestureOutcome.UNAVAILABLE)
+            return
+        }
+        current.recents(answer)
     }
 }
