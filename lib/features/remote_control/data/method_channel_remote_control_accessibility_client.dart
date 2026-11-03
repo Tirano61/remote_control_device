@@ -26,6 +26,8 @@ class MethodChannelRemoteControlAccessibilityClient
   static const String availableMethod = 'isAccessibilityServiceAvailable';
   static const String tapMethod = 'performTap';
   static const String swipeMethod = 'performSwipe';
+  static const String backMethod = 'performBack';
+  static const String homeMethod = 'performHome';
   static const String settingsMethod = 'openAccessibilitySettings';
   static const String availabilityChangedMethod =
       'accessibilityServiceAvailabilityChanged';
@@ -73,10 +75,16 @@ class MethodChannelRemoteControlAccessibilityClient
     'durationMs': durationMs,
   });
 
+  @override
+  Future<RemoteGestureOutcome> performBack() => _perform(backMethod);
+
+  @override
+  Future<RemoteGestureOutcome> performHome() => _perform(homeMethod);
+
   Future<RemoteGestureOutcome> _perform(
-    String method,
-    Map<String, Object> arguments,
-  ) async {
+    String method, [
+    Map<String, Object>? arguments,
+  ]) async {
     try {
       final outcome = await channel
           .invokeMethod<String>(method, arguments)

@@ -85,6 +85,8 @@ class RemoteControlCommandQueue {
           endY: endY,
           durationMs: durationMs,
         ),
+      RemoteBackCommand() => _accessibility.performBack(),
+      RemoteHomeCommand() => _accessibility.performHome(),
     };
     return switch (outcome) {
       RemoteGestureOutcome.completed => RemoteControlAck.success(command.id),

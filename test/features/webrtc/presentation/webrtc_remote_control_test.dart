@@ -6,6 +6,7 @@ import 'package:remote_control_device/features/remote_control/domain/entities/re
 import 'package:remote_control_device/features/remote_control/domain/entities/remote_control_error.dart';
 import 'package:remote_control_device/features/remote_control/domain/entities/remote_control_inbound_message.dart';
 import 'package:remote_control_device/features/remote_control/domain/remote_control_accessibility_client.dart';
+import 'package:remote_control_device/features/screen_capture/domain/entities/screen_capture_result.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_connection_state.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_data_channel_message.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_data_channel_state.dart';
@@ -24,16 +25,18 @@ import '../../../fakes/webrtc_fakes.dart';
 void main() {
   late FakeWebRtcPeerConnectionFactory factory;
   late FakeRemoteControlAccessibilityClient accessibility;
+  late FakeScreenCaptureClient screenCapture;
   late WebRtcSessionBloc bloc;
 
   setUp(() {
     factory = FakeWebRtcPeerConnectionFactory();
     accessibility = FakeRemoteControlAccessibilityClient();
+    screenCapture = FakeScreenCaptureClient();
     bloc = WebRtcSessionBloc(
       peerConnectionFactory: factory,
       signaling: FakeWebRtcSignalingGateway(),
       iceConfiguration: const WebRtcIceConfiguration.none(),
-      screenCapture: FakeScreenCaptureClient(),
+      screenCapture: screenCapture,
       remoteControl: accessibility,
     );
   });
@@ -530,6 +533,225 @@ void main() {
     });
   });
 
+  for (final type in const ['back', 'home']) {
+    void push(FakeWebRtcDataChannel channel, String id) =>
+        type == 'back' ? channel.pushBack(id) : channel.pushHome(id);
+
+    group('a $type', () {
+      test('ACTIVE, this peer, channel open: the action runs', () async {
+        final channel = await reachOpenChannel();
+
+        push(channel, 'n-1');
+        await settle();
+
+        expect(accessibility.globalActions, [type]);
+        expect(accessibility.taps, isEmpty);
+        expect(accessibility.swipes, isEmpty);
+        expect(channel.sentAcks, const [RemoteControlAck.success('n-1')]);
+      });
+
+      test('CONNECTING: no action, session_not_active', () async {
+        final channel = await reachOpenChannel(active: false);
+
+        push(channel, 'n-1');
+        await settle();
+
+        expect(accessibility.gestures, isEmpty);
+        expect(channel.sentAcks, const [
+          RemoteControlAck.failure('n-1', RemoteControlError.sessionNotActive),
+        ]);
+      });
+
+      test('an enabled service alone authorises nothing', () async {
+        expect(
+          accessibility.status,
+          RemoteControlAccessibilityStatus.available,
+        );
+        final channel = await reachOpenChannel(active: false);
+
+        push(channel, 'n-1');
+        await settle();
+
+        expect(accessibility.gestures, isEmpty);
+      });
+
+      test('ACTIVE for another session is not this session', () async {
+        final channel = await reachOpenChannel(active: false);
+        bloc.add(
+          const WebRtcActiveRemoteSessionChanged(testOtherRemoteSessionId),
+        );
+        await settle();
+
+        push(channel, 'n-1');
+        await settle();
+
+        expect(accessibility.gestures, isEmpty);
+        expect(
+          channel.sentAcks.single.error,
+          RemoteControlError.sessionNotActive,
+        );
+      });
+
+      test('arriving after the session closed runs nothing', () async {
+        final channel = await reachOpenChannel();
+        bloc.add(const WebRtcActiveRemoteSessionChanged(null));
+        await settle();
+
+        push(channel, 'late');
+        await settle();
+
+        expect(accessibility.gestures, isEmpty);
+        expect(channel.sentAcks, const [
+          RemoteControlAck.failure('late', RemoteControlError.sessionNotActive),
+        ]);
+      });
+
+      test('on a channel that is not open it runs nothing', () async {
+        final channel = await reachOpenChannel();
+        channel.pushState(WebRtcDataChannelState.closing);
+        await settle();
+
+        push(channel, 'n-1');
+        await settle();
+
+        expect(accessibility.gestures, isEmpty);
+        expect(channel.sentAcks, isEmpty);
+      });
+
+      test('a refused action is gesture_rejected', () async {
+        final channel = await reachOpenChannel();
+        accessibility.outcome = RemoteGestureOutcome.rejected;
+
+        push(channel, 'n-1');
+        await settle();
+
+        expect(channel.sentAcks, const [
+          RemoteControlAck.failure('n-1', RemoteControlError.gestureRejected),
+        ]);
+      });
+
+      test('a service that is gone is accessibility_unavailable', () async {
+        final channel = await reachOpenChannel();
+        accessibility.outcome = RemoteGestureOutcome.unavailable;
+
+        push(channel, 'n-1');
+        await settle();
+
+        expect(channel.sentAcks, const [
+          RemoteControlAck.failure(
+            'n-1',
+            RemoteControlError.accessibilityUnavailable,
+          ),
+        ]);
+      });
+
+      test('nothing is acknowledged before Android answers', () async {
+        final channel = await reachOpenChannel();
+        accessibility.holdGestures = true;
+
+        push(channel, 'n-1');
+        await settle();
+
+        expect(accessibility.globalActions, hasLength(1));
+        expect(channel.sentAcks, isEmpty);
+
+        accessibility.finishGesture();
+        await settle();
+
+        expect(channel.sentAcks, const [RemoteControlAck.success('n-1')]);
+      });
+
+      test('the session ending drops it before it starts', () async {
+        final channel = await reachOpenChannel();
+        accessibility.holdGestures = true;
+        channel.pushSwipe('a');
+        push(channel, 'b');
+        await settle();
+
+        bloc.add(const WebRtcActiveRemoteSessionChanged(null));
+        await settle();
+        accessibility.finishGesture();
+        await settle();
+
+        expect(accessibility.swipes, hasLength(1));
+        expect(accessibility.globalActions, isEmpty);
+        expect(channel.sentAcks, const [
+          RemoteControlAck.failure('b', RemoteControlError.sessionNotActive),
+          RemoteControlAck.success('a'),
+        ]);
+      });
+
+      test('does not need the screen to be shared', () async {
+        // No MediaProjection. The video is the web's concern, and an action
+        // that names no position has no use for it.
+        screenCapture.result = const ScreenCaptureUnavailable(
+          ScreenCaptureFailure.captureRefused,
+        );
+        final channel = await reachOpenChannel();
+        expect(screenCapture.isActive, isFalse);
+
+        push(channel, 'n-1');
+        await settle();
+
+        expect(accessibility.globalActions, [type]);
+        expect(channel.sentAcks, const [RemoteControlAck.success('n-1')]);
+      });
+
+      group('generations', () {
+        test('a message from a previous generation never runs', () async {
+          final channel = await reachOpenChannel();
+
+          bloc.add(
+            WebRtcControlMessageReceived(
+              0,
+              RemoteControlCommandReceived(
+                type == 'back'
+                    ? const RemoteBackCommand(id: 'stale')
+                    : const RemoteHomeCommand(id: 'stale'),
+              ),
+            ),
+          );
+          await settle();
+
+          expect(accessibility.gestures, isEmpty);
+          expect(channel.sentAcks, isEmpty);
+        });
+
+        test('the channel of a replaced peer delivers nothing', () async {
+          final oldChannel = await reachOpenChannel();
+
+          factory.last.pushConnectionState(WebRtcConnectionState.failed);
+          await settle();
+          bloc.add(WebRtcOfferReceived(offerFor(sdp: testSecondOfferSdp)));
+          await settle();
+          expect(factory.createCount, 2);
+
+          push(oldChannel, 'stale');
+          await settle();
+
+          expect(accessibility.gestures, isEmpty);
+          expect(oldChannel.sentAcks, isEmpty);
+        });
+
+        test('one queued before the peer failed never runs', () async {
+          final channel = await reachOpenChannel();
+          accessibility.holdGestures = true;
+          channel.pushTap('running');
+          push(channel, 'queued');
+          await settle();
+
+          factory.last.pushConnectionState(WebRtcConnectionState.failed);
+          await settle();
+          accessibility.finishGesture();
+          await settle();
+
+          expect(accessibility.globalActions, isEmpty);
+          expect(channel.sentAcks, isEmpty);
+        });
+      });
+    });
+  }
+
   group('a closed channel', () {
     test('gets no late ack', () async {
       final channel = await reachOpenChannel();
@@ -627,6 +849,43 @@ void main() {
         RemoteControlAck.success('a'),
         RemoteControlAck.success('b'),
         RemoteControlAck.success('c'),
+      ]);
+    });
+
+    test('tap, swipe, back, home, tap run one at a time, in order', () async {
+      final channel = await reachOpenChannel();
+      accessibility.holdGestures = true;
+
+      channel.pushTap('a', x: 0.1);
+      channel.pushSwipe('b');
+      channel.pushBack('c');
+      channel.pushHome('d');
+      channel.pushTap('e', x: 0.9);
+      await settle();
+      expect(accessibility.gestures, [(0.1, 0.5)]);
+
+      final expected = <Object>[
+        (0.1, 0.5),
+        (0.5, 0.8, 0.5, 0.2, 300),
+        'back',
+        'home',
+        (0.9, 0.5),
+      ];
+      for (var finished = 1; finished < expected.length; finished++) {
+        accessibility.finishGesture();
+        await settle();
+        expect(accessibility.gestures, expected.take(finished + 1));
+        expect(channel.sentAcks, hasLength(finished));
+      }
+
+      accessibility.finishGesture();
+      await settle();
+      expect(channel.sentAcks, const [
+        RemoteControlAck.success('a'),
+        RemoteControlAck.success('b'),
+        RemoteControlAck.success('c'),
+        RemoteControlAck.success('d'),
+        RemoteControlAck.success('e'),
       ]);
     });
 

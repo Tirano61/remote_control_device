@@ -320,6 +320,16 @@ class FakeWebRtcDataChannel implements WebRtcDataChannel {
       '"durationMs":$durationMs}',
     ),
   );
+
+  /// A well-formed back arriving as a text frame.
+  void pushBack(String id) => pushFrame(
+    WebRtcDataChannelMessage.text('{"v":1,"type":"back","id":"$id"}'),
+  );
+
+  /// A well-formed home arriving as a text frame.
+  void pushHome(String id) => pushFrame(
+    WebRtcDataChannelMessage.text('{"v":1,"type":"home","id":"$id"}'),
+  );
 }
 
 /// The signaling half, recording exactly what would go on the wire.

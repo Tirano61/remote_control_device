@@ -215,6 +215,53 @@ void main() {
     });
   });
 
+  for (final (method, perform) in [
+    ('performBack', () => client.performBack()),
+    ('performHome', () => client.performHome()),
+  ]) {
+    group(method, () {
+      test('sends no arguments: no position, and no Android code', () async {
+        answerWith((_) => 'completed');
+
+        await perform();
+
+        expect(calls.single.method, method);
+        expect(calls.single.arguments, isNull);
+      });
+
+      for (final (wire, outcome) in const [
+        ('completed', RemoteGestureOutcome.completed),
+        ('unavailable', RemoteGestureOutcome.unavailable),
+        ('rejected', RemoteGestureOutcome.rejected),
+        ('busy', RemoteGestureOutcome.rejected),
+        ('something new', RemoteGestureOutcome.rejected),
+      ]) {
+        test('"$wire" means $outcome', () async {
+          answerWith((_) => wire);
+
+          expect(await perform(), outcome);
+        });
+      }
+
+      test('a platform error is a rejection, not an exception', () async {
+        answerWith((_) => throw PlatformException(code: 'BOOM'));
+
+        expect(await perform(), RemoteGestureOutcome.rejected);
+      });
+
+      test('a bridge that is not there is unavailable', () async {
+        expect(await perform(), RemoteGestureOutcome.unavailable);
+      });
+
+      test('a bridge that never answers does not hold the queue', () async {
+        final never = Completer<Object?>();
+        messenger.setMockMethodCallHandler(channel, (_) => never.future);
+
+        expect(await perform(), RemoteGestureOutcome.rejected);
+      });
+    });
+  }
+
   group('settings', () {
     test('only asks Android to open them', () async {
       answerWith((_) => null);

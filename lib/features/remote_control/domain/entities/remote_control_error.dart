@@ -9,7 +9,9 @@ enum RemoteControlError {
   /// There is no `ACTIVE` remote session for this peer connection.
   sessionNotActive,
 
-  /// The gesture was refused, cancelled, or could not be attempted.
+  /// The gesture was refused, cancelled, or could not be attempted. Android
+  /// refusing a Back or a Home is this too: the name is older than those
+  /// commands, and it is on the wire, so it stays.
   gestureRejected,
 
   /// The message was malformed.
