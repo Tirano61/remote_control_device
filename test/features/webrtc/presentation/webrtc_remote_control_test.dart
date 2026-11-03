@@ -533,9 +533,12 @@ void main() {
     });
   });
 
-  for (final type in const ['back', 'home']) {
-    void push(FakeWebRtcDataChannel channel, String id) =>
-        type == 'back' ? channel.pushBack(id) : channel.pushHome(id);
+  for (final type in const ['back', 'home', 'recents']) {
+    void push(FakeWebRtcDataChannel channel, String id) => switch (type) {
+      'back' => channel.pushBack(id),
+      'home' => channel.pushHome(id),
+      _ => channel.pushRecents(id),
+    };
 
     group('a $type', () {
       test('ACTIVE, this peer, channel open: the action runs', () async {
@@ -704,11 +707,11 @@ void main() {
           bloc.add(
             WebRtcControlMessageReceived(
               0,
-              RemoteControlCommandReceived(
-                type == 'back'
-                    ? const RemoteBackCommand(id: 'stale')
-                    : const RemoteHomeCommand(id: 'stale'),
-              ),
+              RemoteControlCommandReceived(switch (type) {
+                'back' => const RemoteBackCommand(id: 'stale'),
+                'home' => const RemoteHomeCommand(id: 'stale'),
+                _ => const RemoteRecentsCommand(id: 'stale'),
+              }),
             ),
           );
           await settle();
@@ -852,7 +855,7 @@ void main() {
       ]);
     });
 
-    test('tap, swipe, back, home, tap run one at a time, in order', () async {
+    test('tap, swipe, back, home, recents, tap run in order', () async {
       final channel = await reachOpenChannel();
       accessibility.holdGestures = true;
 
@@ -860,7 +863,8 @@ void main() {
       channel.pushSwipe('b');
       channel.pushBack('c');
       channel.pushHome('d');
-      channel.pushTap('e', x: 0.9);
+      channel.pushRecents('e');
+      channel.pushTap('f', x: 0.9);
       await settle();
       expect(accessibility.gestures, [(0.1, 0.5)]);
 
@@ -869,6 +873,7 @@ void main() {
         (0.5, 0.8, 0.5, 0.2, 300),
         'back',
         'home',
+        'recents',
         (0.9, 0.5),
       ];
       for (var finished = 1; finished < expected.length; finished++) {
@@ -886,6 +891,7 @@ void main() {
         RemoteControlAck.success('c'),
         RemoteControlAck.success('d'),
         RemoteControlAck.success('e'),
+        RemoteControlAck.success('f'),
       ]);
     });
 
