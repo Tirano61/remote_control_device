@@ -317,6 +317,14 @@ active window is looked at, so outside a session the window is not looked at eit
 Pressing FINALIZAR ASISTENCIA stops commands immediately, without waiting for the
 backend to confirm the close.
 
+Starting with `set_text`, the assistance consent UI explicitly discloses remote text
+entry. `SupportPanel` shows it above `PERMITIR` and `RECHAZAR`, for that one assistance:
+it is not a second consent, and it adds no condition to the ones above. It has to stay
+true of what is implemented, which is why it says the field is the one that is selected
+rather than the one the user chose (a technician's tap can move the focus), that the text
+replaces what was there, and that the exception to not sending a field's content is
+whatever the shared picture shows. It makes no promise about password fields.
+
 ### After it was accepted
 
 All commands share one queue and run one at a time, in the order they arrived,
@@ -629,8 +637,8 @@ Android does not ask again when an update adds this capability. On the tablet, a
 bound with the wider capability, without any dialog. A user who enabled the service
 before this version accepted a description that said it did not read window content.
 That description has been rewritten, but nothing shows it to them unless they open
-Settings. The Settings text is what tells users about this; if that is not considered
-enough, a notice has to be built, because Android will not provide one.
+Settings. Android will not provide a notice, so the assistance consent does: see
+[Consent](#consent).
 
 ## Testing on a device
 
