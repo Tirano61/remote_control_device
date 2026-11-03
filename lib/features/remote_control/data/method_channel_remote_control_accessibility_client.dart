@@ -29,6 +29,7 @@ class MethodChannelRemoteControlAccessibilityClient
   static const String backMethod = 'performBack';
   static const String homeMethod = 'performHome';
   static const String recentsMethod = 'performRecents';
+  static const String setTextMethod = 'performSetText';
   static const String settingsMethod = 'openAccessibilitySettings';
   static const String availabilityChangedMethod =
       'accessibilityServiceAvailabilityChanged';
@@ -84,6 +85,27 @@ class MethodChannelRemoteControlAccessibilityClient
 
   @override
   Future<RemoteGestureOutcome> performRecents() => _perform(recentsMethod);
+
+  /// A `busy` from the Android side is a refusal like any other, and goes no
+  /// further than this.
+  @override
+  Future<RemoteTextOutcome> performSetText(String text) async {
+    try {
+      final outcome = await channel
+          .invokeMethod<String>(setTextMethod, <String, Object>{'text': text})
+          .timeout(gestureTimeout);
+      return switch (outcome) {
+        'completed' => RemoteTextOutcome.completed,
+        'targetUnavailable' => RemoteTextOutcome.targetUnavailable,
+        'unavailable' => RemoteTextOutcome.unavailable,
+        _ => RemoteTextOutcome.rejected,
+      };
+    } on MissingPluginException {
+      return RemoteTextOutcome.unavailable;
+    } catch (_) {
+      return RemoteTextOutcome.rejected;
+    }
+  }
 
   Future<RemoteGestureOutcome> _perform(
     String method, [

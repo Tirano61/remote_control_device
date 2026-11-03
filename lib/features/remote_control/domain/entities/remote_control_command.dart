@@ -76,3 +76,29 @@ final class RemoteHomeCommand extends RemoteControlCommand {
 final class RemoteRecentsCommand extends RemoteControlCommand {
   const RemoteRecentsCommand({required String id}) : super(id);
 }
+
+/// Replaces the whole content of the field that has input focus with [text].
+///
+/// It is not a key press and not an insertion at the cursor, and an empty [text]
+/// empties the field. It names no field: which one it reaches is whichever has
+/// input focus when it runs, which is why a tap usually comes first.
+///
+/// [text] is whatever the technician typed, which may be a password. It stays
+/// out of [toString], which `Equatable` would otherwise fill with it in debug
+/// builds.
+final class RemoteSetTextCommand extends RemoteControlCommand {
+  const RemoteSetTextCommand({required String id, required this.text})
+    : super(id);
+
+  /// In UTF-16 code units, which is what `String.length` counts in both Dart
+  /// and Kotlin, so the two sides cannot disagree about a limit case.
+  static const int maxRemoteTextLength = 4096;
+
+  final String text;
+
+  @override
+  List<Object?> get props => [id, text];
+
+  @override
+  String toString() => 'RemoteSetTextCommand($id)';
+}

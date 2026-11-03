@@ -786,6 +786,8 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
           RemoteBackCommand() => ('back', 'accepted by android'),
           RemoteHomeCommand() => ('home', 'accepted by android'),
           RemoteRecentsCommand() => ('recents', 'accepted by android'),
+          // The id and never the text, here and in every line below.
+          RemoteSetTextCommand() => ('set_text', 'accepted by android'),
         };
         _log('control command received: $name ${command.id}');
 
