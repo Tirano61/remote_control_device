@@ -319,6 +319,7 @@ void main() {
   for (final (type, otherType, command) in const [
     ('back', 'home', RemoteBackCommand(id: 'nav-1')),
     ('home', 'back', RemoteHomeCommand(id: 'nav-1')),
+    ('recents', 'home', RemoteRecentsCommand(id: 'nav-1')),
   ]) {
     group('a $type', () {
       test('decodes to exactly the typed command', () {
@@ -407,9 +408,9 @@ void main() {
     );
   });
 
-  test('recents is not a command yet', () {
+  test('a type nobody defined is unsupported, even shaped like a back', () {
     expect(
-      decodeText('{"v":1,"type":"recents","id":"nav-1"}'),
+      decodeText('{"v":1,"type":"pinch","id":"nav-1"}'),
       const RemoteControlMessageRejected(
         'nav-1',
         RemoteControlError.unsupportedCommand,
@@ -440,6 +441,34 @@ void main() {
           'v': 1,
           'type': 'ack',
           'id': 'back-123',
+          'ok': false,
+          'error': 'gesture_rejected',
+        },
+      );
+    });
+
+    test('a recents is answered like any command', () {
+      expect(
+        jsonDecode(
+          RemoteControlChannelCodec.encodeAck(
+            const RemoteControlAck.success('recents-1'),
+          ),
+        ),
+        {'v': 1, 'type': 'ack', 'id': 'recents-1', 'ok': true},
+      );
+      expect(
+        jsonDecode(
+          RemoteControlChannelCodec.encodeAck(
+            const RemoteControlAck.failure(
+              'recents-1',
+              RemoteControlError.gestureRejected,
+            ),
+          ),
+        ),
+        {
+          'v': 1,
+          'type': 'ack',
+          'id': 'recents-1',
           'ok': false,
           'error': 'gesture_rejected',
         },

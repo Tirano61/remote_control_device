@@ -10,8 +10,8 @@ enum RemoteControlError {
   sessionNotActive,
 
   /// The gesture was refused, cancelled, or could not be attempted. Android
-  /// refusing a Back or a Home is this too: the name is older than those
-  /// commands, and it is on the wire, so it stays.
+  /// refusing a Back, a Home or a Recents is this too: the name is older than
+  /// those commands, and it is on the wire, so it stays.
   gestureRejected,
 
   /// The message was malformed.

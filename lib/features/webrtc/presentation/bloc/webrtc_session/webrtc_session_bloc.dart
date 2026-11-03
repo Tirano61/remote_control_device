@@ -785,6 +785,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
           // Android says it took these, and never when they end.
           RemoteBackCommand() => ('back', 'accepted by android'),
           RemoteHomeCommand() => ('home', 'accepted by android'),
+          RemoteRecentsCommand() => ('recents', 'accepted by android'),
         };
         _log('control command received: $name ${command.id}');
 
