@@ -95,8 +95,13 @@ The permanent `deviceId` + `deviceSecret` live in Android-Keystore-backed secure
 storage; the Device JWT is kept in memory only and is re-obtained from the
 permanent credential whenever the app restarts.
 
-Not implemented yet: support requests, remote sessions, signaling, WebRTC,
-MediaProjection, AccessibilityService, kiosk mode.
+Support requests, remote sessions, signaling and WebRTC are in place too. During
+an assistance the technician sees the remote screen (MediaProjection) and can send
+`tap`, `swipe`, `back` and `home` (AccessibilityService). `back` and `home` have only
+been tested on the Android side so far, because the web does not send them yet. See
+[docs/webrtc/CONTROL_CHANNEL.md](docs/webrtc/CONTROL_CHANNEL.md).
+
+Not implemented yet: kiosk mode.
 
 ## Realtime presence
 

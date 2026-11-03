@@ -1,5 +1,7 @@
 package com.example.remote_control_device
 
+import android.accessibilityservice.AccessibilityService
+
 /** A pixel of the screen as it is right now, always inside it. */
 data class GesturePixel(val x: Int, val y: Int)
 
@@ -45,15 +47,20 @@ fun ScreenCaptureGeometry.swipeStroke(
     return if (start == end) null else GestureStroke(start, end, durationMs)
 }
 
-/** What became of a gesture. [wire] is what crosses the channel to Dart. */
+/** What became of a gesture or a global action. [wire] is what crosses the channel to Dart. */
 enum class RemoteGestureOutcome(val wire: String) {
-    /** Android reported the gesture completed. The only outcome that means it happened. */
+    /**
+     * Android reported the gesture completed. The only outcome that means it happened.
+     *
+     * For a global action it means Android took it: `performGlobalAction` answers at once and
+     * nothing reports when the action has finished.
+     */
     COMPLETED("completed"),
 
     /** Android cancelled it, or the service went away while it was running. */
     CANCELLED("cancelled"),
 
-    /** `dispatchGesture` refused it, or the display could not be read. */
+    /** `dispatchGesture` or `performGlobalAction` refused it, or the display could not be read. */
     REJECTED("rejected"),
 
     /** A gesture is still running. `dispatchGesture` would cancel it, so this one is refused. */
@@ -83,12 +90,17 @@ enum class RemoteGestureOutcome(val wire: String) {
  * ends; a second gesture here is refused, since `dispatchGesture` would otherwise cancel the
  * first.
  *
+ * [performGlobalAction] is `AccessibilityService.performGlobalAction`. A global action names no
+ * position, so it reads no display. It answers at once and leaves nothing running, but it still
+ * waits its turn: Home must not start under a swipe that has not finished.
+ *
  * Pure, and main-thread only: the channel handler, the gesture callback and the service
  * lifecycle all run there.
  */
 class RemoteGestureDispatcher(
     private val readDisplay: () -> ScreenCaptureGeometry,
     private val dispatch: (GestureStroke, (Boolean) -> Unit) -> Boolean,
+    private val performGlobalAction: (Int) -> Boolean,
 ) {
     private var running: Running? = null
 
@@ -117,6 +129,25 @@ class RemoteGestureDispatcher(
         ) { display ->
             display.swipeStroke(startX, startY, endX, endY, durationMs)
         }
+    }
+
+    fun back(answer: (RemoteGestureOutcome) -> Unit) =
+        globalAction(AccessibilityService.GLOBAL_ACTION_BACK, answer)
+
+    fun home(answer: (RemoteGestureOutcome) -> Unit) =
+        globalAction(AccessibilityService.GLOBAL_ACTION_HOME, answer)
+
+    private fun globalAction(action: Int, answer: (RemoteGestureOutcome) -> Unit) {
+        if (running != null) {
+            answer(RemoteGestureOutcome.BUSY)
+            return
+        }
+        val accepted = try {
+            performGlobalAction(action)
+        } catch (_: Exception) {
+            false
+        }
+        answer(if (accepted) RemoteGestureOutcome.COMPLETED else RemoteGestureOutcome.REJECTED)
     }
 
     /** [strokeOn] answering `null` means the gesture makes no sense on the screen as it is. */
@@ -233,5 +264,23 @@ class RemoteControlAvailability {
             return
         }
         current.swipe(startX, startY, endX, endY, durationMs, answer)
+    }
+
+    fun back(answer: (RemoteGestureOutcome) -> Unit) {
+        val current = dispatcher
+        if (current == null) {
+            answer(RemoteGestureOutcome.UNAVAILABLE)
+            return
+        }
+        current.back(answer)
+    }
+
+    fun home(answer: (RemoteGestureOutcome) -> Unit) {
+        val current = dispatcher
+        if (current == null) {
+            answer(RemoteGestureOutcome.UNAVAILABLE)
+            return
+        }
+        current.home(answer)
     }
 }

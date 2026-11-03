@@ -1,5 +1,6 @@
 package com.example.remote_control_device
 
+import android.accessibilityservice.AccessibilityService
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -27,7 +28,18 @@ class RemoteGestureDispatcherTest {
     /** What `dispatchGesture` returns. */
     private var accepted = true
 
+    /** Every action `performGlobalAction` received. */
+    private val globalActions = mutableListOf<Int>()
+
+    /** What `performGlobalAction` returns. */
+    private var globalActionAccepted = true
+
     private val outcomes = mutableListOf<RemoteGestureOutcome>()
+
+    private val recordGlobalAction: (Int) -> Boolean = { action ->
+        globalActions += action
+        globalActionAccepted
+    }
 
     private val dispatcher = RemoteGestureDispatcher(
         readDisplay = { display },
@@ -36,6 +48,7 @@ class RemoteGestureDispatcherTest {
             report = onResult
             accepted
         },
+        performGlobalAction = recordGlobalAction,
     )
 
     private fun tap(x: Double = 0.5, y: Double = 0.5) = dispatcher.tap(x, y) { outcomes += it }
@@ -85,6 +98,7 @@ class RemoteGestureDispatcherTest {
         val throwing = RemoteGestureDispatcher(
             readDisplay = { display },
             dispatch = { _, _ -> throw IllegalStateException("not connected") },
+            performGlobalAction = recordGlobalAction,
         )
 
         throwing.tap(0.5, 0.5) { outcomes += it }
@@ -100,6 +114,7 @@ class RemoteGestureDispatcherTest {
                 strokes += stroke
                 true
             },
+            performGlobalAction = recordGlobalAction,
         )
 
         blind.tap(0.5, 0.5) { outcomes += it }
@@ -290,6 +305,7 @@ class RemoteGestureDispatcherTest {
                 strokes += stroke
                 true
             },
+            performGlobalAction = recordGlobalAction,
         )
 
         blind.swipe(0.5, 0.75, 0.5, 0.25, 300L) { outcomes += it }
@@ -411,6 +427,138 @@ class RemoteGestureDispatcherTest {
             listOf(RemoteGestureOutcome.UNAVAILABLE, RemoteGestureOutcome.CANCELLED),
             outcomes,
         )
+    }
+
+    @Test
+    fun `back is GLOBAL_ACTION_BACK`() {
+        dispatcher.back { outcomes += it }
+
+        assertEquals(listOf(AccessibilityService.GLOBAL_ACTION_BACK), globalActions)
+    }
+
+    @Test
+    fun `home is GLOBAL_ACTION_HOME`() {
+        dispatcher.home { outcomes += it }
+
+        assertEquals(listOf(AccessibilityService.GLOBAL_ACTION_HOME), globalActions)
+    }
+
+    @Test
+    fun `the two actions are the ones Android defines`() {
+        // The constants are inlined from android.jar. Spelled out so that a change there, or the
+        // two being swapped above, has something to disagree with.
+        assertEquals(1, AccessibilityService.GLOBAL_ACTION_BACK)
+        assertEquals(2, AccessibilityService.GLOBAL_ACTION_HOME)
+    }
+
+    @Test
+    fun `performGlobalAction answering true is completed, at once`() {
+        dispatcher.back { outcomes += it }
+        dispatcher.home { outcomes += it }
+
+        assertEquals(List(2) { RemoteGestureOutcome.COMPLETED }, outcomes)
+    }
+
+    @Test
+    fun `performGlobalAction answering false is rejected`() {
+        globalActionAccepted = false
+
+        dispatcher.back { outcomes += it }
+        dispatcher.home { outcomes += it }
+
+        assertEquals(List(2) { RemoteGestureOutcome.REJECTED }, outcomes)
+    }
+
+    @Test
+    fun `performGlobalAction throwing is a rejection, not a crash`() {
+        val throwing = RemoteGestureDispatcher(
+            readDisplay = { display },
+            dispatch = { _, _ -> true },
+            performGlobalAction = { throw IllegalStateException("not connected") },
+        )
+
+        throwing.back { outcomes += it }
+
+        assertEquals(listOf(RemoteGestureOutcome.REJECTED), outcomes)
+    }
+
+    @Test
+    fun `a global action reads no display, and works where none can be read`() {
+        var reads = 0
+        val blind = RemoteGestureDispatcher(
+            readDisplay = {
+                reads++
+                throw IllegalStateException("no default display")
+            },
+            dispatch = { _, _ -> true },
+            performGlobalAction = recordGlobalAction,
+        )
+
+        blind.back { outcomes += it }
+        blind.home { outcomes += it }
+
+        assertEquals(0, reads)
+        assertEquals(List(2) { RemoteGestureOutcome.COMPLETED }, outcomes)
+    }
+
+    @Test
+    fun `a global action is no stroke`() {
+        dispatcher.back { outcomes += it }
+        dispatcher.home { outcomes += it }
+
+        assertTrue(strokes.isEmpty())
+    }
+
+    @Test
+    fun `no global action starts while a gesture is running, and it is not disturbed`() {
+        swipe()
+        val first = report!!
+
+        dispatcher.home { outcomes += it }
+        dispatcher.back { outcomes += it }
+
+        assertTrue(globalActions.isEmpty())
+        assertEquals(List(2) { RemoteGestureOutcome.BUSY }, outcomes)
+
+        first(true)
+        assertEquals(RemoteGestureOutcome.COMPLETED, outcomes.last())
+
+        dispatcher.home { outcomes += it }
+        assertEquals(listOf(AccessibilityService.GLOBAL_ACTION_HOME), globalActions)
+    }
+
+    @Test
+    fun `a global action leaves nothing running`() {
+        dispatcher.home { outcomes += it }
+
+        tap()
+
+        assertEquals(1, strokes.size)
+        assertEquals(listOf(RemoteGestureOutcome.COMPLETED), outcomes)
+    }
+
+    @Test
+    fun `a global action with no service is unavailable, and never reaches Android`() {
+        val availability = RemoteControlAvailability()
+
+        availability.back { outcomes += it }
+        availability.home { outcomes += it }
+
+        assertEquals(List(2) { RemoteGestureOutcome.UNAVAILABLE }, outcomes)
+        assertTrue(globalActions.isEmpty())
+
+        availability.connected(dispatcher)
+        availability.back { outcomes += it }
+        availability.home { outcomes += it }
+        assertEquals(
+            listOf(AccessibilityService.GLOBAL_ACTION_BACK, AccessibilityService.GLOBAL_ACTION_HOME),
+            globalActions,
+        )
+
+        availability.disconnected()
+        availability.home { outcomes += it }
+        assertEquals(RemoteGestureOutcome.UNAVAILABLE, outcomes.last())
+        assertEquals(2, globalActions.size)
     }
 
     @Test

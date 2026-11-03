@@ -111,6 +111,128 @@ void main() {
     });
   });
 
+  group('back and home share that line', () {
+    test('tap, swipe, back, home, tap run in order, never together', () async {
+      accessibility.holdGestures = true;
+
+      submit('a', x: 0.3);
+      queue.submit(swipeCommand('b'), acks.add);
+      queue.submit(const RemoteBackCommand(id: 'c'), acks.add);
+      queue.submit(const RemoteHomeCommand(id: 'd'), acks.add);
+      submit('e', x: 0.7);
+      await settle();
+      expect(accessibility.gestures, [(0.3, 0.5)]);
+
+      final expected = <Object>[
+        (0.3, 0.5),
+        swipeCall,
+        'back',
+        'home',
+        (0.7, 0.5),
+      ];
+      for (var finished = 1; finished < expected.length; finished++) {
+        accessibility.finishGesture();
+        await settle();
+        expect(accessibility.gestures, expected.take(finished + 1));
+        expect(acks, hasLength(finished));
+      }
+
+      accessibility.finishGesture();
+      await settle();
+      expect(acks, const [
+        RemoteControlAck.success('a'),
+        RemoteControlAck.success('b'),
+        RemoteControlAck.success('c'),
+        RemoteControlAck.success('d'),
+        RemoteControlAck.success('e'),
+      ]);
+    });
+
+    test('home waits for a swipe that is still running', () async {
+      accessibility.holdGestures = true;
+
+      queue.submit(swipeCommand('a'), acks.add);
+      queue.submit(const RemoteHomeCommand(id: 'b'), acks.add);
+      await settle();
+
+      expect(accessibility.gestures, [swipeCall]);
+      expect(accessibility.globalActions, isEmpty);
+
+      accessibility.finishGesture();
+      await settle();
+
+      expect(accessibility.gestures, [swipeCall, 'home']);
+    });
+
+    test('a pending back and home are dropped with the rest', () async {
+      accessibility.holdGestures = true;
+      submit('a');
+      queue.submit(const RemoteBackCommand(id: 'b'), acks.add);
+      queue.submit(const RemoteHomeCommand(id: 'c'), acks.add);
+      await settle();
+
+      queue.discardPending();
+      accessibility.finishGesture();
+      await settle();
+
+      expect(accessibility.globalActions, isEmpty);
+      expect(acks, const [
+        RemoteControlAck.failure('b', RemoteControlError.sessionNotActive),
+        RemoteControlAck.failure('c', RemoteControlError.sessionNotActive),
+        RemoteControlAck.success('a'),
+      ]);
+    });
+
+    test('they count against the same limit', () async {
+      accessibility.holdGestures = true;
+      submit('running');
+      await settle();
+
+      for (var i = 0; i < RemoteControlCommandQueue.maxPending; i++) {
+        queue.submit(RemoteBackCommand(id: 'queued-$i'), acks.add);
+      }
+      queue.submit(const RemoteHomeCommand(id: 'one-too-many'), acks.add);
+
+      expect(acks, const [
+        RemoteControlAck.failure(
+          'one-too-many',
+          RemoteControlError.gestureRejected,
+        ),
+      ]);
+      expect(accessibility.globalActions, isEmpty);
+    });
+
+    for (final (command, action) in const [
+      (RemoteBackCommand(id: 'n'), 'back'),
+      (RemoteHomeCommand(id: 'n'), 'home'),
+    ]) {
+      for (final (outcome, ack) in const [
+        (RemoteGestureOutcome.completed, RemoteControlAck.success('n')),
+        (
+          RemoteGestureOutcome.rejected,
+          RemoteControlAck.failure('n', RemoteControlError.gestureRejected),
+        ),
+        (
+          RemoteGestureOutcome.unavailable,
+          RemoteControlAck.failure(
+            'n',
+            RemoteControlError.accessibilityUnavailable,
+          ),
+        ),
+      ]) {
+        test('$outcome on a $action becomes the matching ack', () async {
+          accessibility.outcome = outcome;
+
+          queue.submit(command, acks.add);
+          await settle();
+
+          expect(acks, [ack]);
+          expect(accessibility.gestures, [action]);
+        });
+      }
+    }
+  });
+
   for (final (outcome, ack) in const [
     (RemoteGestureOutcome.completed, RemoteControlAck.success('s')),
     (

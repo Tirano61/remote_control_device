@@ -1,5 +1,6 @@
 package com.example.remote_control_device
 
+import android.accessibilityservice.AccessibilityService
 import android.content.ContextWrapper
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
@@ -16,6 +17,9 @@ class RemoteControlAccessibilityChannelTest {
 
     private val strokes = mutableListOf<GestureStroke>()
     private var report: ((Boolean) -> Unit)? = null
+
+    private val globalActions = mutableListOf<Int>()
+    private var globalActionAccepted = true
 
     private val availability = RemoteControlAvailability()
     private val channel = RemoteControlAccessibilityChannel(ContextWrapper(null), availability)
@@ -44,6 +48,10 @@ class RemoteControlAccessibilityChannelTest {
                 report = onResult
                 true
             },
+            performGlobalAction = { action ->
+                globalActions += action
+                globalActionAccepted
+            },
         ),
     )
 
@@ -55,8 +63,54 @@ class RemoteControlAccessibilityChannelTest {
         "durationMs" to 350,
     )
 
-    private fun call(method: String, arguments: Map<String, Any?>) =
+    private fun call(method: String, arguments: Map<String, Any?>?) =
         channel.onMethodCall(MethodCall(method, arguments), result)
+
+    @Test
+    fun `performBack and performHome reach their global actions, with no arguments`() {
+        connect()
+
+        call("performBack", null)
+        call("performHome", null)
+
+        assertEquals(
+            listOf(AccessibilityService.GLOBAL_ACTION_BACK, AccessibilityService.GLOBAL_ACTION_HOME),
+            globalActions,
+        )
+        assertEquals(listOf<Any?>("completed", "completed"), answers)
+        assertTrue(strokes.isEmpty())
+    }
+
+    @Test
+    fun `a global action Android refuses answers rejected`() {
+        connect()
+        globalActionAccepted = false
+
+        call("performBack", null)
+        call("performHome", null)
+
+        assertEquals(listOf<Any?>("rejected", "rejected"), answers)
+    }
+
+    @Test
+    fun `a global action with no service answers unavailable`() {
+        call("performBack", null)
+        call("performHome", null)
+
+        assertEquals(listOf<Any?>("unavailable", "unavailable"), answers)
+        assertTrue(globalActions.isEmpty())
+    }
+
+    @Test
+    fun `a global action while a swipe runs answers busy, and does not happen`() {
+        connect()
+
+        call("performSwipe", swipeArguments())
+        call("performHome", null)
+
+        assertEquals(listOf<Any?>("busy"), answers)
+        assertTrue(globalActions.isEmpty())
+    }
 
     @Test
     fun `performSwipe reaches the gesture with its arguments`() {

@@ -779,9 +779,12 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
         );
 
       case RemoteControlCommandReceived(:final command):
-        final name = switch (command) {
-          RemoteTapCommand() => 'tap',
-          RemoteSwipeCommand() => 'swipe',
+        final (name, finished) = switch (command) {
+          RemoteTapCommand() => ('tap', 'completed'),
+          RemoteSwipeCommand() => ('swipe', 'completed'),
+          // Android says it took these, and never when they end.
+          RemoteBackCommand() => ('back', 'accepted by android'),
+          RemoteHomeCommand() => ('home', 'accepted by android'),
         };
         _log('control command received: $name ${command.id}');
 
@@ -806,7 +809,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
         _commandQueue.submit(command, (ack) {
           _log(
             ack.ok
-                ? '$name completed ${ack.id}'
+                ? '$name $finished ${ack.id}'
                 : '$name rejected ${ack.id} (${ack.error?.name})',
           );
           _sendControlAck(generation, channel, ack);

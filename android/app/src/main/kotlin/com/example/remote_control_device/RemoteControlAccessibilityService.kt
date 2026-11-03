@@ -8,7 +8,8 @@ import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 
 /**
- * Puts a touch on the screen. It holds no policy, reads nothing and asks for nothing else.
+ * Puts a touch on the screen, or presses Back or Home. It holds no policy, reads nothing and asks
+ * for nothing else.
  *
  * Only the user can enable it, in Android's accessibility settings, and that says the *service*
  * may exist. It says nothing about any assistance: the service stays connected between sessions,
@@ -16,7 +17,7 @@ import android.view.accessibility.AccessibilityEvent
  * here. See `docs/webrtc/CONTROL_CHANNEL.md`.
  *
  * It receives no accessibility events and cannot read window content
- * (`res/xml/accessibility_service_config.xml`), so the only thing it can do is the gesture.
+ * (`res/xml/accessibility_service_config.xml`), so the only things it can do are those.
  */
 class RemoteControlAccessibilityService : AccessibilityService() {
 
@@ -29,6 +30,7 @@ class RemoteControlAccessibilityService : AccessibilityService() {
                 // what the current screen is.
                 readDisplay = { ScreenCapturer.readDisplayGeometry(applicationContext) },
                 dispatch = ::dispatchStroke,
+                performGlobalAction = ::performGlobalAction,
             ),
         )
     }

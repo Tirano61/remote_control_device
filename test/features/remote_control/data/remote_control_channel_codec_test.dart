@@ -316,7 +316,136 @@ void main() {
     });
   });
 
+  for (final (type, otherType, command) in const [
+    ('back', 'home', RemoteBackCommand(id: 'nav-1')),
+    ('home', 'back', RemoteHomeCommand(id: 'nav-1')),
+  ]) {
+    group('a $type', () {
+      test('decodes to exactly the typed command', () {
+        expect(
+          decodeText('{"v":1,"type":"$type","id":"nav-1"}'),
+          RemoteControlCommandReceived(command),
+        );
+      });
+
+      test('is not the same command as a $otherType with that id', () {
+        expect(
+          decodeText('{"v":1,"type":"$otherType","id":"nav-1"}'),
+          isNot(RemoteControlCommandReceived(command)),
+        );
+      });
+
+      test('ignores unknown extra fields, as a tap does', () {
+        expect(
+          decodeText(
+            '{"v":1,"type":"$type","id":"nav-1","x":0.5,"durationMs":"no"}',
+          ),
+          RemoteControlCommandReceived(command),
+        );
+      });
+
+      group('with nothing to answer to is ignored', () {
+        for (final (name, text) in [
+          ('a missing id', '{"v":1,"type":"$type"}'),
+          ('a null id', '{"v":1,"type":"$type","id":null}'),
+          ('a numeric id', '{"v":1,"type":"$type","id":7}'),
+          ('an empty id', '{"v":1,"type":"$type","id":""}'),
+          ('a payload that is a list', '[{"v":1,"type":"$type","id":"a"}]'),
+          ('a payload that is a string', '"$type"'),
+          ('broken JSON', '{"v":1,"type":"$type",'),
+        ]) {
+          test(name, () => expect(decodeText(text), isNull));
+        }
+      });
+
+      for (final (name, fields) in [
+        ('v missing', '"type":"$type"'),
+        ('v as a string', '"v":"1","type":"$type"'),
+        ('v as a double', '"v":1.0,"type":"$type"'),
+        ('v null', '"v":null,"type":"$type"'),
+      ]) {
+        test('$name is invalid', () {
+          expect(
+            decodeText('{"id":"bad",$fields}'),
+            const RemoteControlMessageRejected(
+              'bad',
+              RemoteControlError.invalidCommand,
+            ),
+          );
+        });
+      }
+
+      test('another version is not read as version 1', () {
+        expect(
+          decodeText('{"v":2,"type":"$type","id":"later"}'),
+          const RemoteControlMessageRejected(
+            'later',
+            RemoteControlError.unsupportedCommand,
+          ),
+        );
+      });
+
+      test('in another case is another type', () {
+        expect(
+          decodeText('{"v":1,"type":"${type.toUpperCase()}","id":"nav-1"}'),
+          const RemoteControlMessageRejected(
+            'nav-1',
+            RemoteControlError.unsupportedCommand,
+          ),
+        );
+      });
+    });
+  }
+
+  test('a type that is not a string is invalid, whatever else is there', () {
+    expect(
+      decodeText('{"v":1,"type":["back"],"id":"nav-1"}'),
+      const RemoteControlMessageRejected(
+        'nav-1',
+        RemoteControlError.invalidCommand,
+      ),
+    );
+  });
+
+  test('recents is not a command yet', () {
+    expect(
+      decodeText('{"v":1,"type":"recents","id":"nav-1"}'),
+      const RemoteControlMessageRejected(
+        'nav-1',
+        RemoteControlError.unsupportedCommand,
+      ),
+    );
+  });
+
   group('acks', () {
+    test('a back and a home are answered like any command', () {
+      expect(
+        jsonDecode(
+          RemoteControlChannelCodec.encodeAck(
+            const RemoteControlAck.success('home-123'),
+          ),
+        ),
+        {'v': 1, 'type': 'ack', 'id': 'home-123', 'ok': true},
+      );
+      expect(
+        jsonDecode(
+          RemoteControlChannelCodec.encodeAck(
+            const RemoteControlAck.failure(
+              'back-123',
+              RemoteControlError.gestureRejected,
+            ),
+          ),
+        ),
+        {
+          'v': 1,
+          'type': 'ack',
+          'id': 'back-123',
+          'ok': false,
+          'error': 'gesture_rejected',
+        },
+      );
+    });
+
     test('success is exactly the documented object', () {
       expect(
         jsonDecode(
