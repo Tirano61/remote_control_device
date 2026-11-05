@@ -38,19 +38,32 @@ class FlutterWebRtcPeerConnectionFactory
   Future<WebRtcPeerConnection> create(
     WebRtcIceConfiguration configuration,
   ) async {
-    final connection = await rtc.createPeerConnection(<String, dynamic>{
-      'iceServers': [
-        for (final server in configuration.iceServers)
-          <String, dynamic>{'urls': server.urls},
-      ],
-      // Unified Plan is the only semantics current libwebrtc supports, and
-      // naming it keeps this end from depending on a default that has changed
-      // before. `remote_control_web` negotiates with the same semantics.
-      'sdpSemantics': 'unified-plan',
-    });
+    final connection = await rtc.createPeerConnection(
+      peerConnectionConfigurationOf(configuration),
+    );
     return _FlutterWebRtcPeerConnection(connection);
   }
 }
+
+/// What the plugin is asked for when a peer connection is created.
+@visibleForTesting
+Map<String, dynamic> peerConnectionConfigurationOf(
+  WebRtcIceConfiguration configuration,
+) => <String, dynamic>{
+  'iceServers': [
+    for (final server in configuration.iceServers)
+      <String, dynamic>{'urls': server.urls},
+  ],
+  // Unified Plan is the only semantics current libwebrtc supports, and
+  // naming it keeps this end from depending on a default that has changed
+  // before. `remote_control_web` negotiates with the same semantics.
+  'sdpSemantics': 'unified-plan',
+  // On the tablet a blinking caret was enough for libwebrtc to cap this stream
+  // at `max_fps=2` for over twenty minutes, and at that rate the frame that
+  // ends a transition can be dropped before it reaches the encoder.
+  // See "The final frame" in docs/webrtc/SCREEN_SHARING.md.
+  'enableCpuOveruseDetection': false,
+};
 
 class _FlutterWebRtcPeerConnection implements WebRtcPeerConnection {
   _FlutterWebRtcPeerConnection(this._connection) {
