@@ -32,8 +32,8 @@ VIDEO   device ──────────────> web        (sendonly 
 DATA    web  <──"control"──>  device      (see CONTROL_CHANNEL.md)
 ```
 
-`remote_control_web` does not render the video yet. This stage ends with a
-track being sent and a connection that stays up.
+`remote_control_web` renders the remote track and allows interactive control over
+the `control` channel.
 
 ## The order Android 14 requires
 
