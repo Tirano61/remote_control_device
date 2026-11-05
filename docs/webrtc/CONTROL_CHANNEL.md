@@ -704,17 +704,14 @@ Settings.
 builds before `set_text`. The record for `back` and `home` is in `remote_control_web`,
 in its `docs/CONTROL_CHANNEL.md`.
 
-`recents` has not: the web does not send it yet, so what stands behind it is Dart and
-JVM unit tests. Those stop at the action code handed to `performGlobalAction`. The
-part only a device can show is that Android opens the overview when it gets it. Do
-not stand in for the web with `adb shell input keyevent`: that exercises none of this
-path.
+`recents` and `set_text` have been validated on the same tablet, on 2026-11-05, from
+the web console's own buttons over the control channel. `recents` opened the overview
+and was acknowledged `ok`. `set_text` wrote into the focused search field of Android's
+Settings, the search ran on what it wrote, and it was acknowledged `ok`.
 
-`set_text` has not either, for the same reason: what stands behind it is Dart and JVM
-unit tests with fakes where Android's nodes would be. Only a device can show that a real
-field takes the action, that input focus resolves in a real application, and that the
-tablet's own text fields accept it. No debug path exists to send one, and none should
-be added: it would be a way to write text that no session authorised.
+Do not stand in for the web with `adb shell input keyevent`: that exercises none of this
+path. No debug path exists to send a `set_text`, and none should be added: it would be a
+way to write text that no session authorised.
 
 What has been seen, on the tablet (Android 14), is the declaration taking effect. After
 `adb install -r`, with no helper holding a `UiAutomation`:

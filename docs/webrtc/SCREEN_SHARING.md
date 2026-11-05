@@ -88,8 +88,9 @@ MediaProjectionScreenCaptureClient          the order, the reuse, the cleanup
 The client is ordinary Dart and holds every decision, so the order, the reuse
 rule, the readiness wait and the cleanup are unit tested against fakes. The
 adapters behind it are as thin as they can be made, because they are the part
-only a tablet can verify. The capture geometry is the exception: it is pure
-Kotlin and is unit tested on the JVM (`ScreenCaptureGeometryTest`).
+only a tablet can verify. The capture geometry and the settle frame are the
+exception: they are pure Kotlin and are unit tested on the JVM
+(`ScreenCaptureGeometryTest`, `ScreenCaptureSettleFrameTest`).
 
 ### Why the capture is not `getDisplayMedia`
 
@@ -142,6 +143,8 @@ onFrame
                                       landscape -> 1280x800 at (0, 240)
 rotation (display listener + configuration change)
     re-read the display; move the crop if the reading moved
+700 ms with no real frame
+    deliver the last texture once more   see "The final frame"
 ```
 
 Android mirrors a display into a projection's virtual display by scaling it to
@@ -193,6 +196,120 @@ this. `WindowMetrics` needs a visual context and describes a window, while the
 capture runs from the application context — the user is expected to be in
 another app — and needs the whole display, which is what the platform mirrors.
 `MediaQuery` and any hard-coded size were never options.
+
+### The final frame
+
+A mirrored display only produces a frame when something changes, so the frame
+that ends a transition has no successor. If the pipeline loses it before
+transmission, the technician keeps looking at an old picture, with the
+connection healthy and no error anywhere, until the tablet next repaints. On the
+tablet that lasted from 7 to 25 s, and it ended only because something else
+changed, such as the clock.
+
+Two changes keep the final picture, and they only work together:
+
+```text
+enableCpuOveruseDetection: false   on this screen-share PeerConnection
+one settle frame                   700 ms after the last real frame
+```
+
+Each one was tried alone on the tablet first, and each one failed:
+
+| | Removes | Still froze |
+| --- | --- | --- |
+| CPU adaptation off, alone | `limit=cpu`, `max_fps=2` | the encoder could still discard a final frame |
+| settle frame, alone | stale pictures while `limit=none` | under `limit=cpu`: the settle dropped, or decoded but never presented by Chrome |
+
+With CPU adaptation on, a blinking caret was enough to bring `max_fps=2`, and it
+then stayed for over twenty minutes.
+
+**What this covers.** Loss of the final frame anywhere before transmission, by
+offering the last visual state a second delivery. Two ways of losing it have been
+observed: WebRTC's adapter under a frame rate limit, and libvpx discarding an
+encoded frame that overshot (`vp8_drop_encodedframe_overshoot`). They are not
+claimed to be the only ones, and the mitigation does not depend on which it was.
+
+**What it does not cover.** There is one settle per quiet period and no retry, so
+a settle that is itself lost is not sent again. On an earlier run bandwidth
+estimation fell to about 40 kbps, the settle was not encoded, and the picture
+stayed slightly off (luma difference 4.7 of 255). And with CPU adaptation off,
+libwebrtc no longer lowers the frame rate when the tablet cannot keep up.
+
+#### The settle frame
+
+`ScreenCaptureSettleFrame.kt`, pure Kotlin, tested on the JVM against a virtual
+clock:
+
+```text
+real frame        cancels the wait; a new one starts, 700 ms
+wait runs out     SurfaceTextureHelper.forceFrame(), once
+delivery comes    same timestamp as the last real frame, and requested: the settle
+                  new timestamp: a real frame that got there first
+                  same timestamp, not requested: discarded
+settle sent       starts no new wait, so this is not a keepalive
+```
+
+* **No copy.** The image stays latched in the `SurfaceTexture`. An I420 copy was
+  tried first and rejected: about 27 ms per real frame on the capture thread, and
+  libwebrtc reconfigures the encoder whenever `is_texture` changes between frames.
+* **Thread.** Everything runs on the `SurfaceTextureHelper`'s `Handler`, with
+  `postDelayed`. No sleeps and no Dart timers.
+* **Timestamp.** The original's, plus the time since it arrived, so it is newer
+  than the original and on the same clock. WebRTC drops a frame that is not newer.
+* **Crop.** The settle repeats the crop of the real frame it repeats, never the
+  current one. A rotation's first real frame replaces the quiet period, so no
+  settle of the old orientation follows it.
+* **Stop.** `stopCapture` cancels the wait on the helper's thread, and any delivery
+  already on its way is refused. That one path is reached from the session ending,
+  from Android's "stop sharing", and from `dispose`. A peer connection rebuilt
+  within a session keeps the capture, and its settle timer, running, as it does for
+  real frames.
+
+#### CPU adaptation
+
+The detector is not removed. It keeps measuring and logging, and when it signals
+overuse nothing happens to the stream:
+
+```text
+overuse_frame_detector.cc           ... overuse detections 6 ... action AdaptDown
+resource_adaptation_processor.cc    Resource "EncoderUsageResource" signalled
+                                    kOveruse. Not adapting down because
+                                    VideoStreamAdapter returned kAdaptationDisabled
+```
+
+So those lines are expected. What must not appear is
+`Updating sink restrictions ... { max_fps=2 }`.
+
+#### What was seen on the tablet
+
+SKY_PAD10MAX, Android 14, debug APK, Chrome with a visible tab, no lldb and no
+hook. Temporary log counters and `getStats` polling were present during the run
+and are not in the code. A "freeze" is a video that still differs from the settled
+screen 15 s later, by more than 6 of 255 of mean luma on an 8×13 grid, so a smaller
+difference would not count; the largest difference measured was 2.3.
+
+| Run | Actions | Freezes |
+| --- | --- | --- |
+| Recents → Home, 100 cycles | 200 | 0 |
+| Mixed: Home, Recents, Back, Settings, subscreens | 110 | 0 |
+| Caret and repeated actions, 23.9 min | 110 | 0 |
+| Portrait, landscape, 270°, with transitions | 40 | 0 |
+
+```text
+limit=cpu samples         0 of 8127
+max_fps=2                 never, with kOveruse signalled 6 times
+settles resolved          481 of 508: all encoded, sent, received, decoded, presented
+final frames rescued      4, all with an encoder drop in the burst and a settle at qp 106
+DroppedFrames.Encoder     71 of about 6250 frames
+Same/old NTP              0
+frames after stop         0, closing 19 ms after a real frame with the wait pending
+thermal status            0, top temperature 26 °C
+```
+
+The remaining 27 settles had a real frame too close to tell their counters apart;
+the screen comparison after each action covers them. 460 actions with no freeze
+is a bound and not a proof: at this sample size a rate under about 0.65 % could go
+unseen.
 
 ### Reaching the plugin
 
