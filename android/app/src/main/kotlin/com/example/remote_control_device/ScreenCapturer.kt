@@ -52,10 +52,13 @@ import org.webrtc.VideoSink
  * rotation behind (seen on the tablet). Each signal reads the display again and the crop
  * follows the reading — see [ScreenCaptureGeometryRefresh].
  *
+ * The last frame before the screen goes quiet is sent a second time, once, by asking the helper
+ * to deliver its texture again — see [ScreenCaptureSettleFrame].
+ *
  * Threads: [startCapture] and [stopCapture] are called from the main thread; frames, the
- * display listener and the projection callback all run on the [SurfaceTextureHelper]'s
- * thread, which is the only thread that reads or moves [framing]. A configuration change
- * arrives on the main thread and is handed to that thread as it is.
+ * settle frame, the display listener and the projection callback all run on the
+ * [SurfaceTextureHelper]'s thread, which is the only thread that reads or moves [framing]. A
+ * configuration change arrives on the main thread and is handed to that thread as it is.
  */
 class ScreenCapturer(private val projectionGrant: Intent) : VideoCapturer, VideoSink {
 
@@ -69,6 +72,7 @@ class ScreenCapturer(private val projectionGrant: Intent) : VideoCapturer, Video
     private var surface: Surface? = null
     private var framing: ScreenCaptureFraming? = null
     private var geometryRefresh: ScreenCaptureGeometryRefresh? = null
+    private var settleFrame: ScreenCaptureSettleFrame? = null
 
     private val stopped = AtomicBoolean(false)
     private var mismatchLogged = false
@@ -122,6 +126,19 @@ class ScreenCapturer(private val projectionGrant: Intent) : VideoCapturer, Video
         context = applicationContext
         observer = capturerObserver
         displayManager = applicationContext.getSystemService(DisplayManager::class.java)
+        settleFrame = ScreenCaptureSettleFrame(
+            timer = object : SettleFrameTimer {
+                override fun schedule(action: Runnable, delayMs: Long) {
+                    surfaceTextureHelper.handler.postDelayed(action, delayMs)
+                }
+
+                override fun cancel(action: Runnable) {
+                    surfaceTextureHelper.handler.removeCallbacks(action)
+                }
+            },
+            nanoTime = System::nanoTime,
+            requestRedelivery = surfaceTextureHelper::forceFrame,
+        )
     }
 
     /**
@@ -185,21 +202,30 @@ class ScreenCapturer(private val projectionGrant: Intent) : VideoCapturer, Video
     override fun onFrame(frame: VideoFrame) {
         if (stopped.get()) return
         val framing = framing ?: return
+        val settleFrame = settleFrame ?: return
 
         val buffer = frame.buffer
         val side = framing.virtualDisplaySide
-        if (buffer.width != side || buffer.height != side) {
+        val crop = if (buffer.width == side && buffer.height == side) {
+            framing.content
+        } else {
             // Not the square this capturer asked for. Sent as it came rather than cropped
             // with a rectangle that belongs to another size.
             if (!mismatchLogged) {
                 mismatchLogged = true
                 Log.w(TAG, "capture frame is ${buffer.width}x${buffer.height}, expected ${side}x$side")
             }
-            observer.onFrameCaptured(frame)
+            null
+        }
+
+        val outgoing = settleFrame.onFrame(frame.timestampNs, crop) ?: return
+        val content = outgoing.crop
+        if (content == null) {
+            // Shares the helper's buffer, which the helper's own frame releases.
+            observer.onFrameCaptured(VideoFrame(buffer, frame.rotation, outgoing.timestampNs))
             return
         }
 
-        val content = framing.content
         val cropped = buffer.cropAndScale(
             content.left,
             content.top,
@@ -208,7 +234,7 @@ class ScreenCapturer(private val projectionGrant: Intent) : VideoCapturer, Video
             content.width,
             content.height,
         )
-        val framed = VideoFrame(cropped, frame.rotation, frame.timestampNs)
+        val framed = VideoFrame(cropped, frame.rotation, outgoing.timestampNs)
         try {
             observer.onFrameCaptured(framed)
         } finally {
@@ -225,6 +251,7 @@ class ScreenCapturer(private val projectionGrant: Intent) : VideoCapturer, Video
         ThreadUtils.invokeAtFrontUninterruptibly(
             helper.handler,
             Runnable {
+                settleFrame?.stop()
                 helper.stopListening()
                 displayManager.unregisterDisplayListener(displayListener)
                 context.unregisterComponentCallbacks(configurationCallbacks)
