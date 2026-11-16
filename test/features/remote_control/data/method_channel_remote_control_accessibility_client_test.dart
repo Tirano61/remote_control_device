@@ -136,6 +136,77 @@ void main() {
     });
   });
 
+  group('long press', () {
+    test('sends the normalized position, and no duration', () async {
+      answerWith((_) => 'completed');
+
+      await client.longPress(0.25, 0.75);
+
+      expect(calls.single.method, 'performLongPress');
+      expect(calls.single.arguments, {'x': 0.25, 'y': 0.75});
+    });
+
+    for (final (wire, outcome) in const [
+      ('completed', RemoteGestureOutcome.completed),
+      ('unavailable', RemoteGestureOutcome.unavailable),
+      ('cancelled', RemoteGestureOutcome.rejected),
+      ('rejected', RemoteGestureOutcome.rejected),
+      ('busy', RemoteGestureOutcome.rejected),
+      ('invalid', RemoteGestureOutcome.rejected),
+      ('something new', RemoteGestureOutcome.rejected),
+    ]) {
+      test('"$wire" means $outcome', () async {
+        answerWith((_) => wire);
+
+        expect(await client.longPress(0.5, 0.5), outcome);
+      });
+    }
+
+    test('a platform error is a rejection, not an exception', () async {
+      answerWith((_) => throw PlatformException(code: 'BOOM'));
+
+      expect(await client.longPress(0.5, 0.5), RemoteGestureOutcome.rejected);
+    });
+
+    test('a bridge that is not there is unavailable', () async {
+      expect(
+        await client.longPress(0.5, 0.5),
+        RemoteGestureOutcome.unavailable,
+      );
+    });
+
+    test('a bridge that never answers does not hold the queue', () async {
+      final never = Completer<Object?>();
+      messenger.setMockMethodCallHandler(channel, (_) => never.future);
+
+      expect(await client.longPress(0.5, 0.5), RemoteGestureOutcome.rejected);
+    });
+
+    test('the guard outlasts the longest long press Android will hold', () {
+      // MAX_LONG_PRESS_DURATION_MS in RemoteGesture.kt: the device refuses a
+      // long press it would hold for longer, so the guard never cuts one short.
+      const longestLongPress = Duration(milliseconds: 4000);
+
+      expect(
+        MethodChannelRemoteControlAccessibilityClient().gestureTimeout,
+        greaterThan(longestLongPress),
+      );
+    });
+
+    test('a long press answered after a tap would have been, is not refused '
+        'while the guard has not expired', () async {
+      client = MethodChannelRemoteControlAccessibilityClient(
+        gestureTimeout: const Duration(seconds: 5),
+      );
+      messenger.setMockMethodCallHandler(channel, (_) async {
+        await Future<void>.delayed(const Duration(milliseconds: 40));
+        return 'completed';
+      });
+
+      expect(await client.longPress(0.5, 0.5), RemoteGestureOutcome.completed);
+    });
+  });
+
   group('swipe', () {
     Future<RemoteGestureOutcome> swipe() => client.swipe(
       startX: 0.5,

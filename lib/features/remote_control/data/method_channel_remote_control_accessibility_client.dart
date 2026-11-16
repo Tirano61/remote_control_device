@@ -11,8 +11,12 @@ import 'package:remote_control_device/features/remote_control/domain/remote_cont
 /// The Android side always answers a gesture, including when the service goes
 /// away mid-gesture, so [gestureTimeout] is a guard against a bridge that never
 /// answers: a queue waiting on a lost reply would otherwise stop running
-/// commands. It has to outlast the longest swipe the protocol allows, or a
-/// gesture still running would be reported as refused.
+/// commands. It has to outlast the longest gesture, or a gesture still running
+/// would be reported as refused: the longest swipe the protocol allows, and a
+/// long press, whose length the Android side takes from the device's
+/// long-press timeout plus a margin and caps well below this guard. Dart never
+/// learns that length, so the one guard covers both rather than each gesture
+/// estimating its own.
 class MethodChannelRemoteControlAccessibilityClient
     implements RemoteControlAccessibilityClient {
   MethodChannelRemoteControlAccessibilityClient({
@@ -25,6 +29,7 @@ class MethodChannelRemoteControlAccessibilityClient
 
   static const String availableMethod = 'isAccessibilityServiceAvailable';
   static const String tapMethod = 'performTap';
+  static const String longPressMethod = 'performLongPress';
   static const String swipeMethod = 'performSwipe';
   static const String backMethod = 'performBack';
   static const String homeMethod = 'performHome';
@@ -62,6 +67,16 @@ class MethodChannelRemoteControlAccessibilityClient
   @override
   Future<RemoteGestureOutcome> tap(double normalizedX, double normalizedY) =>
       _perform(tapMethod, <String, Object>{'x': normalizedX, 'y': normalizedY});
+
+  /// Only the position crosses the bridge: there is no duration to send.
+  @override
+  Future<RemoteGestureOutcome> longPress(
+    double normalizedX,
+    double normalizedY,
+  ) => _perform(longPressMethod, <String, Object>{
+    'x': normalizedX,
+    'y': normalizedY,
+  });
 
   @override
   Future<RemoteGestureOutcome> swipe({

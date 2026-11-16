@@ -6,10 +6,11 @@ import android.content.Intent
 import android.graphics.Path
 import android.os.Build
 import android.util.Log
+import android.view.ViewConfiguration
 import android.view.accessibility.AccessibilityEvent
 
 /**
- * Puts a touch on the screen, presses Back, Home or Recents, writes over the content of the
+ * Puts a touch on the screen, short or held, or a stroke across it, presses Back, Home or Recents, writes over the content of the
  * focused field, or runs that field's IME action. It holds no policy and asks for nothing else.
  *
  * Only the user can enable it, in Android's accessibility settings, and that says the *service*
@@ -36,6 +37,8 @@ class RemoteControlAccessibilityService : AccessibilityService() {
                 dispatch = ::dispatchStroke,
                 performGlobalAction = ::performGlobalAction,
                 activeWindow = ::activeWindow,
+                // The user's touch-and-hold delay, as every view on the device reads it.
+                longPressTimeoutMs = { ViewConfiguration.getLongPressTimeout().toLong() },
             ),
         )
     }
@@ -56,7 +59,7 @@ class RemoteControlAccessibilityService : AccessibilityService() {
 
     /**
      * One stroke at screen coordinates, not on any view: a straight line for a swipe, and with
-     * nowhere to go, a tap.
+     * nowhere to go, a tap or, held longer, a long press.
      */
     private fun dispatchStroke(stroke: GestureStroke, onResult: (Boolean) -> Unit): Boolean {
         val path = Path().apply {

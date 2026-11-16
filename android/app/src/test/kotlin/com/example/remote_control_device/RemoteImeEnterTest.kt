@@ -82,6 +82,7 @@ class RemoteImeEnterTest {
             windowReads++
             window
         },
+        longPressTimeoutMs = { 500L },
     )
 
     private fun imeEnter() = dispatcher.imeEnter { outcomes += it }
@@ -193,6 +194,7 @@ class RemoteImeEnterTest {
             dispatch = { _, _ -> throw AssertionError("an ime_enter is no stroke") },
             performGlobalAction = { throw AssertionError("an ime_enter is no global action") },
             activeWindow = { throw IllegalStateException("connection lost") },
+            longPressTimeoutMs = { 500L },
         )
         throwing.imeEnter { outcomes += it }
 

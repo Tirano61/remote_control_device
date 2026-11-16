@@ -77,6 +77,16 @@ abstract interface class RemoteControlAccessibilityClient {
   /// it is given, which is why only `RemoteControlCommandQueue` calls it.
   Future<RemoteGestureOutcome> tap(double normalizedX, double normalizedY);
 
+  /// Holds a touch at a position normalized as for [tap], for as long as this
+  /// device takes to read it as a long press, and completes when Android says
+  /// what became of it. How long that is is decided on the Android side.
+  ///
+  /// Never throws. Like [tap], it runs whatever it is given.
+  Future<RemoteGestureOutcome> longPress(
+    double normalizedX,
+    double normalizedY,
+  );
+
   /// Draws one straight stroke between two normalized positions, taking
   /// [durationMs], and completes when Android says what became of it.
   ///

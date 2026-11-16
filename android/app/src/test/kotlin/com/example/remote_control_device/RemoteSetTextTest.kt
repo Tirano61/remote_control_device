@@ -77,6 +77,7 @@ class RemoteSetTextTest {
             windowReads++
             window
         },
+        longPressTimeoutMs = { 500L },
     )
 
     private fun setText(text: String = "Hola") = dispatcher.setText(text) { outcomes += it }
@@ -183,6 +184,7 @@ class RemoteSetTextTest {
             dispatch = { _, _ -> throw AssertionError("a set_text is no stroke") },
             performGlobalAction = { throw AssertionError("a set_text is no global action") },
             activeWindow = { throw IllegalStateException("connection lost") },
+            longPressTimeoutMs = { 500L },
         )
 
         throwing.setText("Hola") { outcomes += it }

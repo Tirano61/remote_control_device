@@ -781,6 +781,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
       case RemoteControlCommandReceived(:final command):
         final (name, finished) = switch (command) {
           RemoteTapCommand() => ('tap', 'completed'),
+          RemoteLongPressCommand() => ('long_press', 'completed'),
           RemoteSwipeCommand() => ('swipe', 'completed'),
           // Android says it took these, and never when they end.
           RemoteBackCommand() => ('back', 'accepted by android'),
