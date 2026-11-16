@@ -102,3 +102,13 @@ final class RemoteSetTextCommand extends RemoteControlCommand {
   @override
   String toString() => 'RemoteSetTextCommand($id)';
 }
+
+/// Runs the IME action of the field that has input focus.
+///
+/// Not a newline and not a key press: it is whatever action that field
+/// declares for its keyboard's action key, which may be Search, Done, Go,
+/// Next, Send or nothing in particular. Like [RemoteSetTextCommand] it names no
+/// field, and like [RemoteBackCommand] it carries nothing but an [id].
+final class RemoteImeEnterCommand extends RemoteControlCommand {
+  const RemoteImeEnterCommand({required String id}) : super(id);
+}

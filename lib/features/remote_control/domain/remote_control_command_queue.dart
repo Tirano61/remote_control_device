@@ -95,6 +95,7 @@ class RemoteControlCommandQueue {
       RemoteSetTextCommand(:final text) => _setText(
         _accessibility.performSetText(text),
       ),
+      RemoteImeEnterCommand() => _imeEnter(_accessibility.performImeEnter()),
     };
     return error == null
         ? RemoteControlAck.success(command.id)
@@ -118,6 +119,19 @@ class RemoteControlCommandQueue {
       RemoteControlError.textTargetUnavailable,
     RemoteTextOutcome.rejected => RemoteControlError.textRejected,
     RemoteTextOutcome.unavailable =>
+      RemoteControlError.accessibilityUnavailable,
+  };
+
+  Future<RemoteControlError?> _imeEnter(
+    Future<RemoteImeEnterOutcome> running,
+  ) async => switch (await running) {
+    RemoteImeEnterOutcome.completed => null,
+    RemoteImeEnterOutcome.targetUnavailable =>
+      RemoteControlError.textTargetUnavailable,
+    RemoteImeEnterOutcome.actionUnavailable =>
+      RemoteControlError.imeActionUnavailable,
+    RemoteImeEnterOutcome.rejected => RemoteControlError.imeActionRejected,
+    RemoteImeEnterOutcome.unavailable =>
       RemoteControlError.accessibilityUnavailable,
   };
 }

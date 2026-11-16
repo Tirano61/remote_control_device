@@ -318,6 +318,51 @@ void main() {
     });
   });
 
+  group('performImeEnter', () {
+    test('sends no arguments: no text, no key code, no action id', () async {
+      answerWith((_) => 'completed');
+
+      await client.performImeEnter();
+
+      expect(calls.single.method, 'performImeEnter');
+      expect(calls.single.arguments, isNull);
+    });
+
+    for (final (wire, outcome) in const [
+      ('completed', RemoteImeEnterOutcome.completed),
+      ('targetUnavailable', RemoteImeEnterOutcome.targetUnavailable),
+      ('actionUnavailable', RemoteImeEnterOutcome.actionUnavailable),
+      ('unavailable', RemoteImeEnterOutcome.unavailable),
+      ('rejected', RemoteImeEnterOutcome.rejected),
+      ('busy', RemoteImeEnterOutcome.rejected),
+      ('invalid', RemoteImeEnterOutcome.rejected),
+      ('something new', RemoteImeEnterOutcome.rejected),
+    ]) {
+      test('"$wire" means $outcome', () async {
+        answerWith((_) => wire);
+
+        expect(await client.performImeEnter(), outcome);
+      });
+    }
+
+    test('a platform error is a rejection, not an exception', () async {
+      answerWith((_) => throw PlatformException(code: 'BOOM'));
+
+      expect(await client.performImeEnter(), RemoteImeEnterOutcome.rejected);
+    });
+
+    test('a bridge that is not there is unavailable', () async {
+      expect(await client.performImeEnter(), RemoteImeEnterOutcome.unavailable);
+    });
+
+    test('a bridge that never answers does not hold the queue', () async {
+      final never = Completer<Object?>();
+      messenger.setMockMethodCallHandler(channel, (_) => never.future);
+
+      expect(await client.performImeEnter(), RemoteImeEnterOutcome.rejected);
+    });
+  });
+
   group('settings', () {
     test('only asks Android to open them', () async {
       answerWith((_) => null);

@@ -36,6 +36,28 @@ enum RemoteTextOutcome {
   unavailable,
 }
 
+/// What became of an `ime_enter`. Its own type because, besides having no
+/// field to act on, a valid one may find a field with no IME action.
+enum RemoteImeEnterOutcome {
+  /// The focused field took `ACTION_IME_ENTER`. That Android took it is all
+  /// this says: not what the application then did with it.
+  completed,
+
+  /// No active window, nothing with input focus, or a focused node that is not
+  /// editable and enabled.
+  targetUnavailable,
+
+  /// The focused field is a valid target and does not list `ACTION_IME_ENTER`.
+  actionUnavailable,
+
+  /// The field lists the action and it was not taken, or a gesture was still
+  /// running.
+  rejected,
+
+  /// The accessibility service is not connected.
+  unavailable,
+}
+
 /// The boundary `AccessibilityService` lives behind.
 ///
 /// Nothing here can enable the service, because nothing can: Android requires
@@ -89,6 +111,14 @@ abstract interface class RemoteControlAccessibilityClient {
   /// Never throws. Like [tap], it runs whatever it is given, and this is the
   /// only reason the Android side looks at the active window at all.
   Future<RemoteTextOutcome> performSetText(String text);
+
+  /// Runs the IME action of the field with input focus, and completes when
+  /// Android says whether it took it. Nothing about the field comes back.
+  ///
+  /// Never throws. Like [tap], it runs whatever it is given, and like
+  /// [performSetText] it is a reason the Android side looks at the active
+  /// window.
+  Future<RemoteImeEnterOutcome> performImeEnter();
 
   /// Opens Android's accessibility settings. Never throws.
   Future<void> openAccessibilitySettings();

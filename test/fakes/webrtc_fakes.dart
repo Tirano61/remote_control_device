@@ -343,6 +343,11 @@ class FakeWebRtcDataChannel implements WebRtcDataChannel {
       jsonEncode({'v': 1, 'type': 'set_text', 'id': id, 'text': text}),
     ),
   );
+
+  /// A well-formed ime_enter arriving as a text frame.
+  void pushImeEnter(String id) => pushFrame(
+    WebRtcDataChannelMessage.text('{"v":1,"type":"ime_enter","id":"$id"}'),
+  );
 }
 
 /// The signaling half, recording exactly what would go on the wire.

@@ -9,8 +9,8 @@ import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 
 /**
- * Puts a touch on the screen, presses Back, Home or Recents, or writes over the content of the
- * focused field. It holds no policy and asks for nothing else.
+ * Puts a touch on the screen, presses Back, Home or Recents, writes over the content of the
+ * focused field, or runs that field's IME action. It holds no policy and asks for nothing else.
  *
  * Only the user can enable it, in Android's accessibility settings, and that says the *service*
  * may exist. It says nothing about any assistance: the service stays connected between sessions,
@@ -19,7 +19,8 @@ import android.view.accessibility.AccessibilityEvent
  *
  * It receives no accessibility events. It may retrieve window content
  * (`res/xml/accessibility_service_config.xml`), and uses that for one thing: finding what has input
- * focus while a `set_text` runs. It reads nothing from what it finds and keeps none of it. See
+ * focus while a `set_text` or an `ime_enter` runs. It reads nothing from what it finds beyond
+ * whether it is editable and enabled and which actions it lists, and keeps none of it. See
  * "Text-input privacy boundary" in the document above.
  */
 class RemoteControlAccessibilityService : AccessibilityService() {

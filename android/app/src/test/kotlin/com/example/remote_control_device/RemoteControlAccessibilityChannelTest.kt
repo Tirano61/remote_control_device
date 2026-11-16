@@ -62,13 +62,25 @@ class RemoteControlAccessibilityChannelTest {
     /** A window whose focused field records what it is given, and takes it or does not. */
     private val written = mutableListOf<String>()
 
-    private fun windowWithField(accepts: Boolean = true) = object : RemoteTextWindow {
+    /** How many IME actions the focused field was asked to run. */
+    private var imeEnters = 0
+
+    private fun windowWithField(
+        accepts: Boolean = true,
+        exposesImeEnter: Boolean = true,
+    ) = object : RemoteTextWindow {
         override fun findInputFocus() = object : RemoteTextNode {
             override val isEditable = true
             override val isEnabled = true
+            override val exposesImeEnter = exposesImeEnter
 
             override fun setText(text: String): Boolean {
                 written += text
+                return accepts
+            }
+
+            override fun imeEnter(): Boolean {
+                imeEnters++
                 return accepts
             }
 
@@ -291,6 +303,82 @@ class RemoteControlAccessibilityChannelTest {
 
         assertEquals(List<Any?>(3) { "invalid" }, answers)
         assertTrue(written.isEmpty())
+    }
+
+    @Test
+    fun `performImeEnter runs the action of the focused field, with no arguments`() {
+        connect()
+        window = windowWithField()
+
+        call("performImeEnter", null)
+
+        assertEquals(1, imeEnters)
+        assertTrue(written.isEmpty())
+        assertEquals(listOf<Any?>("completed"), answers)
+    }
+
+    @Test
+    fun `performImeEnter ignores arguments it was never meant to have`() {
+        connect()
+        window = windowWithField()
+
+        call("performImeEnter", mapOf("text" to "\n", "keyCode" to 66, "actionId" to 6))
+
+        assertEquals(1, imeEnters)
+        assertTrue(written.isEmpty())
+        assertEquals(listOf<Any?>("completed"), answers)
+    }
+
+    @Test
+    fun `a field without the action answers actionUnavailable, and nothing runs`() {
+        connect()
+        window = windowWithField(exposesImeEnter = false)
+
+        call("performImeEnter", null)
+
+        assertEquals(0, imeEnters)
+        assertEquals(listOf<Any?>("actionUnavailable"), answers)
+    }
+
+    @Test
+    fun `a field that refuses the IME action answers rejected`() {
+        connect()
+        window = windowWithField(accepts = false)
+
+        call("performImeEnter", null)
+
+        assertEquals(listOf<Any?>("rejected"), answers)
+    }
+
+    @Test
+    fun `an ime_enter with no window answers targetUnavailable`() {
+        connect()
+
+        call("performImeEnter", null)
+
+        assertEquals(listOf<Any?>("targetUnavailable"), answers)
+    }
+
+    @Test
+    fun `an ime_enter with no service answers unavailable`() {
+        window = windowWithField()
+
+        call("performImeEnter", null)
+
+        assertEquals(listOf<Any?>("unavailable"), answers)
+        assertEquals(0, imeEnters)
+    }
+
+    @Test
+    fun `an ime_enter while a swipe runs answers busy, and runs nothing`() {
+        connect()
+        window = windowWithField()
+
+        call("performSwipe", swipeArguments())
+        call("performImeEnter", null)
+
+        assertEquals(listOf<Any?>("busy"), answers)
+        assertEquals(0, imeEnters)
     }
 
     @Test

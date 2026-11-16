@@ -1052,6 +1052,273 @@ void main() {
     });
   });
 
+  // `accessibility.imeEnters` being zero is what "the window was not consulted"
+  // means here, as `setTexts` is for a set_text.
+  group('an ime_enter', () {
+    test('ACTIVE, this peer, channel open: the action runs', () async {
+      final channel = await reachOpenChannel();
+
+      channel.pushImeEnter('enter-1');
+      await settle();
+
+      expect(accessibility.imeEnters, 1);
+      expect(accessibility.gestures, ['ime_enter']);
+      expect(channel.sentAcks, const [RemoteControlAck.success('enter-1')]);
+    });
+
+    test('CONNECTING: session_not_active, focus not looked for', () async {
+      final channel = await reachOpenChannel(active: false);
+
+      channel.pushImeEnter('enter-1');
+      await settle();
+
+      expect(accessibility.imeEnters, 0);
+      expect(accessibility.gestures, isEmpty);
+      expect(channel.sentAcks, const [
+        RemoteControlAck.failure(
+          'enter-1',
+          RemoteControlError.sessionNotActive,
+        ),
+      ]);
+    });
+
+    test(
+      'an enabled service with no ACTIVE session consults nothing',
+      () async {
+        expect(
+          accessibility.status,
+          RemoteControlAccessibilityStatus.available,
+        );
+        final channel = await reachOpenChannel(active: false);
+
+        channel.pushImeEnter('enter-1');
+        await settle();
+
+        expect(accessibility.gestures, isEmpty);
+      },
+    );
+
+    test('ACTIVE for another session is not this session', () async {
+      final channel = await reachOpenChannel(active: false);
+      bloc.add(
+        const WebRtcActiveRemoteSessionChanged(testOtherRemoteSessionId),
+      );
+      await settle();
+
+      channel.pushImeEnter('enter-1');
+      await settle();
+
+      expect(accessibility.imeEnters, 0);
+      expect(
+        channel.sentAcks.single.error,
+        RemoteControlError.sessionNotActive,
+      );
+    });
+
+    test('arriving after the session closed runs nothing', () async {
+      final channel = await reachOpenChannel();
+      bloc.add(const WebRtcActiveRemoteSessionChanged(null));
+      await settle();
+
+      channel.pushImeEnter('late');
+      await settle();
+
+      expect(accessibility.imeEnters, 0);
+      expect(channel.sentAcks, const [
+        RemoteControlAck.failure('late', RemoteControlError.sessionNotActive),
+      ]);
+    });
+
+    test('on a channel that is not open it runs nothing', () async {
+      final channel = await reachOpenChannel();
+      channel.pushState(WebRtcDataChannelState.closing);
+      await settle();
+
+      channel.pushImeEnter('enter-1');
+      await settle();
+
+      expect(accessibility.imeEnters, 0);
+      expect(channel.sentAcks, isEmpty);
+    });
+
+    test('a malformed one is answered and never runs', () async {
+      final channel = await reachOpenChannel();
+
+      channel.pushFrame(
+        const WebRtcDataChannelMessage.text(
+          '{"v":"1","type":"ime_enter","id":"bad"}',
+        ),
+      );
+      channel.pushFrame(
+        const WebRtcDataChannelMessage.text('{"v":1,"type":"ime_enter"}'),
+      );
+      await settle();
+
+      expect(accessibility.imeEnters, 0);
+      expect(channel.sentAcks, const [
+        RemoteControlAck.failure('bad', RemoteControlError.invalidCommand),
+      ]);
+    });
+
+    for (final (outcome, error) in const [
+      (
+        RemoteImeEnterOutcome.targetUnavailable,
+        RemoteControlError.textTargetUnavailable,
+      ),
+      (
+        RemoteImeEnterOutcome.actionUnavailable,
+        RemoteControlError.imeActionUnavailable,
+      ),
+      (RemoteImeEnterOutcome.rejected, RemoteControlError.imeActionRejected),
+      (
+        RemoteImeEnterOutcome.unavailable,
+        RemoteControlError.accessibilityUnavailable,
+      ),
+    ]) {
+      test('$outcome reaches the ack as ${error.name}', () async {
+        final channel = await reachOpenChannel();
+        accessibility.imeEnterOutcome = outcome;
+
+        channel.pushImeEnter('enter-1');
+        await settle();
+
+        expect(channel.sentAcks, [RemoteControlAck.failure('enter-1', error)]);
+      });
+    }
+
+    test('nothing is acknowledged before Android answers', () async {
+      final channel = await reachOpenChannel();
+      accessibility.holdGestures = true;
+
+      channel.pushImeEnter('enter-1');
+      await settle();
+
+      expect(accessibility.imeEnters, 1);
+      expect(channel.sentAcks, isEmpty);
+
+      accessibility.finishGesture();
+      await settle();
+
+      expect(channel.sentAcks, const [RemoteControlAck.success('enter-1')]);
+    });
+
+    test('the session ending drops it before it starts', () async {
+      final channel = await reachOpenChannel();
+      accessibility.holdGestures = true;
+      channel.pushTap('a');
+      channel.pushImeEnter('b');
+      await settle();
+
+      bloc.add(const WebRtcActiveRemoteSessionChanged(null));
+      await settle();
+      accessibility.finishGesture();
+      await settle();
+
+      expect(accessibility.imeEnters, 0);
+      expect(channel.sentAcks, const [
+        RemoteControlAck.failure('b', RemoteControlError.sessionNotActive),
+        RemoteControlAck.success('a'),
+      ]);
+    });
+
+    test('does not need the screen to be shared', () async {
+      screenCapture.result = const ScreenCaptureUnavailable(
+        ScreenCaptureFailure.captureRefused,
+      );
+      final channel = await reachOpenChannel();
+      expect(screenCapture.isActive, isFalse);
+
+      channel.pushImeEnter('enter-1');
+      await settle();
+
+      expect(accessibility.imeEnters, 1);
+      expect(channel.sentAcks, const [RemoteControlAck.success('enter-1')]);
+    });
+
+    test('tap, set_text, ime_enter, home run in order on one queue', () async {
+      final channel = await reachOpenChannel();
+      accessibility.holdGestures = true;
+
+      channel.pushTap('a', x: 0.1);
+      channel.pushSetText('b', 'Hola');
+      channel.pushImeEnter('c');
+      channel.pushHome('d');
+      await settle();
+
+      final expected = <Object>[
+        (0.1, 0.5),
+        ('set_text', 'Hola'),
+        'ime_enter',
+        'home',
+      ];
+      expect(accessibility.gestures, expected.take(1));
+      for (var finished = 1; finished < expected.length; finished++) {
+        accessibility.finishGesture();
+        await settle();
+        expect(accessibility.gestures, expected.take(finished + 1));
+        expect(channel.sentAcks, hasLength(finished));
+      }
+
+      accessibility.finishGesture();
+      await settle();
+      expect(channel.sentAcks, const [
+        RemoteControlAck.success('a'),
+        RemoteControlAck.success('b'),
+        RemoteControlAck.success('c'),
+        RemoteControlAck.success('d'),
+      ]);
+    });
+
+    group('generations', () {
+      test('a message from a previous generation runs nothing', () async {
+        final channel = await reachOpenChannel();
+
+        bloc.add(
+          const WebRtcControlMessageReceived(
+            0,
+            RemoteControlCommandReceived(RemoteImeEnterCommand(id: 'stale')),
+          ),
+        );
+        await settle();
+
+        expect(accessibility.imeEnters, 0);
+        expect(channel.sentAcks, isEmpty);
+      });
+
+      test('the channel of a replaced peer delivers nothing', () async {
+        final oldChannel = await reachOpenChannel();
+
+        factory.last.pushConnectionState(WebRtcConnectionState.failed);
+        await settle();
+        bloc.add(WebRtcOfferReceived(offerFor(sdp: testSecondOfferSdp)));
+        await settle();
+        expect(factory.createCount, 2);
+
+        oldChannel.pushImeEnter('stale');
+        await settle();
+
+        expect(accessibility.imeEnters, 0);
+        expect(oldChannel.sentAcks, isEmpty);
+      });
+
+      test('one queued before the peer failed never runs', () async {
+        final channel = await reachOpenChannel();
+        accessibility.holdGestures = true;
+        channel.pushTap('running');
+        channel.pushImeEnter('queued');
+        await settle();
+
+        factory.last.pushConnectionState(WebRtcConnectionState.failed);
+        await settle();
+        accessibility.finishGesture();
+        await settle();
+
+        expect(accessibility.imeEnters, 0);
+        expect(channel.sentAcks, isEmpty);
+      });
+    });
+  });
+
   group('a closed channel', () {
     test('gets no late ack', () async {
       final channel = await reachOpenChannel();
