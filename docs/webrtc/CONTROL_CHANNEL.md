@@ -920,9 +920,23 @@ the web console's own buttons over the control channel. `recents` opened the ove
 and was acknowledged `ok`. `set_text` wrote into the focused search field of Android's
 Settings, the search ran on what it wrote, and it was acknowledged `ok`.
 
-`ime_enter` has **not** been run on a device. It is covered by Dart and JVM tests only;
-its end-to-end check is planned from `remote_control_web`, and has to confirm the
-visible effect, since `ok: true` does not.
+`ime_enter` has been validated end to end on the T10A (Android 16, API 36), with Gboard,
+in the search field of Android's Settings. The technician focused the field with a
+remote tap and wrote `wifi` with `set_text`; neither of them ran an IME action on its
+own. Only pressing `Acción` in the web console did:
+
+```json
+{"v":1,"type":"ime_enter","id":"enter-7"}
+{"v":1,"type":"ack","id":"enter-7","ok":true}
+```
+
+The ack arrived about 62 ms later. Since `ok: true` does not say what the application
+did, the effect was checked on the picture: Settings ran the search and closed the
+keyboard.
+
+Two of its errors were also seen on the tablet: `text_target_unavailable` with nothing
+to write to, and `accessibility_unavailable` with the service disabled.
+`ime_action_unavailable` was not reproduced on a device; it is covered by tests only.
 
 Do not stand in for the web with `adb shell input keyevent`: that exercises none of this
 path. No debug path exists to send a `set_text` or an `ime_enter`, and none should be
