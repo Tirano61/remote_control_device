@@ -10,6 +10,7 @@ import 'package:remote_control_device/features/remote_control/domain/entities/re
 import 'package:remote_control_device/features/remote_control/domain/entities/remote_control_inbound_message.dart';
 import 'package:remote_control_device/features/remote_control/domain/remote_control_accessibility_client.dart';
 import 'package:remote_control_device/features/remote_control/domain/remote_control_command_queue.dart';
+import 'package:remote_control_device/features/remote_control/domain/remote_touch_controller.dart';
 import 'package:remote_control_device/features/signaling/domain/entities/signaling_relay_result.dart';
 import 'package:remote_control_device/features/signaling/domain/entities/webrtc_answer.dart';
 import 'package:remote_control_device/features/signaling/domain/entities/webrtc_ice_candidate.dart';
@@ -99,7 +100,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
        _signaling = signaling,
        _iceConfiguration = iceConfiguration,
        _screenCapture = screenCapture,
-       _commandQueue = RemoteControlCommandQueue(remoteControl),
+       _remoteControl = remoteControl,
        super(const WebRtcIdle()) {
     on<WebRtcOfferReceived>(_onOfferReceived);
     on<WebRtcRemoteIceReceived>(_onRemoteIceReceived);
@@ -119,7 +120,18 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   final WebRtcSignalingGateway _signaling;
   final WebRtcIceConfiguration _iceConfiguration;
   final ScreenCaptureClient _screenCapture;
-  final RemoteControlCommandQueue _commandQueue;
+  final RemoteControlAccessibilityClient _remoteControl;
+
+  /// The remote touch, if any. Its `touch_hold` waits in [_commandQueue] like
+  /// any command; what follows it comes here directly. Every path that drops
+  /// the queue's pending commands ends it first.
+  late final RemoteTouchController _touches = RemoteTouchController(
+    _remoteControl,
+    log: _log,
+  );
+
+  late final RemoteControlCommandQueue _commandQueue =
+      RemoteControlCommandQueue(_remoteControl, touches: _touches);
 
   /// Bumped whenever a negotiation is abandoned or replaced. Everything a peer
   /// connection reports carries the generation it belongs to, and anything that
@@ -778,6 +790,11 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
           RemoteControlAck.failure(id, error),
         );
 
+      case RemoteControlCommandReceived(
+        command: final RemoteTouchCommand command,
+      ):
+        _onTouchCommand(generation, channel, command);
+
       case RemoteControlCommandReceived(:final command):
         final (name, finished) = switch (command) {
           RemoteTapCommand() => ('tap', 'completed'),
@@ -790,7 +807,8 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
           // The id and never the text, here and in every line below.
           RemoteSetTextCommand() => ('set_text', 'accepted by android'),
           RemoteImeEnterCommand() => ('ime_enter', 'accepted by android'),
-          RemoteTouchCommand() => ('touch', 'completed'),
+          // Taken by the case above.
+          RemoteTouchCommand() => ('touch', 'ended'),
         };
         _log('control command received: $name ${command.id}');
 
@@ -820,6 +838,86 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
           );
           _sendControlAck(generation, channel, ack);
         });
+    }
+  }
+
+  /// A message of a remote touch, through the same gate as every command.
+  ///
+  /// The hold is registered with the touch controller, bound to this session,
+  /// this generation and this channel, and queued: it is the only one that
+  /// waits its turn. A move, a release or a cancel goes to the controller,
+  /// which takes it only for the touch running under that same binding.
+  ///
+  /// Moves are not logged one by one: there may be thirty a second.
+  void _onTouchCommand(
+    int generation,
+    WebRtcDataChannel channel,
+    RemoteTouchCommand command,
+  ) {
+    final name = switch (command) {
+      RemoteTouchHoldCommand() => 'touch_hold',
+      RemoteTouchMoveCommand() => 'touch_move',
+      RemoteTouchReleaseCommand() => 'touch_release',
+      RemoteTouchCancelCommand() => 'touch_cancel',
+    };
+    if (command is! RemoteTouchMoveCommand) {
+      _log('control command received: $name ${command.id}');
+    }
+
+    void answer(RemoteControlAck ack) {
+      if (!ack.ok) _log('$name rejected ${ack.id} (${ack.error?.name})');
+      _sendControlAck(generation, channel, ack);
+    }
+
+    if (channel.state != WebRtcDataChannelState.open) {
+      _log('$name rejected: the control channel is not open');
+      return;
+    }
+    if (!_isControlAuthorized) {
+      answer(
+        RemoteControlAck.failure(
+          command.id,
+          RemoteControlError.sessionNotActive,
+        ),
+      );
+      return;
+    }
+
+    final binding = RemoteTouchBinding(
+      remoteSessionId: _negotiationSessionId!,
+      generation: generation,
+      channel: channel,
+    );
+    switch (command) {
+      case RemoteTouchHoldCommand():
+        final onHoldAck = _touches.register(command, binding, (ack) {
+          _log(
+            ack.ok
+                ? 'touch_hold held ${ack.id}'
+                : 'touch_hold rejected ${ack.id} (${ack.error?.name})',
+          );
+          _sendControlAck(generation, channel, ack);
+        });
+        if (onHoldAck == null) {
+          // One finger: a second hold does not touch the one that is down.
+          answer(
+            RemoteControlAck.failure(
+              command.id,
+              RemoteControlError.gestureRejected,
+            ),
+          );
+          return;
+        }
+        _commandQueue.submit(command, onHoldAck);
+      case RemoteTouchMoveCommand():
+        _touches.move(command, binding, answer);
+      case RemoteTouchReleaseCommand():
+        _touches.release(command, binding, (ack) {
+          if (ack.ok) _log('touch_release completed ${ack.id}');
+          answer(ack);
+        });
+      case RemoteTouchCancelCommand():
+        _touches.cancel(command, binding, answer);
     }
   }
 
@@ -935,7 +1033,8 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   Future<void> _releasePeer() async {
     // Before the channel goes: no queued command outlives the connection it
     // came in on. A gesture already running cannot be recalled and is left to
-    // finish, and its ack finds the generation moved on.
+    // finish, and its ack finds the generation moved on. A remote touch is
+    // cancelled first, since it would not finish by itself.
     _commandQueue.discardPending();
 
     final subscriptions = [..._peerSubscriptions, ..._channelSubscriptions];
@@ -981,6 +1080,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     // process that authorised it would be a notification the user cannot get
     // rid of, over a MediaProjection nothing is reading.
     await _stopScreenCapture();
+    await _touches.dispose();
     return super.close();
   }
 }
