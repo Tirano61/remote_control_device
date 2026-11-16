@@ -401,10 +401,12 @@ rather than the one the user chose (a technician's tap can move the focus), that
 replaces what was there, and that the exception to not sending a field's content is
 whatever the shared picture shows. It makes no promise about password fields.
 
-The disclosure does not yet name `ime_enter`. Running a field's action (Search, Send,
-Next...) is arguably covered by "controlling the interface", but it is not listed as
-its own ability. Whether it should be is a product decision that was left out of the
-change that added the command.
+The same disclosure also names the remote IME action that [`ime_enter`](#ime_enter--web-to-device)
+runs, as an ability of its own: using the keyboard action available on the selected
+field. It does not call it Enter, because the action need not insert a line, and it
+gives Search, Go, Next and Send only as examples, because the field decides which
+action it exposes, if any. Like the rest of the disclosure, it is not a second consent,
+and it adds no privacy claim beyond the ones above.
 
 ### After it was accepted
 
