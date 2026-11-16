@@ -184,7 +184,8 @@ See [Text-input privacy boundary](#text-input-privacy-boundary).
 Backspace, delete, Tab, arrow keys, cursor movement, selection, copy, paste and the
 clipboard do not exist, and neither does an Enter key: the closest thing is
 [`ime_enter`](#ime_enter--web-to-device), which is not a key. Their absence is why this
-is not called a keyboard.
+is not called a keyboard. Deleting is done by tapping the keyboard's own key: see
+[Backspace and delete](#backspace-and-delete).
 
 ### `ime_enter` — web to device
 
@@ -772,6 +773,84 @@ That description has been rewritten, but nothing shows it to them unless they op
 Settings. Android will not provide a notice, so the assistance consent does: see
 [Consent](#consent).
 
+## Backspace and delete
+
+There is no backspace command, and none should be added for now:
+
+```json
+{"v":1,"type":"backspace"}
+```
+
+does not exist. It would be `unsupported_command`, like any unknown `type`.
+
+The technician deletes the way a user does: by tapping the ⌫ key of the Android
+keyboard, which is part of the shared picture, with an ordinary [`tap`](#tap--web-to-device):
+
+```text
+tap  ->  dispatchGesture  ->  the ⌫ key of the keyboard on screen  ->  the IME deletes
+```
+
+Nothing on the device knows that the tap was a backspace. It is not part of `set_text` or
+`ime_enter`, and it needs nothing from the text path: no node, no input focus lookup.
+
+### Why no command
+
+Every other way to delete in another application's field would widen what this service
+can see or touch:
+
+```text
+an accessibility action        none exists: no public AccessibilityAction deletes text
+read the text + set_text       reading node.text crosses the text-input privacy boundary
+select one character + cut     ACTION_CUT puts the deleted text on the user's clipboard
+AccessibilityInputConnection   needs flagInputMethodEditor, which hands the service the
+                               field's initial text and every cursor and selection change
+an IME of our own              replaces the user's keyboard and can see everything typed
+an injected KEYCODE_DEL        needs INJECT_EVENTS or shell: not available to this app
+```
+
+A tap leaves the deletion to the IME that is in use. It decides what one character is,
+including emoji and combining sequences, and what happens to a selection. Nothing here
+has to know.
+
+### Privacy
+
+The system reads no text, no cursor and no selection to delete. The tap carries a
+position and nothing else, exactly as on any other part of the screen. The technician
+judges the result from the picture, as for every other tap. A password field is no
+different: its value is not read, and the keyboard deletes from it as it would for the
+user.
+
+### Seen on a device
+
+On 2026-11-16, on the T10A (Android 16) with Gboard 18.5.6, in the search field of
+Android's Settings, held upright. The text was put in place with `set_text`, and every
+deletion was one tap from the web console on the ⌫ key in the picture. Each tap was
+acknowledged `ok`, and the effect was judged only from the shared picture:
+
+```text
+abc                             ->  ab
+abcd                            ->  abc  ->  ab  ->  a  ->  empty
+hola mundo, "mundo" selected    ->  hola       (the whole selection was deleted)
+Hola 👋                         ->  Hola
+a👋🏽                            ->  a          (the emoji and its skin tone together)
+a👨‍👩‍👧                            ->  a          (the whole ZWJ sequence)
+```
+
+The selection was made with a remote double tap on the word. The field kept its focus
+throughout, the keyboard stayed up, and the picture updated after every tap.
+
+### Limits
+
+This is a tap, so it works only as far as a tap can reach the key:
+
+- the keyboard has to be on screen, and the ⌫ key has to be visible in the picture;
+- where the key is depends on the keyboard and its layout (Gboard split it on the tablet);
+- it has only been seen with Gboard, upright, on one tablet: no other keyboard and no
+  landscape layout has been tried, and nothing here claims they behave the same;
+- from Android 14, a view marked as data-sensitive can drop gestures from accessibility
+  services that are not accessibility tools, which this one is not. A keyboard that
+  marked its keys that way could ignore the tap.
+
 ## Testing on a device
 
 ### Enabled is not connected
@@ -841,9 +920,23 @@ the web console's own buttons over the control channel. `recents` opened the ove
 and was acknowledged `ok`. `set_text` wrote into the focused search field of Android's
 Settings, the search ran on what it wrote, and it was acknowledged `ok`.
 
-`ime_enter` has **not** been run on a device. It is covered by Dart and JVM tests only;
-its end-to-end check is planned from `remote_control_web`, and has to confirm the
-visible effect, since `ok: true` does not.
+`ime_enter` has been validated end to end on the T10A (Android 16, API 36), with Gboard,
+in the search field of Android's Settings. The technician focused the field with a
+remote tap and wrote `wifi` with `set_text`; neither of them ran an IME action on its
+own. Only pressing `Acción` in the web console did:
+
+```json
+{"v":1,"type":"ime_enter","id":"enter-7"}
+{"v":1,"type":"ack","id":"enter-7","ok":true}
+```
+
+The ack arrived about 62 ms later. Since `ok: true` does not say what the application
+did, the effect was checked on the picture: Settings ran the search and closed the
+keyboard.
+
+Two of its errors were also seen on the tablet: `text_target_unavailable` with nothing
+to write to, and `accessibility_unavailable` with the service disabled.
+`ime_action_unavailable` was not reproduced on a device; it is covered by tests only.
 
 Do not stand in for the web with `adb shell input keyevent`: that exercises none of this
 path. No debug path exists to send a `set_text` or an `ime_enter`, and none should be
