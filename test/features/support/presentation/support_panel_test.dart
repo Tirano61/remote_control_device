@@ -205,6 +205,7 @@ void main() {
       final said = disclosure(tester);
       expect(said, contains('pantalla'));
       expect(said, contains('tocar'));
+      expect(said, contains('mantener pulsado'));
       expect(said, contains('deslizar'));
       expect(said, contains('atrás'));
       expect(said, contains('inicio'));
@@ -343,23 +344,28 @@ void main() {
       await connect(tester);
 
       final keyboardLine = find.textContaining('teclado');
+      final longPressLine = find.textContaining('mantener pulsado');
 
       await syncTo(tester, null);
       expect(find.byKey(SupportPanel.controlDisclosureKey), findsNothing);
       expect(keyboardLine, findsNothing);
+      expect(longPressLine, findsNothing);
 
       await syncTo(tester, waitingRequest);
       expect(find.byKey(SupportPanel.controlDisclosureKey), findsNothing);
       expect(keyboardLine, findsNothing);
+      expect(longPressLine, findsNothing);
 
       await syncTo(tester, assignedRequest);
       expect(find.byKey(SupportPanel.controlDisclosureKey), findsOneWidget);
       expect(keyboardLine, findsOneWidget);
+      expect(longPressLine, findsOneWidget);
 
       await tester.tap(find.byKey(SupportPanel.acceptButtonKey));
       await settle(tester);
       expect(find.byKey(SupportPanel.controlDisclosureKey), findsNothing);
       expect(keyboardLine, findsNothing);
+      expect(longPressLine, findsNothing);
     });
 
     testWidgets('leaves with the prompt when it is rejected', (tester) async {
@@ -375,6 +381,7 @@ void main() {
       expect(repository.acceptCount, 0);
       expect(find.byKey(SupportPanel.controlDisclosureKey), findsNothing);
       expect(find.textContaining('teclado'), findsNothing);
+      expect(find.textContaining('mantener pulsado'), findsNothing);
     });
   });
 

@@ -1319,6 +1319,260 @@ void main() {
     });
   });
 
+  // `accessibility.longPresses` being empty is what "no long press" means here.
+  group('a long_press', () {
+    test('ACTIVE, this peer, channel open: the long press runs', () async {
+      final channel = await reachOpenChannel();
+
+      channel.pushLongPress('long-1', x: 0.25, y: 0.75);
+      await settle();
+
+      expect(accessibility.longPresses, [(0.25, 0.75)]);
+      expect(accessibility.taps, isEmpty);
+      expect(channel.sentAcks, const [RemoteControlAck.success('long-1')]);
+    });
+
+    test('CONNECTING: no gesture, session_not_active', () async {
+      final channel = await reachOpenChannel(active: false);
+
+      channel.pushLongPress('long-1');
+      await settle();
+
+      expect(accessibility.longPresses, isEmpty);
+      expect(accessibility.gestures, isEmpty);
+      expect(channel.sentAcks, const [
+        RemoteControlAck.failure('long-1', RemoteControlError.sessionNotActive),
+      ]);
+    });
+
+    test('an enabled service with no ACTIVE session runs nothing', () async {
+      expect(accessibility.status, RemoteControlAccessibilityStatus.available);
+      final channel = await reachOpenChannel(active: false);
+
+      channel.pushLongPress('long-1');
+      await settle();
+
+      expect(accessibility.gestures, isEmpty);
+    });
+
+    test('ACTIVE for another session is not this session', () async {
+      final channel = await reachOpenChannel(active: false);
+      bloc.add(
+        const WebRtcActiveRemoteSessionChanged(testOtherRemoteSessionId),
+      );
+      await settle();
+
+      channel.pushLongPress('long-1');
+      await settle();
+
+      expect(accessibility.longPresses, isEmpty);
+      expect(
+        channel.sentAcks.single.error,
+        RemoteControlError.sessionNotActive,
+      );
+    });
+
+    test('arriving after the session closed runs nothing', () async {
+      final channel = await reachOpenChannel();
+      bloc.add(const WebRtcActiveRemoteSessionChanged(null));
+      await settle();
+
+      channel.pushLongPress('late');
+      await settle();
+
+      expect(accessibility.longPresses, isEmpty);
+      expect(channel.sentAcks, const [
+        RemoteControlAck.failure('late', RemoteControlError.sessionNotActive),
+      ]);
+    });
+
+    test('on a channel that is not open it runs nothing', () async {
+      final channel = await reachOpenChannel();
+      channel.pushState(WebRtcDataChannelState.closing);
+      await settle();
+
+      channel.pushLongPress('long-1');
+      await settle();
+
+      expect(accessibility.longPresses, isEmpty);
+      expect(channel.sentAcks, isEmpty);
+    });
+
+    test('a malformed one is answered and never runs', () async {
+      final channel = await reachOpenChannel();
+
+      channel.pushFrame(
+        const WebRtcDataChannelMessage.text(
+          '{"v":1,"type":"long_press","id":"bad","x":1.5,"y":0.5}',
+        ),
+      );
+      channel.pushFrame(
+        const WebRtcDataChannelMessage.text(
+          '{"v":1,"type":"long_press","x":0.5,"y":0.5}',
+        ),
+      );
+      await settle();
+
+      expect(accessibility.longPresses, isEmpty);
+      expect(channel.sentAcks, const [
+        RemoteControlAck.failure('bad', RemoteControlError.invalidCommand),
+      ]);
+    });
+
+    for (final (outcome, error) in const [
+      (RemoteGestureOutcome.rejected, RemoteControlError.gestureRejected),
+      (
+        RemoteGestureOutcome.unavailable,
+        RemoteControlError.accessibilityUnavailable,
+      ),
+    ]) {
+      test('$outcome reaches the ack as ${error.name}', () async {
+        final channel = await reachOpenChannel();
+        accessibility.outcome = outcome;
+
+        channel.pushLongPress('long-1');
+        await settle();
+
+        expect(channel.sentAcks, [RemoteControlAck.failure('long-1', error)]);
+      });
+    }
+
+    test('nothing is acknowledged before Android says it completed', () async {
+      final channel = await reachOpenChannel();
+      accessibility.holdGestures = true;
+
+      channel.pushLongPress('long-1');
+      await settle();
+
+      expect(accessibility.longPresses, hasLength(1));
+      expect(channel.sentAcks, isEmpty);
+
+      accessibility.finishGesture();
+      await settle();
+
+      expect(channel.sentAcks, const [RemoteControlAck.success('long-1')]);
+    });
+
+    test('a cancelled one is not ok', () async {
+      final channel = await reachOpenChannel();
+      accessibility.holdGestures = true;
+
+      channel.pushLongPress('long-1');
+      await settle();
+      // What the client makes of `cancelled` and `busy` from Android.
+      accessibility.finishGesture(RemoteGestureOutcome.rejected);
+      await settle();
+
+      expect(channel.sentAcks, const [
+        RemoteControlAck.failure('long-1', RemoteControlError.gestureRejected),
+      ]);
+    });
+
+    test('the session ending drops it before it starts', () async {
+      final channel = await reachOpenChannel();
+      accessibility.holdGestures = true;
+      channel.pushTap('a');
+      channel.pushLongPress('b');
+      await settle();
+
+      bloc.add(const WebRtcActiveRemoteSessionChanged(null));
+      await settle();
+      accessibility.finishGesture();
+      await settle();
+
+      expect(accessibility.longPresses, isEmpty);
+      expect(channel.sentAcks, const [
+        RemoteControlAck.failure('b', RemoteControlError.sessionNotActive),
+        RemoteControlAck.success('a'),
+      ]);
+    });
+
+    test('tap, long_press, swipe, home run in order on one queue', () async {
+      final channel = await reachOpenChannel();
+      accessibility.holdGestures = true;
+
+      channel.pushTap('a', x: 0.1);
+      channel.pushLongPress('b', x: 0.4, y: 0.6);
+      channel.pushSwipe('c', startX: 0.2, startY: 0.8, endX: 0.2, endY: 0.3);
+      channel.pushHome('d');
+      await settle();
+
+      final expected = <Object>[
+        (0.1, 0.5),
+        ('long_press', 0.4, 0.6),
+        (0.2, 0.8, 0.2, 0.3, 300),
+        'home',
+      ];
+      expect(accessibility.gestures, expected.take(1));
+      for (var finished = 1; finished < expected.length; finished++) {
+        accessibility.finishGesture();
+        await settle();
+        expect(accessibility.gestures, expected.take(finished + 1));
+        expect(channel.sentAcks, hasLength(finished));
+      }
+
+      accessibility.finishGesture();
+      await settle();
+      expect(channel.sentAcks, const [
+        RemoteControlAck.success('a'),
+        RemoteControlAck.success('b'),
+        RemoteControlAck.success('c'),
+        RemoteControlAck.success('d'),
+      ]);
+    });
+
+    group('generations', () {
+      test('a message from a previous generation runs nothing', () async {
+        final channel = await reachOpenChannel();
+
+        bloc.add(
+          const WebRtcControlMessageReceived(
+            0,
+            RemoteControlCommandReceived(
+              RemoteLongPressCommand(id: 'stale', x: 0.5, y: 0.5),
+            ),
+          ),
+        );
+        await settle();
+
+        expect(accessibility.longPresses, isEmpty);
+        expect(channel.sentAcks, isEmpty);
+      });
+
+      test('the channel of a replaced peer delivers nothing', () async {
+        final oldChannel = await reachOpenChannel();
+
+        factory.last.pushConnectionState(WebRtcConnectionState.failed);
+        await settle();
+        bloc.add(WebRtcOfferReceived(offerFor(sdp: testSecondOfferSdp)));
+        await settle();
+        expect(factory.createCount, 2);
+
+        oldChannel.pushLongPress('stale');
+        await settle();
+
+        expect(accessibility.longPresses, isEmpty);
+        expect(oldChannel.sentAcks, isEmpty);
+      });
+
+      test('one queued before the peer failed never runs', () async {
+        final channel = await reachOpenChannel();
+        accessibility.holdGestures = true;
+        channel.pushTap('running');
+        channel.pushLongPress('queued');
+        await settle();
+
+        factory.last.pushConnectionState(WebRtcConnectionState.failed);
+        await settle();
+        accessibility.finishGesture();
+        await settle();
+
+        expect(accessibility.longPresses, isEmpty);
+        expect(channel.sentAcks, isEmpty);
+      });
+    });
+  });
+
   group('a closed channel', () {
     test('gets no late ack', () async {
       final channel = await reachOpenChannel();

@@ -228,7 +228,7 @@ class _ControlDisclosure extends StatelessWidget {
 
   static const List<String> _abilities = [
     'Ver la pantalla que se comparta.',
-    'Tocar y deslizar sobre la pantalla.',
+    'Tocar, mantener pulsado y deslizar sobre la pantalla.',
     'Usar Atrás, Inicio y Recientes.',
     'Introducir texto en el campo que esté seleccionado, reemplazando su '
         'contenido.',

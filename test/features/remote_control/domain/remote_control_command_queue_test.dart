@@ -111,6 +111,139 @@ void main() {
     });
   });
 
+  group('a long press shares that line', () {
+    test('tap, long_press, swipe, home run exactly in that order', () async {
+      accessibility.holdGestures = true;
+
+      submit('a', x: 0.3);
+      queue.submit(
+        const RemoteLongPressCommand(id: 'b', x: 0.4, y: 0.6),
+        acks.add,
+      );
+      queue.submit(swipeCommand('c'), acks.add);
+      queue.submit(const RemoteHomeCommand(id: 'd'), acks.add);
+      await settle();
+      expect(accessibility.gestures, [(0.3, 0.5)]);
+
+      final expected = <Object>[
+        (0.3, 0.5),
+        ('long_press', 0.4, 0.6),
+        swipeCall,
+        'home',
+      ];
+      for (var finished = 1; finished < expected.length; finished++) {
+        accessibility.finishGesture();
+        await settle();
+        expect(accessibility.gestures, expected.take(finished + 1));
+        expect(acks, hasLength(finished));
+      }
+      accessibility.finishGesture();
+      await settle();
+
+      expect(acks, const [
+        RemoteControlAck.success('a'),
+        RemoteControlAck.success('b'),
+        RemoteControlAck.success('c'),
+        RemoteControlAck.success('d'),
+      ]);
+      expect(accessibility.longPresses, [(0.4, 0.6)]);
+      expect(accessibility.taps, [(0.3, 0.5)]);
+    });
+
+    test('nothing starts while a long press is held', () async {
+      accessibility.holdGestures = true;
+
+      queue.submit(
+        const RemoteLongPressCommand(id: 'a', x: 0.5, y: 0.5),
+        acks.add,
+      );
+      submit('b');
+      await settle();
+
+      expect(accessibility.gestures, [('long_press', 0.5, 0.5)]);
+      expect(acks, isEmpty);
+
+      accessibility.finishGesture();
+      await settle();
+      expect(accessibility.gestures, [('long_press', 0.5, 0.5), (0.5, 0.5)]);
+    });
+
+    test('a pending long press is dropped with the rest', () async {
+      accessibility.holdGestures = true;
+      submit('a');
+      queue.submit(
+        const RemoteLongPressCommand(id: 'b', x: 0.5, y: 0.5),
+        acks.add,
+      );
+      await settle();
+
+      queue.discardPending();
+      accessibility.finishGesture();
+      await settle();
+
+      expect(accessibility.longPresses, isEmpty);
+      expect(acks, const [
+        RemoteControlAck.failure('b', RemoteControlError.sessionNotActive),
+        RemoteControlAck.success('a'),
+      ]);
+    });
+
+    test('long presses count against the same limit of 16', () async {
+      accessibility.holdGestures = true;
+      submit('running');
+      await settle();
+
+      expect(RemoteControlCommandQueue.maxPending, 16);
+      for (var i = 0; i < RemoteControlCommandQueue.maxPending; i++) {
+        queue.submit(
+          RemoteLongPressCommand(id: 'queued-$i', x: 0.5, y: 0.5),
+          acks.add,
+        );
+      }
+      queue.submit(
+        const RemoteLongPressCommand(id: 'one-too-many', x: 0.5, y: 0.5),
+        acks.add,
+      );
+
+      expect(acks, const [
+        RemoteControlAck.failure(
+          'one-too-many',
+          RemoteControlError.gestureRejected,
+        ),
+      ]);
+      expect(accessibility.gestures, hasLength(1));
+    });
+
+    for (final (outcome, ack) in const [
+      (RemoteGestureOutcome.completed, RemoteControlAck.success('l')),
+      (
+        RemoteGestureOutcome.rejected,
+        RemoteControlAck.failure('l', RemoteControlError.gestureRejected),
+      ),
+      (
+        RemoteGestureOutcome.unavailable,
+        RemoteControlAck.failure(
+          'l',
+          RemoteControlError.accessibilityUnavailable,
+        ),
+      ),
+    ]) {
+      test('$outcome on a long press becomes the matching ack', () async {
+        accessibility.outcome = outcome;
+
+        queue.submit(
+          const RemoteLongPressCommand(id: 'l', x: 0.25, y: 0.75),
+          acks.add,
+        );
+        await settle();
+
+        expect(acks, [ack]);
+        expect(accessibility.longPresses, [(0.25, 0.75)]);
+        expect(accessibility.taps, isEmpty);
+      });
+    }
+  });
+
   group('back, home and recents share that line', () {
     test('tap, swipe, back, home, recents, tap run in order', () async {
       accessibility.holdGestures = true;
