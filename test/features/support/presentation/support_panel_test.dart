@@ -213,6 +213,36 @@ void main() {
       expect(said, contains('campo'));
       expect(said, contains('seleccionado'));
       expect(said, contains('reemplaza'));
+      expect(said, contains('acción disponible'));
+      expect(said, contains('teclado'));
+    });
+
+    testWidgets('names the keyboard action by example, not as a promise', (
+      tester,
+    ) async {
+      createBlocs();
+      await tester.pumpWidget(harness());
+      await connect(tester);
+      await syncTo(tester, assignedRequest);
+
+      // One ability of its own, on the field that has focus.
+      final line = find.descendant(
+        of: find.byKey(SupportPanel.controlDisclosureKey),
+        matching: find.textContaining('teclado'),
+      );
+      expect(line, findsOneWidget);
+      final said = tester.widget<Text>(line).data!.toLowerCase();
+      expect(said, contains('acción disponible'));
+      expect(said, contains('campo seleccionado'));
+      // The action is the field's own: examples, not a list every app offers.
+      expect(said, contains('por ejemplo'));
+      for (final action in const ['buscar', 'ir', 'siguiente', 'enviar']) {
+        expect(said, matches(RegExp('\\b$action\\b')));
+      }
+      // ACTION_IME_ENTER need not insert a line, so it is not called Enter.
+      expect(said, isNot(contains('enter')));
+      expect(said, isNot(contains('salto de línea')));
+      expect(said, isNot(contains('todas')));
     });
 
     testWidgets('says what the system does not do, and for how long', (
@@ -251,6 +281,9 @@ void main() {
         'action_set_text',
         'canretrievewindowcontent',
         'set_text',
+        'ime_enter',
+        'action_ime_enter',
+        'ime',
       ]) {
         expect(said, isNot(contains(internal)));
       }
@@ -279,6 +312,17 @@ void main() {
           tester.getTopLeft(find.byKey(SupportPanel.rejectButtonKey)).dy,
         ),
       );
+      // The last ability, the keyboard action, is read before either answer.
+      final keyboardBottom = tester
+          .getBottomLeft(find.textContaining('teclado'))
+          .dy;
+      expect(keyboardBottom, lessThanOrEqualTo(bottom));
+      expect(
+        keyboardBottom,
+        lessThan(
+          tester.view.physicalSize.height / tester.view.devicePixelRatio,
+        ),
+      );
       expect(find.byType(Tooltip), findsNothing);
       // No second consent to tick: PERMITIR is the one answer.
       expect(find.byType(Checkbox), findsNothing);
@@ -298,18 +342,39 @@ void main() {
       await tester.pumpWidget(harness());
       await connect(tester);
 
+      final keyboardLine = find.textContaining('teclado');
+
       await syncTo(tester, null);
       expect(find.byKey(SupportPanel.controlDisclosureKey), findsNothing);
+      expect(keyboardLine, findsNothing);
 
       await syncTo(tester, waitingRequest);
       expect(find.byKey(SupportPanel.controlDisclosureKey), findsNothing);
+      expect(keyboardLine, findsNothing);
 
       await syncTo(tester, assignedRequest);
       expect(find.byKey(SupportPanel.controlDisclosureKey), findsOneWidget);
+      expect(keyboardLine, findsOneWidget);
 
       await tester.tap(find.byKey(SupportPanel.acceptButtonKey));
       await settle(tester);
       expect(find.byKey(SupportPanel.controlDisclosureKey), findsNothing);
+      expect(keyboardLine, findsNothing);
+    });
+
+    testWidgets('leaves with the prompt when it is rejected', (tester) async {
+      createBlocs();
+      await tester.pumpWidget(harness());
+      await connect(tester);
+      await syncTo(tester, assignedRequest);
+
+      await tester.tap(find.byKey(SupportPanel.rejectButtonKey));
+      await settle(tester);
+
+      expect(repository.rejectCount, 1);
+      expect(repository.acceptCount, 0);
+      expect(find.byKey(SupportPanel.controlDisclosureKey), findsNothing);
+      expect(find.textContaining('teclado'), findsNothing);
     });
   });
 
@@ -355,6 +420,7 @@ void main() {
 
     expect(repository.cancelCount, 1);
     expect(find.byKey(SupportPanel.requestButtonKey), findsOneWidget);
+    expect(find.byKey(SupportPanel.controlDisclosureKey), findsNothing);
   });
 
   testWidgets('a state that could not be read is not shown as "no request"', (

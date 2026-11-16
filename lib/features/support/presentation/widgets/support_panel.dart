@@ -219,6 +219,10 @@ class _AssignedPanel extends StatelessWidget {
 /// what the code does: the field is whichever one has focus, which the
 /// technician can also move with a tap; the text replaces what was there; and
 /// the shared picture shows whatever a field displays.
+///
+/// The keyboard action is whatever the focused field exposes, so it is not
+/// called "Enter" (it need not insert a line) and the examples stay examples:
+/// a field may offer another action, or none.
 class _ControlDisclosure extends StatelessWidget {
   const _ControlDisclosure({super.key});
 
@@ -228,6 +232,8 @@ class _ControlDisclosure extends StatelessWidget {
     'Usar Atrás, Inicio y Recientes.',
     'Introducir texto en el campo que esté seleccionado, reemplazando su '
         'contenido.',
+    'Usar la acción disponible del teclado en el campo seleccionado, por '
+        'ejemplo Buscar, Ir, Siguiente o Enviar.',
   ];
 
   @override
