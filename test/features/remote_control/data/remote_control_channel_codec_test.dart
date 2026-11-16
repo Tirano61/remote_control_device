@@ -580,6 +580,109 @@ void main() {
     });
   });
 
+  group('an ime_enter', () {
+    const command = RemoteImeEnterCommand(id: 'enter-123');
+
+    test('decodes the documented payload to exactly the typed command', () {
+      expect(
+        decodeText('{"v":1,"type":"ime_enter","id":"enter-123"}'),
+        const RemoteControlCommandReceived(command),
+      );
+    });
+
+    test('carries nothing but its id', () {
+      expect(command.props, ['enter-123']);
+      expect(command, isNot(const RemoteBackCommand(id: 'enter-123')));
+    });
+
+    test('ignores unknown extra fields, as a back does', () {
+      expect(
+        decodeText(
+          '{"v":1,"type":"ime_enter","id":"enter-123","x":0.5,'
+          '"keyCode":66,"actionId":6,"durationMs":"no"}',
+        ),
+        const RemoteControlCommandReceived(command),
+      );
+    });
+
+    test('a text alongside does not make it a set_text', () {
+      expect(
+        decodeText('{"v":1,"type":"ime_enter","id":"enter-123","text":"a"}'),
+        const RemoteControlCommandReceived(command),
+      );
+    });
+
+    test('is not a set_text, and a set_text is not one', () {
+      expect(
+        decodeText('{"v":1,"type":"set_text","id":"enter-123","text":""}'),
+        isNot(const RemoteControlCommandReceived(command)),
+      );
+    });
+
+    group('with nothing to answer to is ignored', () {
+      for (final (name, text) in [
+        ('a missing id', '{"v":1,"type":"ime_enter"}'),
+        ('a null id', '{"v":1,"type":"ime_enter","id":null}'),
+        ('a numeric id', '{"v":1,"type":"ime_enter","id":7}'),
+        ('an empty id', '{"v":1,"type":"ime_enter","id":""}'),
+        ('a payload that is a list', '[{"v":1,"type":"ime_enter","id":"a"}]'),
+        ('broken JSON', '{"v":1,"type":"ime_enter",'),
+      ]) {
+        test(name, () => expect(decodeText(text), isNull));
+      }
+    });
+
+    for (final (name, fields) in [
+      ('v missing', '"type":"ime_enter"'),
+      ('v as a string', '"v":"1","type":"ime_enter"'),
+      ('v as a double', '"v":1.0,"type":"ime_enter"'),
+      ('v null', '"v":null,"type":"ime_enter"'),
+    ]) {
+      test('$name is invalid', () {
+        expect(
+          decodeText('{"id":"bad",$fields}'),
+          const RemoteControlMessageRejected(
+            'bad',
+            RemoteControlError.invalidCommand,
+          ),
+        );
+      });
+    }
+
+    test('another version is not read as version 1', () {
+      expect(
+        decodeText('{"v":2,"type":"ime_enter","id":"later"}'),
+        const RemoteControlMessageRejected(
+          'later',
+          RemoteControlError.unsupportedCommand,
+        ),
+      );
+    });
+
+    test('in another spelling is another type', () {
+      for (final type in const ['IME_ENTER', 'imeEnter', 'ime-enter']) {
+        expect(
+          decodeText('{"v":1,"type":"$type","id":"enter-1"}'),
+          const RemoteControlMessageRejected(
+            'enter-1',
+            RemoteControlError.unsupportedCommand,
+          ),
+        );
+      }
+    });
+
+    test('is answered like any command', () {
+      expect(
+        jsonDecode(
+          RemoteControlChannelCodec.encodeAck(
+            const RemoteControlAck.success('enter-1'),
+          ),
+        ),
+        {'v': 1, 'type': 'ack', 'id': 'enter-1', 'ok': true},
+      );
+    });
+  });
+
   test('a type that is not a string is invalid, whatever else is there', () {
     expect(
       decodeText('{"v":1,"type":["back"],"id":"nav-1"}'),
@@ -679,6 +782,8 @@ void main() {
       (RemoteControlError.unsupportedCommand, 'unsupported_command'),
       (RemoteControlError.textTargetUnavailable, 'text_target_unavailable'),
       (RemoteControlError.textRejected, 'text_rejected'),
+      (RemoteControlError.imeActionUnavailable, 'ime_action_unavailable'),
+      (RemoteControlError.imeActionRejected, 'ime_action_rejected'),
     ]) {
       test('failure carries $wire', () {
         expect(
