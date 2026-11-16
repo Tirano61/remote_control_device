@@ -30,6 +30,31 @@ private fun pixelOn(normalized: Double, size: Int): Int =
 data class GestureStroke(val start: GesturePixel, val end: GesturePixel?, val durationMs: Long)
 
 /**
+ * How long a long press holds its touch, given the device's long-press timeout
+ * (`ViewConfiguration.getLongPressTimeout()`), or `null` if that timeout cannot be used.
+ *
+ * Android reads a touch as a long press once it has been held for the timeout, so the stroke
+ * outlasts it by [LONG_PRESS_MARGIN_MS] rather than ending on the boundary. A timeout that is not
+ * positive is not one Android gives; one so long that the stroke would exceed
+ * [MAX_LONG_PRESS_DURATION_MS] is refused, because Dart would stop waiting for the answer while
+ * the touch is still held.
+ */
+fun longPressDurationMs(longPressTimeoutMs: Long): Long? {
+    if (longPressTimeoutMs <= 0) return null
+    val duration = longPressTimeoutMs + LONG_PRESS_MARGIN_MS
+    return if (duration <= MAX_LONG_PRESS_DURATION_MS) duration else null
+}
+
+/** Past the timeout, so that the touch is not released exactly as Android decides. */
+const val LONG_PRESS_MARGIN_MS = 100L
+
+/**
+ * Well above the longest touch-and-hold delay Android's settings offer (1.5 s), and well below
+ * the 5 s `MethodChannelRemoteControlAccessibilityClient` waits for any gesture's answer.
+ */
+const val MAX_LONG_PRESS_DURATION_MS = 4000L
+
+/**
  * The stroke of a swipe on this screen, or `null` if both ends land on the same pixel.
  *
  * Two positions can differ and still name one pixel. Android treats a stroke with no length as
@@ -108,7 +133,11 @@ enum class RemoteGestureOutcome(val wire: String) {
  * waits its turn: Home must not start under a swipe that has not finished.
  *
  * [activeWindow] is consulted for a `set_text` or an `ime_enter` and for nothing else: not when the
- * service connects, and not for a gesture or a global action. See [writeToInputFocus] and
+ * service connects, and not for a gesture or a global action.
+ *
+ * [longPressTimeoutMs] is `ViewConfiguration.getLongPressTimeout()`, read afresh for every long
+ * press like the display, so a change in the user's touch-and-hold setting needs no signal
+ * either. It is read for a long press and for nothing else. See [writeToInputFocus] and
  * [imeEnterOnInputFocus].
  *
  * Pure, and main-thread only: the channel handler, the gesture callback and the service
@@ -119,15 +148,38 @@ class RemoteGestureDispatcher(
     private val dispatch: (GestureStroke, (Boolean) -> Unit) -> Boolean,
     private val performGlobalAction: (Int) -> Boolean,
     private val activeWindow: () -> RemoteTextWindow?,
+    private val longPressTimeoutMs: () -> Long,
 ) {
     private var running: Running? = null
 
-    fun tap(normalizedX: Double, normalizedY: Double, answer: (RemoteGestureOutcome) -> Unit) {
+    fun tap(normalizedX: Double, normalizedY: Double, answer: (RemoteGestureOutcome) -> Unit) =
+        press(normalizedX, normalizedY, answer) { TAP_DURATION_MS }
+
+    /**
+     * A tap held for as long as this device takes to read it as a long press. The stroke is the
+     * tap's, on the same pixel; only its duration differs. A timeout that cannot be used rejects
+     * it before any gesture starts.
+     */
+    fun longPress(normalizedX: Double, normalizedY: Double, answer: (RemoteGestureOutcome) -> Unit) =
+        press(normalizedX, normalizedY, answer) {
+            longPressDurationMs(longPressTimeoutMs()) ?: error("long-press timeout out of range")
+        }
+
+    /**
+     * One touch that stays where it lands. [durationMs] is asked only once the position is valid,
+     * the screen has been read and nothing is running.
+     */
+    private fun press(
+        normalizedX: Double,
+        normalizedY: Double,
+        answer: (RemoteGestureOutcome) -> Unit,
+        durationMs: () -> Long,
+    ) {
         perform(
             isValid = isNormalized(normalizedX) && isNormalized(normalizedY),
             answer = answer,
         ) { display ->
-            GestureStroke(display.gesturePixel(normalizedX, normalizedY), null, TAP_DURATION_MS)
+            GestureStroke(display.gesturePixel(normalizedX, normalizedY), null, durationMs())
         }
     }
 
@@ -293,6 +345,15 @@ class RemoteControlAvailability {
             return
         }
         current.tap(normalizedX, normalizedY, answer)
+    }
+
+    fun longPress(normalizedX: Double, normalizedY: Double, answer: (RemoteGestureOutcome) -> Unit) {
+        val current = dispatcher
+        if (current == null) {
+            answer(RemoteGestureOutcome.UNAVAILABLE)
+            return
+        }
+        current.longPress(normalizedX, normalizedY, answer)
     }
 
     fun swipe(

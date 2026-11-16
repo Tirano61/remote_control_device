@@ -53,6 +53,7 @@ class RemoteGestureDispatcherTest {
         },
         performGlobalAction = recordGlobalAction,
         activeWindow = noWindow,
+        longPressTimeoutMs = { 500L },
     )
 
     private fun tap(x: Double = 0.5, y: Double = 0.5) = dispatcher.tap(x, y) { outcomes += it }
@@ -104,6 +105,7 @@ class RemoteGestureDispatcherTest {
             dispatch = { _, _ -> throw IllegalStateException("not connected") },
             performGlobalAction = recordGlobalAction,
             activeWindow = noWindow,
+            longPressTimeoutMs = { 500L },
         )
 
         throwing.tap(0.5, 0.5) { outcomes += it }
@@ -121,6 +123,7 @@ class RemoteGestureDispatcherTest {
             },
             performGlobalAction = recordGlobalAction,
             activeWindow = noWindow,
+            longPressTimeoutMs = { 500L },
         )
 
         blind.tap(0.5, 0.5) { outcomes += it }
@@ -313,6 +316,7 @@ class RemoteGestureDispatcherTest {
             },
             performGlobalAction = recordGlobalAction,
             activeWindow = noWindow,
+            longPressTimeoutMs = { 500L },
         )
 
         blind.swipe(0.5, 0.75, 0.5, 0.25, 300L) { outcomes += it }
@@ -493,6 +497,7 @@ class RemoteGestureDispatcherTest {
             dispatch = { _, _ -> true },
             performGlobalAction = { throw IllegalStateException("not connected") },
             activeWindow = noWindow,
+            longPressTimeoutMs = { 500L },
         )
 
         throwing.back { outcomes += it }
@@ -512,6 +517,7 @@ class RemoteGestureDispatcherTest {
             dispatch = { _, _ -> true },
             performGlobalAction = recordGlobalAction,
             activeWindow = noWindow,
+            longPressTimeoutMs = { 500L },
         )
 
         blind.back { outcomes += it }

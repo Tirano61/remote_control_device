@@ -12,9 +12,9 @@ import io.flutter.plugin.common.MethodChannel
  * The Android half of the bridge to [RemoteControlAccessibilityService].
  *
  * Transport and nothing else. Whether a gesture may run is decided in Dart, in
- * `WebRtcSessionBloc`, against the remote session; by the time [TAP_METHOD], [SWIPE_METHOD],
- * [BACK_METHOD], [HOME_METHOD], [RECENTS_METHOD], [SET_TEXT_METHOD] or [IME_ENTER_METHOD] arrives
- * the decision is made.
+ * `WebRtcSessionBloc`, against the remote session; by the time [TAP_METHOD], [LONG_PRESS_METHOD],
+ * [SWIPE_METHOD], [BACK_METHOD], [HOME_METHOD], [RECENTS_METHOD], [SET_TEXT_METHOD] or
+ * [IME_ENTER_METHOD] arrives the decision is made.
  * Failures are answered as outcomes, never thrown across the boundary.
  *
  * The text of a [SET_TEXT_METHOD] may be a password. It goes to the service and nowhere else, and
@@ -59,6 +59,20 @@ class RemoteControlAccessibilityChannel(
                 }
                 availability.tap(x, y) { outcome ->
                     Log.i(TAG, "tap ${outcome.wire}")
+                    result.success(outcome.wire)
+                }
+            }
+
+            // A position and nothing else: how long to hold is the device's to decide.
+            LONG_PRESS_METHOD -> {
+                val x = call.argument<Double>(X)
+                val y = call.argument<Double>(Y)
+                if (x == null || y == null) {
+                    result.success(RemoteGestureOutcome.INVALID.wire)
+                    return
+                }
+                availability.longPress(x, y) { outcome ->
+                    Log.i(TAG, "long_press ${outcome.wire}")
                     result.success(outcome.wire)
                 }
             }
@@ -128,6 +142,7 @@ class RemoteControlAccessibilityChannel(
         const val CHANNEL_NAME = "remote_control/accessibility"
         const val AVAILABLE_METHOD = "isAccessibilityServiceAvailable"
         const val TAP_METHOD = "performTap"
+        const val LONG_PRESS_METHOD = "performLongPress"
         const val SWIPE_METHOD = "performSwipe"
         const val BACK_METHOD = "performBack"
         const val HOME_METHOD = "performHome"

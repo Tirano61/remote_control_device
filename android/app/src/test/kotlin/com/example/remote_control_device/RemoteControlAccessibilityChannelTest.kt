@@ -53,6 +53,7 @@ class RemoteControlAccessibilityChannelTest {
                 globalActionAccepted
             },
             activeWindow = { window },
+            longPressTimeoutMs = { 500L },
         ),
     )
 
