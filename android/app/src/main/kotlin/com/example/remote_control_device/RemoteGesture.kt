@@ -49,7 +49,7 @@ fun longPressDurationMs(longPressTimeoutMs: Long): Long? {
 const val LONG_PRESS_MARGIN_MS = 100L
 
 /**
- * Well above the longest touch-and-hold delay Android's settings offer (1.5 s), and well below
+ * Well above the longest touch-and-hold delay stock Android's settings offer (1.5 s), and well below
  * the 5 s `MethodChannelRemoteControlAccessibilityClient` waits for any gesture's answer.
  */
 const val MAX_LONG_PRESS_DURATION_MS = 4000L

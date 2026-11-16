@@ -107,7 +107,7 @@ class RemoteLongPressTest {
 
     @Test
     fun `the cap leaves room under the 5 s the Dart side waits, and above every Android setting`() {
-        // The longest touch-and-hold delay Android's settings offer is 1.5 s.
+        // The longest touch-and-hold delay stock Android's settings offer is 1.5 s.
         assertTrue(longPressDurationMs(1500L)!! <= MAX_LONG_PRESS_DURATION_MS)
         assertTrue(MAX_LONG_PRESS_DURATION_MS < 5000L)
     }

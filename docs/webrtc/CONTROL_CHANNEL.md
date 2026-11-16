@@ -27,6 +27,7 @@ Frames are UTF-8 text holding one JSON object. Binary frames are ignored.
 | `type` | What it does | On Android |
 | --- | --- | --- |
 | `tap` | one short touch | `dispatchGesture` |
+| `long_press` | one touch held in place, long enough to be a long press | `dispatchGesture` |
 | `swipe` | one straight stroke | `dispatchGesture` |
 | `back` | Android's Back | `performGlobalAction(GLOBAL_ACTION_BACK)` |
 | `home` | Android's Home | `performGlobalAction(GLOBAL_ACTION_HOME)` |
@@ -34,7 +35,7 @@ Frames are UTF-8 text holding one JSON object. Binary frames are ignored.
 | `set_text` | replaces the content of the focused field | `ACTION_SET_TEXT` on the node with input focus |
 | `ime_enter` | runs the IME action the focused field exposes | `ACTION_IME_ENTER` on the node with input focus |
 
-All seven travel on the same channel, get the same `ack`, need the same `ACTIVE`
+All eight travel on the same channel, get the same `ack`, need the same `ACTIVE`
 session and the same accessibility service, and wait in the same queue.
 
 ### `tap` — web to device
@@ -69,6 +70,42 @@ They are not CSS pixels. The sender has to subtract any letterboxing around its
 
 Out-of-range values are refused, never clamped. Unknown extra fields are ignored.
 
+### `long_press` — web to device
+
+One touch held in place, for as long as this device takes to read it as a long press.
+
+```json
+{"v":1,"type":"long_press","id":"long-123","x":0.5,"y":0.25}
+```
+
+| Field | Type | Rule |
+| --- | --- | --- |
+| `v` | integer | `1` |
+| `type` | string | `"long_press"` |
+| `id` | string | non-empty; chosen by the sender and opaque to the device |
+| `x` | number | finite, `0.0 <= x <= 1.0` |
+| `y` | number | finite, `0.0 <= y <= 1.0` |
+
+The coordinates are exactly a tap's: normalized `[0,1]` over the whole remote frame,
+origin top-left, with the same rules on values, refused and never clamped, and the
+same pixel on the device (see [From a position to a pixel](#from-a-position-to-a-pixel)).
+
+There is no `durationMs`, and no `endX`/`endY`. `long_press` names an intent, *hold
+here*, not a number of milliseconds: how long a touch must last to be a long press is
+a setting of the device (Android's touch-and-hold delay), which the sender cannot
+know and should not have to. The device chooses the duration, as described in
+[The gesture](#the-gesture). A `durationMs` sent anyway is an unknown extra field, and
+is ignored like any other: it does not change the duration.
+
+It is not a drag. The touch does not move, and nothing is dragged or dropped at its
+end. Nor is it a long-click on an accessibility node: it is a physical touch at a
+position, like a tap, and no node is looked for under it.
+
+The ack is the same as a tap's, with the same errors. `ok: true` says that Android
+reported the gesture completed: the touch was held and released. It does not say that
+a menu appeared, that text was selected, or that the application did anything at all;
+whether it did is seen on the picture.
+
 ### `swipe` — web to device
 
 One straight stroke, from a start to a different end.
@@ -101,9 +138,9 @@ frame, origin top-left, `x` growing right and `y` growing down.
 `durationMs` has no default, because it decides whether this is a fling or a slow
 drag. `300.0` is not an integer and is refused.
 
-A swipe whose start equals its end is `invalid_command`. It does not become a tap:
-`tap` is the command for that. Curves, several fingers, long presses and strokes
-continued across commands do not exist.
+A swipe whose start equals its end is `invalid_command`. It does not become a tap
+or a long press: `tap` and `long_press` are the commands for those. Curves, several
+fingers, drags and strokes continued across commands do not exist.
 
 The rules on values are a tap's too: refused, never clamped, and unknown extra
 fields ignored. The ack is the same, with the same errors.
@@ -249,6 +286,14 @@ Exactly one for each command that has an id, on the same channel.
 ```
 
 ```json
+{"v":1,"type":"ack","id":"long-123","ok":true}
+```
+
+```json
+{ "v": 1, "type": "ack", "id": "long-123", "ok": false, "error": "gesture_rejected" }
+```
+
+```json
 { "v": 1, "type": "ack", "id": "back-123", "ok": true }
 ```
 
@@ -292,7 +337,7 @@ What `ok: true` promises depends on the command, because Android promises differ
 things:
 
 ```text
-tap, swipe             Android reported the gesture completed, not merely that it was requested
+tap, long_press, swipe Android reported the gesture completed, not merely that it was requested
 back, home, recents    Android accepted the global action
 set_text               the focused node accepted ACTION_SET_TEXT
 ime_enter              the focused node accepted ACTION_IME_ENTER, and nothing about what it then did
@@ -311,7 +356,7 @@ go back to, for instance.
 | --- | --- |
 | `accessibility_unavailable` | the accessibility service is not connected |
 | `session_not_active` | no `ACTIVE` remote session for this connection, or it ended while the command was queued |
-| `gesture_rejected` | Android cancelled or refused the gesture or global action, too many commands are queued, or a swipe lands on a single pixel of this screen |
+| `gesture_rejected` | Android cancelled or refused the gesture or global action, too many commands are queued, a swipe lands on a single pixel of this screen, or this device's long-press timeout cannot be used for a `long_press` |
 | `invalid_command` | malformed, with a readable `id` |
 | `unsupported_command` | another `v`, or an unknown `type`, with a readable `id` |
 | `text_target_unavailable` | a valid `set_text` or `ime_enter` with nowhere to go: no active window, nothing with input focus, or a focused node that is not editable or not enabled |
@@ -375,8 +420,8 @@ and does not run. The web activates the session once it sees its own connection 
 so it should wait for that before sending.
 
 The video is not one of the conditions either. If `MediaProjection` was refused or
-failed, a `back`, `home`, `recents`, `set_text` or `ime_enter` still runs. A `tap` or `swipe` would
-too, though without a picture the technician has little to aim at. Whether the web
+failed, a `back`, `home`, `recents`, `set_text` or `ime_enter` still runs. A `tap`,
+`long_press` or `swipe` would too, though without a picture the technician has little to aim at. Whether the web
 offers text input, or `ime_enter`, with no picture is the web's decision: without
 one, the technician cannot see which field is focused or what its action did.
 
@@ -402,6 +447,11 @@ rather than the one the user chose (a technician's tap can move the focus), that
 replaces what was there, and that the exception to not sending a field's content is
 whatever the shared picture shows. It makes no promise about password fields.
 
+The first ability it lists is touching, holding and swiping on the screen: *Tocar,
+mantener pulsado y deslizar sobre la pantalla.* `mantener pulsado` was added with
+[`long_press`](#long_press--web-to-device), in that one line and nowhere else. It is
+still the one consent, shown only while the request is `ASSIGNED`, before `PERMITIR`.
+
 The same disclosure also names the remote IME action that [`ime_enter`](#ime_enter--web-to-device)
 runs, as an ability of its own: using the keyboard action available on the selected
 field. It does not call it Enter, because the action need not insert a line, and it
@@ -422,11 +472,12 @@ tap A, swipe B, back C, home D          the same: A, then B, then C, then D
 tap, swipe, back, home, recents, tap    the same, in exactly that order
 tap, set_text, home                     the same
 tap, set_text, ime_enter, home          the same, in exactly that order
+tap, long_press, swipe, home            the same, in exactly that order
 ```
 
 Nothing is estimated. The queue waits for each answer, however long it takes, so a
 command holds the line for as long as it really runs: a swipe for its `durationMs`,
-a `back`, `home`, `recents`, `set_text` or `ime_enter` only until Android's call
+a `long_press` for the duration the device chose, a `back`, `home`, `recents`, `set_text` or `ime_enter` only until Android's call
 returns. The next
 command then starts at once, while the system may still be animating, so a sender
 that wants to tap on what a `home` or `recents` leads to should wait for the picture
@@ -484,6 +535,7 @@ remote_control/accessibility
   isAccessibilityServiceAvailable  -> bool
   performTap {x, y}                -> "completed" | "cancelled" | "rejected"
                                       | "busy" | "invalid" | "unavailable"
+  performLongPress {x, y}          -> the same answers
   performSwipe {startX, startY, endX, endY, durationMs}
                                    -> the same answers
   performBack                      -> "completed" | "rejected" | "busy" | "unavailable"
@@ -498,13 +550,17 @@ remote_control/accessibility
   accessibilityServiceAvailabilityChanged (Android to Dart) bool
 ```
 
-`performTap` and `performSwipe` are answered from the gesture's
-`GestureResultCallback`, so the Dart future is the gesture. `performBack`,
+`performTap`, `performLongPress` and `performSwipe` are answered from the gesture's
+`GestureResultCallback`, so the Dart future is the gesture. `performLongPress`
+carries the position and no duration, in either direction. `performBack`,
 `performHome` and `performRecents` take no arguments, and are answered from what
 `performGlobalAction` returns: `"completed"` is `true` and `"rejected"` is `false`. Dart never sees an
 Android action code. Dart gives up after five seconds, as a guard against a bridge
 that never answers. The longest swipe takes two, so a valid one finishes well inside
-that.
+that. A long press is at most four (see [The gesture](#the-gesture)), and with stock
+Android's settings 1.6 at the longest, so the same guard covers it. Dart
+never learns the duration the device chose, so it does not estimate one: a timeout per
+command would mean sending the device's setting over the bridge only to guess with it.
 
 `performSetText` carries the text and nothing else: no node id, package or class name,
 and no previous value, in either direction. `performImeEnter` carries nothing at all,
@@ -565,6 +621,9 @@ pixel = min(floor(normalized * size), size - 1)
 1280x800, swipe (0.5, 0.75) to (0.5, 0.25)    ->  (640, 600) to (640, 200)
 ```
 
+A `long_press` goes through the same function as a `tap`, so the two land on the same
+pixel for the same position, in portrait, in either landscape, and after a rotation.
+
 `1.0` would otherwise land one past the last pixel.
 
 The reading has the limitation described in
@@ -578,9 +637,37 @@ A single stroke at screen coordinates, starting at time zero. No view is involve
 so it lands on whatever is on screen, including other applications.
 
 ```text
-tap      moveTo(x, y)                                  50 ms
-swipe    moveTo(startX, startY), lineTo(endX, endY)    durationMs, unchanged
+tap          moveTo(x, y)                                  50 ms
+long_press   moveTo(x, y)                                  ViewConfiguration.getLongPressTimeout() + 100 ms
+swipe        moveTo(startX, startY), lineTo(endX, endY)    durationMs, unchanged
 ```
+
+A `tap` and a `long_press` are the same stroke, one point with no `lineTo`, built by one
+function; only the duration differs, and the tap's stays 50 ms whatever the device's
+long-press timeout is.
+
+The long press lasts `ViewConfiguration.getLongPressTimeout()`, which is the user's
+touch-and-hold delay as every view on the device reads it (400 or 500 ms by default,
+depending on the Android version; stock Android's accessibility settings offer up to
+1500 ms, and other builds may differ), plus a 100 ms margin, so the touch is not
+released exactly when Android decides whether it was long. The timeout is read when each
+long press starts, like the display, so a change in that setting needs no signal; it is
+not polled, not read from `Settings` directly, not sent to the web and not logged.
+
+```text
+timeout 500   ->  600 ms
+timeout 1000  ->  1100 ms
+timeout 1500  ->  1600 ms
+```
+
+A timeout that is not positive, or one that would make the stroke longer than 4000 ms,
+is refused before any gesture starts (`"rejected"` on the bridge, `gesture_rejected` on
+the wire). 4000 ms is well above anything stock Android's settings offer and well below the
+five seconds Dart waits, so an answer always arrives while Dart is still waiting.
+
+No `Thread.sleep`, `KeyEvent`, `Instrumentation`, `InputManager`, shell or
+`AccessibilityNodeInfo` stands in for the gesture, and no node is looked for under it,
+so it is never an `ACTION_LONG_CLICK`.
 
 Two different positions can still land on one pixel. Android takes a stroke with
 no length for a touch held in place, which would be a long press nobody asked for,
@@ -684,6 +771,8 @@ in Settings, bound by the system and connected, twice. It is pinned by
 `canRetrieveWindowContent`, and nothing more: no event types, no flags, no touch
 exploration, no key event filtering. `performGlobalAction` requires no capability of
 its own, so `back`, `home` and `recents` did not widen this, and added no permission.
+`long_press` is a gesture like `tap`, and widened nothing either: no capability, flag,
+event type or permission.
 `set_text` did, and [Text-input privacy boundary](#text-input-privacy-boundary) says
 how far. `ime_enter` uses what `set_text` already declared, and widened nothing.
 
@@ -729,6 +818,7 @@ sends no content             the ack is ok and an error code, and nothing about 
 persists nothing             no node, text, package or hierarchy is kept after the command
 reads nothing for set_text   not the value, the hint, the description, or any other field
 reads nothing for ime_enter  only editable, enabled and the ids of the listed actions
+no window for a gesture      tap, long_press and swipe never look at the window
 ```
 
 The window is looked at only as a consequence of a command that passed
@@ -912,7 +1002,11 @@ Settings.
 ### What has been seen on a device
 
 `tap`, `swipe`, `back` and `home` have been validated on the tablet, end to end, on
-builds before `set_text`. The record for `back` and `home` is in `remote_control_web`,
+builds before `set_text`.
+
+`long_press` has not been tried on a device yet. It is covered by unit, widget and JVM
+tests; its validation on the tablet is expected from the web console, once it can send
+one. No debug path exists to send it, and none should be added. The record for `back` and `home` is in `remote_control_web`,
 in its `docs/CONTROL_CHANNEL.md`.
 
 `recents` and `set_text` have been validated on the same tablet, on 2026-11-05, from
@@ -962,6 +1056,10 @@ events looks like. The service did not need to be enabled again.
 [webrtc] tap accepted
 [webrtc] tap completed <id>
 [webrtc] tap rejected <id> (gestureRejected)
+[webrtc] control command received: long_press <id>
+[webrtc] long_press accepted
+[webrtc] long_press completed <id>
+[webrtc] long_press rejected <id> (gestureRejected)
 [webrtc] control command received: swipe <id>
 [webrtc] swipe accepted
 [webrtc] swipe completed <id>
@@ -1001,6 +1099,7 @@ and natively, under the logcat tag `RemoteControlInput`:
 ```text
 accessibility service connected / disconnected
 tap completed / cancelled / rejected / busy / invalid / unavailable
+long_press completed / cancelled / rejected / busy / invalid / unavailable
 swipe completed / cancelled / rejected / busy / invalid / unavailable
 back accepted / rejected / busy / unavailable
 home accepted / rejected / busy / unavailable
