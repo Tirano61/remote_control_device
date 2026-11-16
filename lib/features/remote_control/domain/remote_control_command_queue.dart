@@ -99,6 +99,10 @@ class RemoteControlCommandQueue {
         _accessibility.performSetText(text),
       ),
       RemoteImeEnterCommand() => _imeEnter(_accessibility.performImeEnter()),
+      // Decoded, and not carried out by this build yet.
+      RemoteTouchCommand() => Future.value(
+        RemoteControlError.unsupportedCommand,
+      ),
     };
     return error == null
         ? RemoteControlAck.success(command.id)

@@ -946,6 +946,7 @@ void main() {
       (RemoteControlError.textRejected, 'text_rejected'),
       (RemoteControlError.imeActionUnavailable, 'ime_action_unavailable'),
       (RemoteControlError.imeActionRejected, 'ime_action_rejected'),
+      (RemoteControlError.touchEnded, 'touch_ended'),
     ]) {
       test('failure carries $wire', () {
         expect(

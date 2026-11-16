@@ -790,6 +790,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
           // The id and never the text, here and in every line below.
           RemoteSetTextCommand() => ('set_text', 'accepted by android'),
           RemoteImeEnterCommand() => ('ime_enter', 'accepted by android'),
+          RemoteTouchCommand() => ('touch', 'completed'),
         };
         _log('control command received: $name ${command.id}');
 
