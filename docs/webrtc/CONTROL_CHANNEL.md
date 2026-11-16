@@ -681,10 +681,15 @@ rather than the one the user chose (a technician's tap can move the focus), that
 replaces what was there, and that the exception to not sending a field's content is
 whatever the shared picture shows. It makes no promise about password fields.
 
-The first ability it lists is touching, holding and swiping on the screen: *Tocar,
-mantener pulsado y deslizar sobre la pantalla.* `mantener pulsado` was added with
-[`long_press`](#long_press--web-to-device), in that one line and nowhere else. It is
-still the one consent, shown only while the request is `ASSIGNED`, before `PERMITIR`.
+The first ability it lists is touching, holding, swiping and dragging on the screen:
+*Tocar, mantener pulsado, deslizar y arrastrar elementos sobre la pantalla.*
+`mantener pulsado` was added with [`long_press`](#long_press--web-to-device), and
+`arrastrar elementos` with the [touch sessions](#touch-sessions--web-to-device), each
+in that one line and nowhere else. Dragging is named on its own because what it moves
+stays moved, an icon, a file, an item in a list, where a swipe usually leaves nothing
+behind. It is still the one consent, shown only while the request is `ASSIGNED`,
+before `PERMITIR`: there is no second consent, and no drag asks for confirmation of
+its own.
 
 The same disclosure also names the remote IME action that [`ime_enter`](#ime_enter--web-to-device)
 runs, as an ability of its own: using the keyboard action available on the selected
@@ -777,13 +782,25 @@ RTCDataChannelMessage
 RemoteControlInboundMessage
     │  WebRtcSessionBloc                    the gate above
     ▼
-RemoteControlCommandQueue                   one at a time
+RemoteControlCommandQueue                   one at a time; a touch_hold keeps its turn
+    │  RemoteTouchController (Dart)         the touch: binding, seq, what is owed
     │  RemoteControlAccessibilityClient     port
     │  remote_control/accessibility         MethodChannel
     ▼
-RemoteControlAccessibilityService.kt        dispatchGesture, performGlobalAction,
+RemoteGestureDispatcher.kt                  one gesture at a time, or one touch
+    │  RemoteTouchController.kt             the finger: strokes, hold, watchdog
+    ▼
+RemoteControlAccessibilityService.kt        dispatchGesture, continueStroke,
+                                            performGlobalAction,
                                             ACTION_SET_TEXT, ACTION_IME_ENTER
 ```
+
+`touch_move`, `touch_release` and `touch_cancel` skip the queue and go from
+`WebRtcSessionBloc` to the Dart `RemoteTouchController`, which checks that they name
+the running touch, under the same session, generation and channel, with a `seq`
+greater than the last, before anything reaches the bridge. The Kotlin
+`RemoteTouchController` checks the handle and the `seq` again, and is the only one
+that knows where the finger is.
 
 ### The channel
 
@@ -1205,6 +1222,8 @@ its own, so `back`, `home` and `recents` did not widen this, and added no permis
 event type or permission.
 `set_text` did, and [Text-input privacy boundary](#text-input-privacy-boundary) says
 how far. `ime_enter` uses what `set_text` already declared, and widened nothing.
+Neither did the touch sessions: `willContinue` and `continueStroke` are part of the
+same `dispatchGesture` that `canPerformGestures` already allows.
 
 Available means connected. If Android disconnects the service, the status becomes
 unavailable, a running gesture is answered as cancelled, and later commands get
@@ -1468,6 +1487,33 @@ Two of its errors were also seen on the tablet: `text_target_unavailable` with n
 to write to, and `accessibility_unavailable` with the service disabled.
 `ime_action_unavailable` was not reproduced on a device; it is covered by tests only.
 
+The touch sessions (`touch_hold`, `touch_move`, `touch_release`, `touch_cancel`) have
+**not** been tried on a device. They are covered by Dart unit and bloc tests and by JVM
+tests of the Kotlin state machine, and the APK builds; nothing has reached the T10A
+yet, because only the web console can send them and it does not yet. Two things in
+particular rest on CTS and the framework source, not on anything seen here:
+
+```text
+one contact across strokes   hold, move, move, release is one ACTION_DOWN ... one ACTION_UP
+the mismatch cancel          a continuation started one pixel away is refused with one
+                             ACTION_CANCEL, and nothing is dropped
+```
+
+What the validation with the web console has to show, on the picture and not with
+`getevent`:
+
+```text
+hold on a launcher icon   ->  the icon becomes draggable
+move, progressively       ->  the icon follows
+release                   ->  the icon is dropped where it was released
+
+hold, move, cancel        ->  nothing is dropped, the icon goes back
+                          ->  the screen responds to the next touch: no finger left down
+```
+
+No debug path exists to send these, and none should be added: it would be a way to
+drag things on the tablet that no session authorised.
+
 Do not stand in for the web with `adb shell input keyevent`: that exercises none of this
 path. No debug path exists to send a `set_text` or an `ime_enter`, and none should be
 added: it would be a way to write text, or submit a form, that no session authorised.
@@ -1524,7 +1570,21 @@ events looks like. The service did not need to be enabled again.
 [webrtc] ime_enter rejected <id> (imeActionUnavailable)
 [webrtc] ime_enter rejected <id> (imeActionRejected)
 [webrtc] control message dropped: it belongs to a previous negotiation
+[webrtc] control command received: touch_hold <id>
+[webrtc] touch t-7 started
+[webrtc] touch t-7 held
+[webrtc] touch_hold held <id>
+[webrtc] touch_hold rejected <id> (unsupportedCommand)
+[webrtc] control command received: touch_release <id>
+[webrtc] touch t-7 released
+[webrtc] touch_release completed <id>
+[webrtc] control command received: touch_cancel <id>
+[webrtc] touch t-7 cancelled reason=<cancel | abandoned | sequence | ended on android | ...>
+[webrtc] touch_move rejected <id> (touchEnded)
 ```
+
+A `touch_move` that is taken is not logged, on either side: there may be thirty a
+second. Only a refused one is.
 
 `<name> accepted` is the session gate letting the command through, for every command.
 `accepted by android` is what `back`, `home`, `recents`, `set_text` and `ime_enter` log where a
@@ -1542,7 +1602,14 @@ home accepted / rejected / busy / unavailable
 recents accepted / rejected / busy / unavailable
 set_text accepted / rejected / targetUnavailable / busy / invalid / unavailable
 ime_enter accepted / rejected / targetUnavailable / actionUnavailable / busy / unavailable
+touch <handle> started / held / moving seq=<n> / released
+touch <handle> cancelled reason=cancel / watchdog / lifetime / geometry / android
+                                / rejected / sequence / invalid / abandoned
+touch <handle> hold / release / cancel <answer>
 ```
+
+`<handle>` is the number Dart chose for the touch, not the sender's name for it.
+`moving` is logged once per touch, for its first stroke.
 
 Coordinates are not logged. Never: frames, SDP, ICE lines, tokens, secrets, the text
 of a `set_text`, or anything read from a node: its value, hint, description, password,
