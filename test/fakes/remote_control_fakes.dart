@@ -22,6 +22,9 @@ class FakeRemoteControlAccessibilityClient
   /// is what "no gesture" means in these tests.
   final List<(double, double)> taps = [];
 
+  /// Every long press that actually reached the service, as `(x, y)`.
+  final List<(double, double)> longPresses = [];
+
   /// Every swipe that actually reached the service, as
   /// `(startX, startY, endX, endY, durationMs)`.
   final List<(double, double, double, double, int)> swipes = [];
@@ -46,9 +49,10 @@ class FakeRemoteControlAccessibilityClient
   /// being zero is what "the active window was not consulted" means here.
   int imeEnters = 0;
 
-  /// [taps], [swipes], [globalActions], [setTexts] and [imeEnters] together,
-  /// in the order they reached the service. A text appears as
-  /// `('set_text', text)`, an IME action as `'ime_enter'`.
+  /// [taps], [longPresses], [swipes], [globalActions], [setTexts] and
+  /// [imeEnters] together, in the order they reached the service. A long press
+  /// appears as `('long_press', x, y)`, so it cannot be taken for a tap, a text
+  /// as `('set_text', text)`, an IME action as `'ime_enter'`.
   final List<Object> gestures = [];
 
   int settingsOpened = 0;
@@ -80,6 +84,16 @@ class FakeRemoteControlAccessibilityClient
     final tap = (normalizedX, normalizedY);
     taps.add(tap);
     gestures.add(tap);
+    return _answer();
+  }
+
+  @override
+  Future<RemoteGestureOutcome> longPress(
+    double normalizedX,
+    double normalizedY,
+  ) {
+    longPresses.add((normalizedX, normalizedY));
+    gestures.add(('long_press', normalizedX, normalizedY));
     return _answer();
   }
 

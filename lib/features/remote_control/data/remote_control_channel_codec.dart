@@ -18,6 +18,7 @@ abstract final class RemoteControlChannelCodec {
   static const int protocolVersion = 1;
 
   static const String _tapType = 'tap';
+  static const String _longPressType = 'long_press';
   static const String _swipeType = 'swipe';
   static const String _backType = 'back';
   static const String _homeType = 'home';
@@ -64,6 +65,7 @@ abstract final class RemoteControlChannelCodec {
     }
     return switch (type) {
       _tapType => _decodeTap(id, payload),
+      _longPressType => _decodeLongPress(id, payload),
       _swipeType => _decodeSwipe(id, payload),
       _backType => RemoteControlCommandReceived(RemoteBackCommand(id: id)),
       _homeType => RemoteControlCommandReceived(RemoteHomeCommand(id: id)),
@@ -88,6 +90,23 @@ abstract final class RemoteControlChannelCodec {
       return _rejected(id, RemoteControlError.invalidCommand);
     }
     return RemoteControlCommandReceived(RemoteTapCommand(id: id, x: x, y: y));
+  }
+
+  /// The same positions as a tap, refused by the same rules. A `durationMs` or
+  /// anything else beside them is ignored like any other extra field: how long
+  /// the press lasts is the device's to decide.
+  static RemoteControlInboundMessage _decodeLongPress(
+    String id,
+    Map<String, dynamic> payload,
+  ) {
+    final x = _normalized(payload['x']);
+    final y = _normalized(payload['y']);
+    if (x == null || y == null) {
+      return _rejected(id, RemoteControlError.invalidCommand);
+    }
+    return RemoteControlCommandReceived(
+      RemoteLongPressCommand(id: id, x: x, y: y),
+    );
   }
 
   /// A swipe that goes nowhere is refused rather than run as a tap: the sender

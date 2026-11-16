@@ -73,6 +73,9 @@ class RemoteControlCommandQueue {
       RemoteTapCommand(:final x, :final y) => _gesture(
         _accessibility.tap(x, y),
       ),
+      RemoteLongPressCommand(:final x, :final y) => _gesture(
+        _accessibility.longPress(x, y),
+      ),
       RemoteSwipeCommand(
         :final startX,
         :final startY,

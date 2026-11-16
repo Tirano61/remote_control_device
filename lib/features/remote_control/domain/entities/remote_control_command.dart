@@ -33,6 +33,26 @@ final class RemoteTapCommand extends RemoteControlCommand {
   List<Object?> get props => [id, x, y];
 }
 
+/// A touch held in place long enough for Android to read it as a long press.
+///
+/// [x] and [y] are normalized exactly as in [RemoteTapCommand], and for the
+/// same reason. There is no duration: how long is long enough is a setting of
+/// the device, which the Android side reads when the gesture runs, so the
+/// sender asks for the intent and never for a number of milliseconds.
+final class RemoteLongPressCommand extends RemoteControlCommand {
+  const RemoteLongPressCommand({
+    required String id,
+    required this.x,
+    required this.y,
+  }) : super(id);
+
+  final double x;
+  final double y;
+
+  @override
+  List<Object?> get props => [id, x, y];
+}
+
 /// One straight stroke across the screen, from a start to a different end.
 ///
 /// The four positions are normalized exactly as in [RemoteTapCommand], and for
