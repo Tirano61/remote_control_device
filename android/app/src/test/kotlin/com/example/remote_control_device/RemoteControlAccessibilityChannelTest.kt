@@ -231,6 +231,68 @@ class RemoteControlAccessibilityChannelTest {
     }
 
     @Test
+    fun `performLongPress holds the tap's pixel for the device's timeout plus the margin`() {
+        connect()
+
+        call("performLongPress", mapOf("x" to 0.5, "y" to 0.25))
+
+        assertEquals(listOf(GestureStroke(GesturePixel(640, 200), null, 600L)), strokes)
+        assertTrue(answers.isEmpty())
+        report!!(true)
+        assertEquals(listOf<Any?>("completed"), answers)
+    }
+
+    @Test
+    fun `a duration sent with a long press does not reach the stroke`() {
+        connect()
+
+        call("performLongPress", mapOf("x" to 0.5, "y" to 0.25, "durationMs" to 5000))
+
+        assertEquals(600L, strokes.single().durationMs)
+    }
+
+    @Test
+    fun `a cancelled long press answers cancelled`() {
+        connect()
+
+        call("performLongPress", mapOf("x" to 0.5, "y" to 0.25))
+        report!!(false)
+
+        assertEquals(listOf<Any?>("cancelled"), answers)
+    }
+
+    @Test
+    fun `a long press while a swipe runs answers busy, and does not happen`() {
+        connect()
+
+        call("performSwipe", swipeArguments())
+        call("performLongPress", mapOf("x" to 0.5, "y" to 0.25))
+
+        assertEquals(listOf<Any?>("busy"), answers)
+        assertEquals(1, strokes.size)
+    }
+
+    @Test
+    fun `a long press with no service answers unavailable`() {
+        call("performLongPress", mapOf("x" to 0.5, "y" to 0.25))
+
+        assertEquals(listOf<Any?>("unavailable"), answers)
+        assertTrue(strokes.isEmpty())
+    }
+
+    @Test
+    fun `a long press missing a coordinate answers invalid, and no gesture`() {
+        connect()
+
+        call("performLongPress", mapOf("x" to 0.5))
+        call("performLongPress", mapOf("y" to 0.5))
+        call("performLongPress", null)
+
+        assertEquals(List<Any?>(3) { "invalid" }, answers)
+        assertTrue(strokes.isEmpty())
+    }
+
+    @Test
     fun `performSetText reaches the focused field with its exact text`() {
         connect()
         window = windowWithField()

@@ -306,6 +306,13 @@ class FakeWebRtcDataChannel implements WebRtcDataChannel {
     ),
   );
 
+  /// A well-formed long press arriving as a text frame.
+  void pushLongPress(String id, {double x = 0.5, double y = 0.5}) => pushFrame(
+    WebRtcDataChannelMessage.text(
+      '{"v":1,"type":"long_press","id":"$id","x":$x,"y":$y}',
+    ),
+  );
+
   /// A well-formed swipe arriving as a text frame.
   void pushSwipe(
     String id, {

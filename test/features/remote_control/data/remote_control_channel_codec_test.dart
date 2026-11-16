@@ -683,6 +683,168 @@ void main() {
     });
   });
 
+  group('a long_press', () {
+    test('decodes the documented payload to exactly the typed command', () {
+      expect(
+        decodeText(
+          '{"v":1,"type":"long_press","id":"long-123","x":0.5,"y":0.25}',
+        ),
+        const RemoteControlCommandReceived(
+          RemoteLongPressCommand(id: 'long-123', x: 0.5, y: 0.25),
+        ),
+      );
+    });
+
+    test('carries its id, x and y, and nothing else', () {
+      const command = RemoteLongPressCommand(id: 'long-1', x: 0.25, y: 0.75);
+
+      expect(command.props, ['long-1', 0.25, 0.75]);
+      expect(command.id, 'long-1');
+      expect(command.x, 0.25);
+      expect(command.y, 0.75);
+    });
+
+    test('is not a tap at the same position, nor a tap one', () {
+      const longPress = RemoteLongPressCommand(id: 'a', x: 0.5, y: 0.5);
+
+      expect(longPress, isNot(const RemoteTapCommand(id: 'a', x: 0.5, y: 0.5)));
+      expect(
+        decodeText('{"v":1,"type":"tap","id":"a","x":0.5,"y":0.5}'),
+        isNot(const RemoteControlCommandReceived(longPress)),
+      );
+    });
+
+    for (final (name, x, y) in const [
+      ('x = 0', '0', '0.5'),
+      ('x = 1', '1', '0.5'),
+      ('y = 0', '0.5', '0'),
+      ('y = 1', '0.5', '1'),
+      ('the centre', '0.5', '0.5'),
+      ('both corners at once', '1.0', '0.0'),
+    ]) {
+      test('accepts $name', () {
+        expect(
+          decodeText('{"v":1,"type":"long_press","id":"long-1","x":$x,"y":$y}'),
+          RemoteControlCommandReceived(
+            RemoteLongPressCommand(
+              id: 'long-1',
+              x: double.parse(x),
+              y: double.parse(y),
+            ),
+          ),
+        );
+      });
+    }
+
+    test('ignores a durationMs and other extra fields, as a tap does', () {
+      expect(
+        decodeText(
+          '{"v":1,"type":"long_press","id":"long-1","x":0.25,"y":0.75,'
+          '"durationMs":5000,"endX":0.9,"endY":0.9,"text":"no"}',
+        ),
+        const RemoteControlCommandReceived(
+          RemoteLongPressCommand(id: 'long-1', x: 0.25, y: 0.75),
+        ),
+      );
+    });
+
+    group('with nothing to answer to is ignored', () {
+      for (final (name, text) in [
+        ('a missing id', '{"v":1,"type":"long_press","x":0,"y":0}'),
+        ('a null id', '{"v":1,"type":"long_press","id":null,"x":0,"y":0}'),
+        ('a numeric id', '{"v":1,"type":"long_press","id":7,"x":0,"y":0}'),
+        ('an empty id', '{"v":1,"type":"long_press","id":"","x":0,"y":0}'),
+        ('broken JSON', '{"v":1,"type":"long_press","id":"a",'),
+        ('a literal NaN', '{"v":1,"type":"long_press","id":"a","x":NaN}'),
+      ]) {
+        test(name, () => expect(decodeText(text), isNull));
+      }
+    });
+
+    group('malformed is invalid_command', () {
+      for (final (name, fields) in const [
+        ('v missing', '"type":"long_press","x":0,"y":0'),
+        ('v as a string', '"v":"1","type":"long_press","x":0,"y":0'),
+        ('v as a double', '"v":1.0,"type":"long_press","x":0,"y":0'),
+        ('x missing', '"v":1,"type":"long_press","y":0'),
+        ('y missing', '"v":1,"type":"long_press","x":0'),
+        ('x null', '"v":1,"type":"long_press","x":null,"y":0'),
+        ('x as a numeric string', '"v":1,"type":"long_press","x":"0.5","y":0'),
+        ('y as a bool', '"v":1,"type":"long_press","x":0,"y":true'),
+        ('x infinite', '"v":1,"type":"long_press","x":1e999,"y":0'),
+        ('y negative infinite', '"v":1,"type":"long_press","x":0,"y":-1e999'),
+        ('x below the range', '"v":1,"type":"long_press","x":-0.1,"y":0'),
+        ('x above the range', '"v":1,"type":"long_press","x":1.1,"y":0'),
+        ('y below the range', '"v":1,"type":"long_press","x":0,"y":-0.1'),
+        ('y above the range', '"v":1,"type":"long_press","x":0,"y":1.1'),
+        (
+          'a swipe\'s fields instead of x and y',
+          '"v":1,"type":"long_press","startX":0.5,"startY":0.5',
+        ),
+      ]) {
+        test(name, () {
+          expect(
+            decodeText('{"id":"bad",$fields}'),
+            const RemoteControlMessageRejected(
+              'bad',
+              RemoteControlError.invalidCommand,
+            ),
+          );
+        });
+      }
+    });
+
+    test('another version is not read as version 1', () {
+      expect(
+        decodeText('{"v":2,"type":"long_press","id":"later","x":0.5,"y":0.5}'),
+        const RemoteControlMessageRejected(
+          'later',
+          RemoteControlError.unsupportedCommand,
+        ),
+      );
+    });
+
+    test('in another spelling is another type', () {
+      for (final type in const ['LONG_PRESS', 'longPress', 'long-press']) {
+        expect(
+          decodeText('{"v":1,"type":"$type","id":"long-1","x":0.5,"y":0.5}'),
+          const RemoteControlMessageRejected(
+            'long-1',
+            RemoteControlError.unsupportedCommand,
+          ),
+        );
+      }
+    });
+
+    test('is answered like any command', () {
+      expect(
+        jsonDecode(
+          RemoteControlChannelCodec.encodeAck(
+            const RemoteControlAck.success('long-1'),
+          ),
+        ),
+        {'v': 1, 'type': 'ack', 'id': 'long-1', 'ok': true},
+      );
+      expect(
+        jsonDecode(
+          RemoteControlChannelCodec.encodeAck(
+            const RemoteControlAck.failure(
+              'long-1',
+              RemoteControlError.gestureRejected,
+            ),
+          ),
+        ),
+        {
+          'v': 1,
+          'type': 'ack',
+          'id': 'long-1',
+          'ok': false,
+          'error': 'gesture_rejected',
+        },
+      );
+    });
+  });
+
   test('a type that is not a string is invalid, whatever else is there', () {
     expect(
       decodeText('{"v":1,"type":["back"],"id":"nav-1"}'),
