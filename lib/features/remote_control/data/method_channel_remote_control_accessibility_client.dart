@@ -30,6 +30,7 @@ class MethodChannelRemoteControlAccessibilityClient
   static const String homeMethod = 'performHome';
   static const String recentsMethod = 'performRecents';
   static const String setTextMethod = 'performSetText';
+  static const String imeEnterMethod = 'performImeEnter';
   static const String settingsMethod = 'openAccessibilitySettings';
   static const String availabilityChangedMethod =
       'accessibilityServiceAvailabilityChanged';
@@ -104,6 +105,28 @@ class MethodChannelRemoteControlAccessibilityClient
       return RemoteTextOutcome.unavailable;
     } catch (_) {
       return RemoteTextOutcome.rejected;
+    }
+  }
+
+  /// No arguments cross the bridge, and only an outcome comes back. A `busy`
+  /// from the Android side is a refusal, as for [performSetText].
+  @override
+  Future<RemoteImeEnterOutcome> performImeEnter() async {
+    try {
+      final outcome = await channel
+          .invokeMethod<String>(imeEnterMethod)
+          .timeout(gestureTimeout);
+      return switch (outcome) {
+        'completed' => RemoteImeEnterOutcome.completed,
+        'targetUnavailable' => RemoteImeEnterOutcome.targetUnavailable,
+        'actionUnavailable' => RemoteImeEnterOutcome.actionUnavailable,
+        'unavailable' => RemoteImeEnterOutcome.unavailable,
+        _ => RemoteImeEnterOutcome.rejected,
+      };
+    } on MissingPluginException {
+      return RemoteImeEnterOutcome.unavailable;
+    } catch (_) {
+      return RemoteImeEnterOutcome.rejected;
     }
   }
 
