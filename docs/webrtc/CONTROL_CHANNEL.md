@@ -15,10 +15,23 @@ label     control
 creator   remote_control_web, before it offers
 receiver  remote_control_device, through onDataChannel
 ordered   true
+reliable  yes, by default: neither maxRetransmits nor maxPacketLifeTime is set
 ```
 
 There is no second channel, and the device never creates one. A channel with any
 other label is closed on arrival.
+
+`remote_control_web` sets `ordered = true` explicitly (`WebRtcContract.controlChannelOrdered`)
+and sets neither `maxRetransmits` nor `maxPacketLifeTime`, which makes the channel
+reliable: that is SCTP's default in WebRTC, not a separate setting. While the channel
+is open, frames arrive once, complete and in the order they were sent. When it
+closes, whatever was in flight is lost, and nothing says so. The receiving end
+cannot read either setting (`RTCDataChannelInit` is not relayed to the answerer), so
+the device takes them as this document states them.
+
+The touch session below depends on that order, and still numbers its messages
+(`seq`), to validate them, to defend against a sender that does not keep to it, and
+to tell one message from another in a log.
 
 Frames are UTF-8 text holding one JSON object. Binary frames are ignored.
 
@@ -34,9 +47,17 @@ Frames are UTF-8 text holding one JSON object. Binary frames are ignored.
 | `recents` | Android's Recents | `performGlobalAction(GLOBAL_ACTION_RECENTS)` |
 | `set_text` | replaces the content of the focused field | `ACTION_SET_TEXT` on the node with input focus |
 | `ime_enter` | runs the IME action the focused field exposes | `ACTION_IME_ENTER` on the node with input focus |
+| `touch_hold` | puts a finger down and keeps it down past the long-press timeout | `dispatchGesture`, stroke with `willContinue` |
+| `touch_move` | moves that finger, without lifting it | `dispatchGesture`, `continueStroke` |
+| `touch_release` | lifts that finger | `dispatchGesture`, `continueStroke`, `willContinue = false` |
+| `touch_cancel` | takes that finger away without a release | see [Cancelling a held touch](#cancelling-a-held-touch) |
 
-All eight travel on the same channel, get the same `ack`, need the same `ACTIVE`
-session and the same accessibility service, and wait in the same queue.
+All of them travel on the same channel and need the same `ACTIVE` session and the
+same accessibility service. The first eight, and `touch_hold`, wait in the same
+queue and get one `ack` each. `touch_move`, `touch_release` and `touch_cancel` belong
+to a touch that is already running, so they do not queue behind it, and a
+`touch_move` that succeeds gets no `ack` at all: see
+[Touch sessions](#touch-sessions--web-to-device).
 
 ### `tap` — web to device
 
@@ -273,9 +294,185 @@ finished, the form was submitted, the message was sent or the screen changed: th
 application reacts on its own time, and may do nothing visible. Only the picture can
 show what it did.
 
+### Touch sessions — web to device
+
+One finger, put down by `touch_hold`, kept down for as long as the technician keeps
+the pointer down, moved by `touch_move`, and lifted by `touch_release` or taken away
+by `touch_cancel`. It is what a drag is made of: hold an icon until it can be moved,
+move it, drop it. Held and released without moving, it is a long press whose finger
+stays down until the technician lets go.
+
+```json
+{"v":1,"type":"touch_hold","id":"hold-7","touch":"t-7","x":0.41,"y":0.52}
+{"v":1,"type":"touch_move","id":"mv-7-12","touch":"t-7","seq":12,"x":0.43,"y":0.55}
+{"v":1,"type":"touch_release","id":"rel-7","touch":"t-7","seq":40,"x":0.60,"y":0.70}
+{"v":1,"type":"touch_cancel","id":"cxl-7","touch":"t-7","seq":41}
+```
+
+| Field | Type | Rule | In |
+| --- | --- | --- | --- |
+| `v` | integer | `1` | all four |
+| `type` | string | `"touch_hold"`, `"touch_move"`, `"touch_release"` or `"touch_cancel"` | all four |
+| `id` | string | non-empty; chosen by the sender and opaque to the device, as for every command | all four |
+| `touch` | string | non-empty, at most 64 UTF-16 code units; opaque to the device | all four |
+| `seq` | integer | `1 <= seq <= 2147483647`, strictly greater than the last one accepted for this `touch` | move, release, cancel |
+| `x`, `y` | number | finite, `0.0 <= value <= 1.0`, exactly a tap's | hold, move, release |
+
+`touch_hold` has no `seq`: it is the touch's `0`. A `seq` sent with it, or an `x` sent
+with a `touch_cancel`, is an unknown extra field and is ignored, like any other.
+
+`id` names the message, and is what an `ack` answers. `touch` names the finger, and
+is shared by every message about it. It has no meaning outside the `control` channel
+and the peer connection it arrived on: a `touch` with the same name on a new
+connection is a different touch, and a message from an old connection never reaches
+the current one.
+
+Coordinates are a tap's, with a tap's rules: normalized `[0,1]` over the whole remote
+frame, refused and never clamped. A sender that wants the finger to follow a pointer
+past the edge of the picture clamps it to `0` or `1` itself.
+
+#### `seq`
+
+```text
+touch_hold        is 0, and is never sent
+then              each seq greater than the last one accepted for that touch
+gaps              allowed: a sender may drop moves before sending them
+equal or lower    a protocol error: the touch is cancelled, and the message is answered touch_ended
+```
+
+The channel is ordered and reliable, so an equal or lower `seq` cannot come from the
+network. It comes from a sender that broke the rule, and the safe answer to a sender
+that does not know where its finger is, is to take the finger away.
+
+#### Android 8.0 and later only
+
+A finger kept down between two `dispatchGesture` calls is what
+`GestureDescription.StrokeDescription`'s `willContinue` and `continueStroke` do, and
+both exist from Android 8.0 (API 26). Below that, on Android 7.0 and 7.1 (API 24 and
+25, which this application still installs on):
+
+```text
+touch_hold    unsupported_command; no gesture, no touch, nothing kept
+```
+
+Nothing pretends to be a continued touch there: no stroke is cut into pieces, and a
+drag is not replayed when the pointer goes up. The sender that gets
+`unsupported_command` for a `touch_hold` falls back to [`long_press`](#long_press--web-to-device),
+which is unchanged and works from API 24, exactly as with a device build that does
+not know these types at all: that one answers `unsupported_command` too, before
+anything runs.
+
+#### What the acks say
+
+| Message | `ok: true` means | Otherwise |
+| --- | --- | --- |
+| `touch_hold` | the finger is still down, has been down longer than this device's long-press timeout, and the touch goes on | `unsupported_command`, `accessibility_unavailable`, `session_not_active`, `gesture_rejected`, `touch_ended`, `invalid_command` |
+| `touch_move` | **never sent**: a move that was taken is not answered | `touch_ended`, `accessibility_unavailable`, `session_not_active`, `invalid_command` |
+| `touch_release` | the final stroke completed: Android received the end of the contact | `touch_ended`, `accessibility_unavailable`, `session_not_active`, `invalid_command` |
+| `touch_cancel` | the touch is over on this device, cancelled or already ended | `touch_ended` (only for a `seq` that breaks the rule), `session_not_active`, `invalid_command` |
+
+**`touch_hold` `ok: true` does not say that anything was picked up.** It does not say
+the element can be dragged, that a menu opened, or that the application noticed. It
+says the finger is down and has been down long enough for Android to read a long
+press, and nothing about what was under it. Only the picture shows that.
+
+`touch_release` `ok: true` does not say the element was dropped where the
+application expected, or dropped at all: only that the contact ended where the
+release said.
+
+`touch_cancel` is idempotent: a cancel for a touch that has already ended, or never
+existed on this device, is `ok: true`. So is a cancel that names another touch than
+the one running, which it does not affect.
+
+A move that is not taken is answered with its own `id`:
+
+```json
+{"v":1,"type":"ack","id":"mv-7-12","ok":false,"error":"touch_ended"}
+```
+
+and so is every later move for the same touch, until the sender stops. One is
+enough to know the touch is gone.
+
+#### Holding, moving, letting go
+
+```text
+touch_hold      finger down where it says; ok once the long-press timeout has passed
+touch_move      the finger goes there, but never before the hold has been acked on this device
+touch_release   the finger goes to where it says and is lifted there
+touch_cancel    the finger is taken away: an ACTION_CANCEL, never an ACTION_UP
+```
+
+Moves and the release may be sent before the `touch_hold` is acknowledged, and are
+not refused for it. Moving the finger before Android has read a long press would make
+the touch a scroll, so the device keeps where the latest move asked for and moves only
+once the hold is over. A release that arrives during the hold lifts the finger once
+the hold is over: the result is a complete long press, then the release, each
+answered.
+
+The device keeps the latest position and nothing older:
+
+```text
+in flight       at most one stroke handed to Android
+waiting         at most one position: the latest
+a newer move    replaces the waiting position; the ones in between are never played
+```
+
+so the finger is never more than one short stroke behind the pointer, however fast
+moves arrive. A move to the pixel the finger is already on moves nothing and starts
+no stroke: that is what a keepalive is.
+
+#### Keepalive, watchdog and the 30-second limit
+
+```text
+keepalive    the sender repeats the last position as a touch_move about every 250 ms
+             while the pointer stays down, including before the touch_hold is answered
+watchdog     1000 ms without a valid message for the touch: it is cancelled
+             (the touch_release stops it: nothing else is expected after one)
+lifetime     30 s after the touch_hold started on this device: it is cancelled, keepalives or not
+```
+
+A finger held still is a legitimate part of a drag, so silence and stillness are
+different things: a touch whose pointer does not move still gets keepalives, and only
+a sender that has gone quiet loses its touch. The 30 seconds are a defensive limit:
+no remote drag needs them, and a finger left down on someone's tablet is worse than a
+drag cut short.
+
+#### One touch at a time
+
+```text
+touch_hold while a touch exists                 gesture_rejected; the running touch is untouched
+touch_move/release for another touch            touch_ended; the running touch is untouched
+touch_cancel for another touch                  ok; the running touch is untouched
+touch_move after touch_release                  touch_ended; nothing moves
+a second touch_release                          touch_ended
+anything else while a touch exists              waits in the queue until the touch has ended
+```
+
+There is one finger. Pinch, several fingers and a second touch do not exist.
+
+#### When a touch ends without the sender
+
+The touch is cancelled on the device, without waiting for the web, when any of these
+happens:
+
+```text
+the session leaves ACTIVE, or FINALIZAR ASISTENCIA is pressed
+the control channel stops being open
+the peer connection fails, closes or is replaced
+the accessibility service disconnects
+the display changes size or rotation
+the watchdog or the 30-second limit expires
+Android cancels the stroke (a real touch on the screen, for instance)
+```
+
+The sender learns it at its next message, which is answered `touch_ended`, or not at
+all if the channel is gone. Why it ended is in the device's log, never on the wire.
+
 ### `ack` — device to web
 
-Exactly one for each command that has an id, on the same channel.
+Exactly one for each command that has an id, on the same channel, with one
+exception: a `touch_move` that was taken gets none (see
+[Touch sessions](#touch-sessions--web-to-device)).
 
 ```json
 { "v": 1, "type": "ack", "id": "tap-123", "ok": true }
@@ -333,6 +530,26 @@ Exactly one for each command that has an id, on the same channel.
 { "v": 1, "type": "ack", "id": "enter-1", "ok": false, "error": "ime_action_rejected" }
 ```
 
+```json
+{"v":1,"type":"ack","id":"hold-7","ok":true}
+```
+
+```json
+{"v":1,"type":"ack","id":"hold-7","ok":false,"error":"unsupported_command"}
+```
+
+```json
+{"v":1,"type":"ack","id":"mv-7-12","ok":false,"error":"touch_ended"}
+```
+
+```json
+{"v":1,"type":"ack","id":"rel-7","ok":true}
+```
+
+```json
+{"v":1,"type":"ack","id":"cxl-7","ok":true}
+```
+
 What `ok: true` promises depends on the command, because Android promises different
 things:
 
@@ -341,6 +558,10 @@ tap, long_press, swipe Android reported the gesture completed, not merely that i
 back, home, recents    Android accepted the global action
 set_text               the focused node accepted ACTION_SET_TEXT
 ime_enter              the focused node accepted ACTION_IME_ENTER, and nothing about what it then did
+touch_hold             the finger is down past the long-press timeout and the touch goes on; nothing about what it holds
+touch_move             no ack when it succeeds
+touch_release          the final stroke completed and Android received the end of the contact
+touch_cancel           the touch is over on this device
 ```
 
 The field is not read back, so a `set_text` that was acknowledged does not say what
@@ -363,6 +584,16 @@ go back to, for instance.
 | `text_rejected` | there was somewhere to write, and `ACTION_SET_TEXT` answered `false`, failed, or could not run because a gesture was in progress |
 | `ime_action_unavailable` | an `ime_enter` found an editable, enabled field with input focus that does not list `ACTION_IME_ENTER` |
 | `ime_action_rejected` | the field lists `ACTION_IME_ENTER`, and `performAction` answered `false`, failed, or could not run because a gesture was in progress |
+| `touch_ended` | the touch a `touch_*` message names cannot go on, or does not exist: it was cancelled, timed out, outlived its 30 seconds, broke the `seq` rule, saw the display change, was cancelled by Android, lost its session, channel or peer connection, or was never there |
+
+`touch_ended` is deliberately one code. Which of those reasons it was is in the
+device's log and nowhere else: the sender does the same thing for all of them, which
+is to stop sending for that touch.
+
+A `touch_hold` refused for a reason that is not about the touch keeps the code that
+reason already has: `gesture_rejected` for a full queue, another touch already
+running, an unusable long-press timeout or a stroke Android refused;
+`unsupported_command` below Android 8.0.
 
 `gesture_rejected` is older than `back`, `home` and `recents`, and its name is
 narrower than what it now covers. It stays as it is: v1 senders already depend on it, and a new
@@ -403,6 +634,9 @@ An ack needs an id to refer to, so:
 | `durationMs` missing, `null`, a string, a double, below `50`, above `2000` | `invalid_command` |
 | a swipe whose start equals its end | `invalid_command` |
 | `text` missing, `null`, a number, a bool, an object, an array, or over `4096` code units | `invalid_command` |
+| `touch` missing, `null`, not a string, empty, or over `64` code units | `invalid_command` |
+| `seq` missing, `null`, a string, a double, `0`, negative, or above `2147483647` | `invalid_command` |
+| `seq` not greater than the last one accepted for that touch | `touch_ended`; the touch is cancelled |
 
 ## When a command runs
 
@@ -496,14 +730,37 @@ An `ime_enter` after a `set_text` waits for the `set_text` to be answered, so th
 was accepted before the action runs. Whether the application has processed the new
 text by then is, again, the application's business.
 
+A `touch_hold` takes its turn like any other command, and keeps it **until its touch
+has ended**, not until it is acknowledged. The `ok` for the hold goes out while the
+finger is still down, and the queue stays where it is:
+
 ```text
-                                     running gesture   queued commands
-session leaves ACTIVE                finishes          dropped; session_not_active
-channel stops being open             finishes          dropped; no ack possible
-peer connection failed or replaced   finishes          dropped; no ack possible
+touch_hold A, home B      A runs; its hold is acked; B waits
+                          ... touch_move, touch_move ...   (these do not queue)
+                          touch_release A                  the finger is lifted; A's turn ends; B runs
 ```
 
-A gesture already handed to Android cannot be recalled. Nothing starts after it.
+`touch_move`, `touch_release` and `touch_cancel` do not enter the queue: they belong
+to the touch holding it, and waiting behind it would be waiting forever. Nothing else
+runs while a touch is down, not a tap, a swipe, a long press, a Back, a Home, a
+Recents, a text or an IME action: any of them would either cancel the finger or act
+under it. FINALIZAR ASISTENCIA is not a command and does not queue: it ends the touch
+at once.
+
+Moves, releases and cancels that arrive while their `touch_hold` is still waiting its
+turn are kept for it: the latest position, and the release or cancel. A cancel
+before the turn comes means the finger never goes down.
+
+```text
+                                     running gesture   running touch          queued commands
+session leaves ACTIVE                finishes          cancelled at once      dropped; session_not_active
+channel stops being open             finishes          cancelled at once      dropped; no ack possible
+peer connection failed or replaced   finishes          cancelled at once      dropped; no ack possible
+```
+
+A touch cannot be left to finish like a gesture, because it does not finish by
+itself: it is cancelled on the device before anything else is cleaned up. A gesture
+already handed to Android cannot be recalled. Nothing starts after it.
 Queued `back`, `home`, `recents`, `set_text` and `ime_enter` commands are dropped with
 the rest, so a queued `set_text` or `ime_enter` never looks at the window once the
 session has ended.
@@ -546,8 +803,42 @@ remote_control/accessibility
   performImeEnter                  -> "completed" | "targetUnavailable"
                                       | "actionUnavailable" | "rejected" | "busy"
                                       | "unavailable"
+  startRemoteTouch {touch, x, y}   -> "held" | "ended" | "rejected" | "busy"
+                                      | "invalid" | "unsupported" | "unavailable"
+  moveRemoteTouch {touch, seq, x, y}
+                                   -> "accepted" | "ended" | "unavailable"
+  releaseRemoteTouch {touch, seq, x, y}
+                                   -> "completed" | "ended" | "unavailable"
+  cancelRemoteTouch {touch, seq}   -> "cancelled" | "unavailable"
+  abandonRemoteTouch {touch}       -> nothing
   openAccessibilitySettings
   accessibilityServiceAvailabilityChanged (Android to Dart) bool
+  remoteTouchEnded (Android to Dart) touch
+```
+
+`touch` on the bridge is not the sender's `touch`: it is an integer Dart chooses for
+each touch it starts, so a name a sender reuses on a new connection can never be taken
+for the touch still running. The sender's `touch` and `id` stay in Dart.
+
+`startRemoteTouch` answers once the hold is over, so the Dart future is the hold; like
+a long press it lasts at most four seconds. `moveRemoteTouch` answers at once: it
+says whether the position was taken, not whether the finger has reached it.
+`releaseRemoteTouch` answers when the final stroke has completed, and
+`cancelRemoteTouch` when Android has reported the cancellation. `abandonRemoteTouch`
+answers nothing and waits for nothing: it is what Dart calls when the session, the
+channel or the peer connection ends, and the touch is gone on the Android side before
+it returns. `remoteTouchEnded` is the Android side telling Dart that a touch ended on
+its own (watchdog, lifetime, display change, Android cancelling it), so that the queue
+it is holding moves on even if the sender has gone quiet.
+
+For the touch messages the answers reduce to:
+
+```text
+startRemoteTouch    "held" ok | "unsupported" unsupported_command | "unavailable" accessibility_unavailable
+                    "ended" touch_ended | anything else, or no answer in time, gesture_rejected
+moveRemoteTouch     "accepted" no ack | "unavailable" accessibility_unavailable | anything else touch_ended
+releaseRemoteTouch  "completed" ok | "unavailable" accessibility_unavailable | anything else touch_ended
+cancelRemoteTouch   ok, whatever the answer: the touch is over either way
 ```
 
 `performTap`, `performLongPress` and `performSwipe` are answered from the gesture's
@@ -674,6 +965,145 @@ no length for a touch held in place, which would be a long press nobody asked fo
 so that swipe does not run. It is answered `"invalid"` on the bridge, and so
 `gesture_rejected` on the wire. Only the device can know this, because it depends
 on the size of the screen.
+
+### A touch held across strokes
+
+A touch session is one Android pointer, from one `ACTION_DOWN` to one `ACTION_UP` (or
+`ACTION_CANCEL`), built from several `dispatchGesture` calls, one short stroke each.
+Each stroke but the last is created with `willContinue = true`, which keeps the
+pointer down when that gesture completes, and each one after the first is
+`previous.continueStroke(...)`, which goes on with the same pointer instead of
+starting a new one. Both are public API from Android 8.0.
+
+That this produces one contact and not several is not an assumption. Android's CTS
+requires it of every compatible device:
+`AccessibilityGestureDispatchTest#testContinuedGestures_motionEventsContinue`
+(`cts/tests/accessibilityservice`, present in `android-16.0.0_r1`) dispatches three
+strokes in three gestures, each after the previous one completed, and asserts that the
+first event is `ACTION_DOWN`, every event in between is `ACTION_MOVE`, and the last is
+`ACTION_UP`.
+
+```text
+touch_hold      Path.moveTo(p)                                   16 ms   new stroke, willContinue = true
+touch_move      Path.moveTo(current).lineTo(target)              16..100 ms   continueStroke, willContinue = true
+touch_release   Path.moveTo(current).lineTo(final), or moveTo(current) alone
+                                                                 16..100 ms, or 16 ms   continueStroke, willContinue = false
+```
+
+`current` is the last pixel the finger was sent to, kept as a pixel and never worked
+out again from a normalized position. Android rounds stroke positions to whole
+pixels, and a continuation whose first point is not exactly where the previous stroke
+ended is not a continuation at all (see the next section), so every continuation
+starts at `current` exactly.
+
+**The hold is a timer, not a stroke.** A stroke that does not move and is marked
+`willContinue` produces one event, the `ACTION_DOWN`, and its gesture completes right
+after it, whatever duration it was given (`MotionEventInjector` emits no `ACTION_MOVE`
+for a point that has not moved and no `ACTION_UP` for a stroke that continues). So
+`onCompleted` for the first stroke means *the finger is down*, and from that moment
+the device times `ViewConfiguration.getLongPressTimeout() + 100 ms` itself, the same
+duration a [`long_press`](#long_press--web-to-device) lasts, refused in the same way if
+the timeout cannot be used. When it expires, and only if the touch is still there, the
+pointer was not cancelled, the session is the same and the display has not changed,
+the `touch_hold` is answered `ok`.
+
+**A continuation that does not move is never sent.** A continued stroke with
+`willContinue = true` and no movement produces no event at all, and Android reports
+such a gesture as *cancelled* while leaving the pointer down. A keepalive, or a move
+to the pixel the finger is already on, therefore refreshes the watchdog, records the
+`seq` and dispatches nothing. A release on the spot is different: it is
+`willContinue = false`, its last point is the end of the path, and Android emits the
+`ACTION_UP` for it (`GestureUtils.pointerUp` in CTS builds exactly that).
+
+States, on the Android side:
+
+```text
+(none)      no touch
+PRESSING    the first stroke was dispatched; the hold timer runs once Android reports it
+HELD        hold over, the finger is down and nothing is in flight
+MOVING      one continued stroke in flight
+RELEASING   the final stroke in flight
+CANCELLING  the cancelling continuation in flight
+```
+
+```text
+PRESSING   hold expires          -> HELD, or straight to MOVING / RELEASING if a move or a release is waiting
+HELD       move to a new pixel   -> MOVING
+MOVING     stroke completed      -> MOVING again (newer position), RELEASING (release waiting) or HELD
+any        release               -> RELEASING once nothing is in flight and the hold is over
+RELEASING  stroke completed      -> (none), release answered completed
+any        cancel                -> CANCELLING -> (none) when Android reports it
+any        Android cancels a stroke, watchdog, lifetime, display change, abandon -> (none)
+```
+
+The duration of a moving stroke is the time that passed between the two positions it
+joins, as this device received them:
+
+```text
+durationMs = clamp(arrival of the target − arrival of the previous target, 16, 100)
+```
+
+where the first move measures from the moment the `touch_hold` started on the device.
+Never zero, which Android refuses; never more than 100 ms, so the finger is at most
+one short stroke behind; never a replay of every intermediate position.
+
+### Cancelling a held touch
+
+There is no public API that cancels a pointer kept down by `willContinue`. A
+`touch_cancel` must not become a release (that would drop whatever is being dragged
+wherever it happens to be), and a new, unrelated gesture would cancel the pointer
+only by putting another finger down. What the device does instead is exceptional and
+deliberate:
+
+```text
+cancelContinuedStrokeViaMismatch   previous.continueStroke(moveTo(a pixel beside current), 16 ms, willContinue = false)
+```
+
+A continuation is only valid if it starts exactly where the stroke it continues ended.
+This one starts one pixel away on purpose. Android refuses it, and, in refusing it,
+sends a single `ACTION_CANCEL` for the pointer it was keeping down, removes whatever
+of that pointer's strokes had not been played yet, and reports the gesture cancelled.
+No `ACTION_DOWN` and no `ACTION_UP` are produced. That is not a reading of the source
+alone: `AccessibilityGestureDispatchTest#testContinuedGesture_withLineDisconnect_isCancelled`
+asserts exactly one event, `ACTION_CANCEL`, and the gesture cancelled, on every
+compatible device.
+
+```text
+the pixel beside current    x + 1 if it is on the screen, otherwise x − 1, otherwise y + 1, otherwise y − 1
+                            on the screen as the touch started and as it is now
+```
+
+It breaks a precondition of the API on purpose, which is why it is one small function
+with that name, used for nothing but cancelling a touch, and why it is provisional
+until it has been seen on the T10A.
+
+```text
+cancel in PRESSING    the finger is cancelled at once; the touch_hold is answered touch_ended
+cancel in HELD        the finger is cancelled at once
+cancel in MOVING      the stroke in flight is cut short and the finger cancelled at once
+cancel in RELEASING   the final stroke is already Android's and cannot be refused: the cancel is
+                      answered ok when it completes, and the contact ends with ACTION_UP
+cancel in CANCELLING  answered together with the cancel already running
+```
+
+A cancel coming from the sender is answered when Android reports it. One that comes
+from the device itself (the session ending, the channel closing, the watchdog...)
+waits for nothing: the touch is forgotten at once, and the cancelling continuation
+goes out behind it without anyone waiting for its result.
+
+What this cannot cover: if this application's process dies while a finger is down,
+nothing in it is left to cancel the finger. Android cancels it when the accessibility
+input filter is reconfigured, which happens when this service unbinds and no other
+bound service can perform gestures; if another one can, the finger stays down until
+someone touches the screen. A real touch on the screen always ends an injected one.
+
+### Display changes during a touch
+
+The display is read when the touch starts and again before every move, release,
+keepalive and at the end of the hold. If its size, rotation or density changed, the
+touch is cancelled and answered `touch_ended`: positions are normalized over a screen
+that no longer exists, and re-projecting a drag that was started in one orientation
+onto another would put the finger somewhere nobody aimed at.
 
 ### Back, Home and Recents
 
@@ -818,8 +1248,14 @@ sends no content             the ack is ok and an error code, and nothing about 
 persists nothing             no node, text, package or hierarchy is kept after the command
 reads nothing for set_text   not the value, the hint, the description, or any other field
 reads nothing for ime_enter  only editable, enabled and the ids of the listed actions
-no window for a gesture      tap, long_press and swipe never look at the window
+no window for a gesture      tap, long_press, swipe and touch_* never look at the window
 ```
+
+A touch session uses positions, times, ids, `seq`, the display's size and rotation,
+and what Android reports about its own strokes. It reads no node, no text, no cursor,
+no selection, no package, no clipboard and no window content, and it added no
+capability, flag or permission to the service: `canPerformGestures` already covers
+`willContinue` and `continueStroke`.
 
 The window is looked at only as a consequence of a command that passed
 [the conditions above](#when-a-command-runs). With the service connected and no
