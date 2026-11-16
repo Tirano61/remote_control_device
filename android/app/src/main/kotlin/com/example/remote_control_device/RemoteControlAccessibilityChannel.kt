@@ -13,7 +13,8 @@ import io.flutter.plugin.common.MethodChannel
  *
  * Transport and nothing else. Whether a gesture may run is decided in Dart, in
  * `WebRtcSessionBloc`, against the remote session; by the time [TAP_METHOD], [SWIPE_METHOD],
- * [BACK_METHOD], [HOME_METHOD], [RECENTS_METHOD] or [SET_TEXT_METHOD] arrives the decision is made.
+ * [BACK_METHOD], [HOME_METHOD], [RECENTS_METHOD], [SET_TEXT_METHOD] or [IME_ENTER_METHOD] arrives
+ * the decision is made.
  * Failures are answered as outcomes, never thrown across the boundary.
  *
  * The text of a [SET_TEXT_METHOD] may be a password. It goes to the service and nowhere else, and
@@ -93,6 +94,9 @@ class RemoteControlAccessibilityChannel(
                 availability.setText(text, answerAction("set_text", result))
             }
 
+            // No arguments: which field and which action are the device's to find, not the call's.
+            IME_ENTER_METHOD -> availability.imeEnter(answerAction("ime_enter", result))
+
             SETTINGS_METHOD -> try {
                 // Only opens the screen. Enabling the service is the user's, in Android's own UI.
                 context.startActivity(
@@ -129,6 +133,7 @@ class RemoteControlAccessibilityChannel(
         const val HOME_METHOD = "performHome"
         const val RECENTS_METHOD = "performRecents"
         const val SET_TEXT_METHOD = "performSetText"
+        const val IME_ENTER_METHOD = "performImeEnter"
         const val SETTINGS_METHOD = "openAccessibilitySettings"
         const val AVAILABILITY_CHANGED_METHOD = "accessibilityServiceAvailabilityChanged"
 

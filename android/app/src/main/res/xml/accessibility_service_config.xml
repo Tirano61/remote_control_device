@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Gestures, and looking at the active window to find what has input focus for a set_text, which
-     happens only while that command runs. No accessibilityEventTypes, so no event is ever delivered
+<!-- Gestures, and looking at the active window to find what has input focus for a set_text or an
+     ime_enter, which happens only while that command runs. No accessibilityEventTypes, so no event is ever delivered
      and nothing watches the screen, and no accessibilityFlags, so nothing beyond the active window
      is opened up. -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"

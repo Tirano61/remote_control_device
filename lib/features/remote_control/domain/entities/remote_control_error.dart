@@ -21,10 +21,18 @@ enum RemoteControlError {
   /// know.
   unsupportedCommand,
 
-  /// The `set_text` was valid and had nowhere to go: no active window, nothing
-  /// with input focus, or a focused node that is not editable and enabled.
+  /// The `set_text` or `ime_enter` was valid and had nowhere to go: no active
+  /// window, nothing with input focus, or a focused node that is not editable
+  /// and enabled.
   textTargetUnavailable,
 
   /// There was somewhere to write, and the text could not be put there.
   textRejected,
+
+  /// The focused field is editable and enabled, and does not list
+  /// `ACTION_IME_ENTER`: it has no IME action to run.
+  imeActionUnavailable,
+
+  /// The focused field lists `ACTION_IME_ENTER`, and Android did not take it.
+  imeActionRejected,
 }

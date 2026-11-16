@@ -406,6 +406,135 @@ void main() {
     });
   });
 
+  group('ime_enter shares that line', () {
+    void submitEnter(String id) =>
+        queue.submit(RemoteImeEnterCommand(id: id), acks.add);
+
+    test('tap, set_text, ime_enter, home run in exactly that order', () async {
+      accessibility.holdGestures = true;
+
+      submit('a', x: 0.3);
+      queue.submit(const RemoteSetTextCommand(id: 'b', text: 'Hola'), acks.add);
+      submitEnter('c');
+      queue.submit(const RemoteHomeCommand(id: 'd'), acks.add);
+      await settle();
+      expect(accessibility.gestures, [(0.3, 0.5)]);
+
+      accessibility.finishGesture();
+      await settle();
+      expect(accessibility.gestures, [(0.3, 0.5), ('set_text', 'Hola')]);
+      expect(accessibility.imeEnters, 0);
+
+      accessibility.finishGesture();
+      await settle();
+      expect(accessibility.gestures, [
+        (0.3, 0.5),
+        ('set_text', 'Hola'),
+        'ime_enter',
+      ]);
+
+      accessibility.finishGesture();
+      await settle();
+      expect(accessibility.gestures, [
+        (0.3, 0.5),
+        ('set_text', 'Hola'),
+        'ime_enter',
+        'home',
+      ]);
+
+      accessibility.finishGesture();
+      await settle();
+      expect(acks, const [
+        RemoteControlAck.success('a'),
+        RemoteControlAck.success('b'),
+        RemoteControlAck.success('c'),
+        RemoteControlAck.success('d'),
+      ]);
+    });
+
+    test('a pending ime_enter is dropped with the rest', () async {
+      accessibility.holdGestures = true;
+      submit('a');
+      submitEnter('b');
+      await settle();
+
+      queue.discardPending();
+      accessibility.finishGesture();
+      await settle();
+
+      expect(accessibility.imeEnters, 0);
+      expect(acks, const [
+        RemoteControlAck.failure('b', RemoteControlError.sessionNotActive),
+        RemoteControlAck.success('a'),
+      ]);
+    });
+
+    test('it counts against the same limit', () async {
+      accessibility.holdGestures = true;
+      submit('running');
+      await settle();
+
+      for (var i = 0; i < RemoteControlCommandQueue.maxPending; i++) {
+        submitEnter('queued-$i');
+      }
+      submitEnter('one-too-many');
+
+      expect(acks, const [
+        RemoteControlAck.failure(
+          'one-too-many',
+          RemoteControlError.gestureRejected,
+        ),
+      ]);
+      expect(accessibility.imeEnters, 0);
+    });
+
+    for (final (outcome, ack) in const [
+      (RemoteImeEnterOutcome.completed, RemoteControlAck.success('e')),
+      (
+        RemoteImeEnterOutcome.targetUnavailable,
+        RemoteControlAck.failure('e', RemoteControlError.textTargetUnavailable),
+      ),
+      (
+        RemoteImeEnterOutcome.actionUnavailable,
+        RemoteControlAck.failure('e', RemoteControlError.imeActionUnavailable),
+      ),
+      (
+        RemoteImeEnterOutcome.rejected,
+        RemoteControlAck.failure('e', RemoteControlError.imeActionRejected),
+      ),
+      (
+        RemoteImeEnterOutcome.unavailable,
+        RemoteControlAck.failure(
+          'e',
+          RemoteControlError.accessibilityUnavailable,
+        ),
+      ),
+    ]) {
+      test('$outcome becomes the matching ack', () async {
+        accessibility.imeEnterOutcome = outcome;
+
+        submitEnter('e');
+        await settle();
+
+        expect(acks, [ack]);
+        expect(accessibility.imeEnters, 1);
+      });
+    }
+
+    test('a failed ime_enter does not stop what follows', () async {
+      accessibility.imeEnterOutcome = RemoteImeEnterOutcome.actionUnavailable;
+
+      submitEnter('a');
+      submit('b');
+      await settle();
+
+      expect(acks, const [
+        RemoteControlAck.failure('a', RemoteControlError.imeActionUnavailable),
+        RemoteControlAck.success('b'),
+      ]);
+    });
+  });
+
   for (final (outcome, ack) in const [
     (RemoteGestureOutcome.completed, RemoteControlAck.success('s')),
     (

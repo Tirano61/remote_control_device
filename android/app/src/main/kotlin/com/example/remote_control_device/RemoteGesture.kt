@@ -61,13 +61,19 @@ enum class RemoteGestureOutcome(val wire: String) {
     CANCELLED("cancelled"),
 
     /**
-     * `dispatchGesture`, `performGlobalAction` or `ACTION_SET_TEXT` refused it, or something it
-     * needed from Android could not be read.
+     * `dispatchGesture`, `performGlobalAction`, `ACTION_SET_TEXT` or `ACTION_IME_ENTER` refused it,
+     * or something it needed from Android could not be read.
      */
     REJECTED("rejected"),
 
-    /** A `set_text` found no active window, no input focus, or a node it may not write to. */
+    /**
+     * A `set_text` or an `ime_enter` found no active window, no input focus, or a node that is not
+     * editable and enabled.
+     */
     TARGET_UNAVAILABLE("targetUnavailable"),
+
+    /** An `ime_enter` found a valid target that does not list `ACTION_IME_ENTER`. */
+    ACTION_UNAVAILABLE("actionUnavailable"),
 
     /** A gesture is still running. `dispatchGesture` would cancel it, so this one is refused. */
     BUSY("busy"),
@@ -101,8 +107,9 @@ enum class RemoteGestureOutcome(val wire: String) {
  * position, so it reads no display. It answers at once and leaves nothing running, but it still
  * waits its turn: Home must not start under a swipe that has not finished.
  *
- * [activeWindow] is consulted for a `set_text` and for nothing else: not when the service
- * connects, and not for a gesture or a global action. See [writeToInputFocus].
+ * [activeWindow] is consulted for a `set_text` or an `ime_enter` and for nothing else: not when the
+ * service connects, and not for a gesture or a global action. See [writeToInputFocus] and
+ * [imeEnterOnInputFocus].
  *
  * Pure, and main-thread only: the channel handler, the gesture callback and the service
  * lifecycle all run there.
@@ -161,6 +168,15 @@ class RemoteGestureDispatcher(
             return
         }
         answer(writeToInputFocus(activeWindow, text))
+    }
+
+    /** Like [setText], it waits for no gesture: one still running makes it [RemoteGestureOutcome.BUSY]. */
+    fun imeEnter(answer: (RemoteGestureOutcome) -> Unit) {
+        if (running != null) {
+            answer(RemoteGestureOutcome.BUSY)
+            return
+        }
+        answer(imeEnterOnInputFocus(activeWindow))
     }
 
     private fun globalAction(action: Int, answer: (RemoteGestureOutcome) -> Unit) {
@@ -329,5 +345,14 @@ class RemoteControlAvailability {
             return
         }
         current.setText(text, answer)
+    }
+
+    fun imeEnter(answer: (RemoteGestureOutcome) -> Unit) {
+        val current = dispatcher
+        if (current == null) {
+            answer(RemoteGestureOutcome.UNAVAILABLE)
+            return
+        }
+        current.imeEnter(answer)
     }
 }

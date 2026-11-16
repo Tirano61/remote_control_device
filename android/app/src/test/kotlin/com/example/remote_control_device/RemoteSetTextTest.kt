@@ -25,10 +25,14 @@ class RemoteSetTextTest {
         val written = mutableListOf<String>()
         var released = 0
 
+        override val exposesImeEnter: Boolean = true
+
         override fun setText(text: String): Boolean {
             written += text
             return answer()
         }
+
+        override fun imeEnter(): Boolean = throw AssertionError("a set_text runs no IME action")
 
         override fun release() {
             released++
@@ -243,7 +247,7 @@ class RemoteSetTextTest {
     }
 
     @Test
-    fun `only a set_text looks at the window`() {
+    fun `only a set_text or an ime_enter looks at the window`() {
         val availability = RemoteControlAvailability()
         availability.connected(dispatcher)
         assertEquals("connecting", 0, windowReads)
@@ -260,8 +264,12 @@ class RemoteSetTextTest {
         setText()
         assertEquals(1, windowReads)
 
+        window = FakeWindow { null }
+        dispatcher.imeEnter { outcomes += it }
+        assertEquals(2, windowReads)
+
         availability.disconnected()
-        assertEquals("disconnecting", 1, windowReads)
+        assertEquals("disconnecting", 2, windowReads)
     }
 
     @Test
@@ -351,7 +359,7 @@ class RemoteSetTextTest {
     @Test
     fun `the node and the window offer nothing to read content with`() {
         assertEquals(
-            setOf("isEditable", "isEnabled", "setText", "release"),
+            setOf("isEditable", "isEnabled", "getExposesImeEnter", "setText", "imeEnter", "release"),
             RemoteTextNode::class.java.declaredMethods.map { it.name }.toSet(),
         )
         assertEquals(
@@ -409,7 +417,8 @@ class RemoteSetTextTest {
         val service = code("src/main/kotlin/com/example/remote_control_device/RemoteControlAccessibilityService.kt")
 
         assertTrue(service.contains("override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit"))
-        // The window is only read in the function the dispatcher calls for a set_text.
+        // The window is only read in the function the dispatcher calls for a set_text or an
+        // ime_enter.
         assertTrue(service.contains("activeWindow = ::activeWindow"))
         assertEquals(1, Regex("""\brootInActiveWindow\b""").findAll(service).count())
         assertEquals(1, Regex("""\bgetRootInActiveWindow\b""").findAll(service).count())

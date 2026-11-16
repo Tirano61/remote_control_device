@@ -39,8 +39,16 @@ class FakeRemoteControlAccessibilityClient
   /// at the window happens behind this call and nowhere else.
   final List<String> setTexts = [];
 
-  /// [taps], [swipes], [globalActions] and [setTexts] together, in the order
-  /// they reached the service. A text appears as `('set_text', text)`.
+  /// What every `ime_enter` answers once it is let through.
+  RemoteImeEnterOutcome imeEnterOutcome = RemoteImeEnterOutcome.completed;
+
+  /// How many `ime_enter` actually reached the service. Like [setTexts], its
+  /// being zero is what "the active window was not consulted" means here.
+  int imeEnters = 0;
+
+  /// [taps], [swipes], [globalActions], [setTexts] and [imeEnters] together,
+  /// in the order they reached the service. A text appears as
+  /// `('set_text', text)`, an IME action as `'ime_enter'`.
   final List<Object> gestures = [];
 
   int settingsOpened = 0;
@@ -104,6 +112,14 @@ class FakeRemoteControlAccessibilityClient
     gestures.add(('set_text', text));
     if (holdGestures) await _answer();
     return textOutcome;
+  }
+
+  @override
+  Future<RemoteImeEnterOutcome> performImeEnter() async {
+    imeEnters++;
+    gestures.add('ime_enter');
+    if (holdGestures) await _answer();
+    return imeEnterOutcome;
   }
 
   @override

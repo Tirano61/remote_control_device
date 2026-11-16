@@ -23,6 +23,7 @@ abstract final class RemoteControlChannelCodec {
   static const String _homeType = 'home';
   static const String _recentsType = 'recents';
   static const String _setTextType = 'set_text';
+  static const String _imeEnterType = 'ime_enter';
   static const String _ackType = 'ack';
 
   /// Decodes a frame, or answers `null` when there is nothing to report.
@@ -70,6 +71,9 @@ abstract final class RemoteControlChannelCodec {
         RemoteRecentsCommand(id: id),
       ),
       _setTextType => _decodeSetText(id, payload),
+      _imeEnterType => RemoteControlCommandReceived(
+        RemoteImeEnterCommand(id: id),
+      ),
       _ => _rejected(id, RemoteControlError.unsupportedCommand),
     };
   }
@@ -174,5 +178,7 @@ abstract final class RemoteControlChannelCodec {
     RemoteControlError.unsupportedCommand => 'unsupported_command',
     RemoteControlError.textTargetUnavailable => 'text_target_unavailable',
     RemoteControlError.textRejected => 'text_rejected',
+    RemoteControlError.imeActionUnavailable => 'ime_action_unavailable',
+    RemoteControlError.imeActionRejected => 'ime_action_rejected',
   };
 }
