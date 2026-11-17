@@ -2,6 +2,8 @@ package com.example.remote_control_device
 
 import android.content.Context
 import android.content.Intent
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodCall
@@ -35,7 +37,11 @@ class MediaProjectionChannel(
 ) : MethodChannel.MethodCallHandler {
 
     private var channel: MethodChannel? = null
-    private var session: ScreenCaptureSession? = null
+    private val capture = RunningScreenCapture<ScreenCaptureSession>(
+        trackIdOf = { it.trackId },
+        release = { it.stop() },
+    )
+    private val mainThread = Handler(Looper.getMainLooper())
 
     fun attachTo(messenger: BinaryMessenger) {
         detach()
@@ -110,13 +116,16 @@ class MediaProjectionChannel(
         }
 
         val started = try {
-            ScreenCaptureSession.start(context, grant)
+            ScreenCaptureSession.start(context, grant) { trackId ->
+                // The projection's thread. Bookkeeping and the channel live on the main one.
+                mainThread.post { onStoppedByPlatform(trackId) }
+            }
         } catch (error: Exception) {
             Log.w(TAG, "capture could not be started: ${error.javaClass.simpleName}")
             result.error(CAPTURE_FAILED, error.javaClass.simpleName, null)
             return
         }
-        session = started
+        capture.started(started)
 
         val geometry = started.geometry
         val content = geometry.contentIn(started.virtualDisplaySide)
@@ -139,11 +148,18 @@ class MediaProjectionChannel(
      * Stops the running capture. With a [trackId], only if it is that capture: a late stop
      * for a capture that was already replaced must not take down its replacement.
      */
-    private fun stopCapture(trackId: String? = null) {
-        val running = session ?: return
-        if (trackId != null && running.trackId != trackId) return
-        session = null
-        running.stop()
+    private fun stopCapture(trackId: String? = null) = capture.stop(trackId)
+
+    /**
+     * MediaProjection's `onStop` for [trackId]. The capture is released here, and Dart is told
+     * only if it was still the running one: Dart decides what the assistance loses with it, and
+     * it never restarts the capture without a new consent dialog. The foreground service is
+     * Dart's to stop, as for every other stop.
+     */
+    private fun onStoppedByPlatform(trackId: String) {
+        if (!capture.stoppedByPlatform(trackId)) return
+        Log.i(TAG, "capture stopped by the platform: reported to Dart")
+        channel?.invokeMethod(STOPPED_BY_PLATFORM_METHOD, mapOf(TRACK_ID to trackId))
     }
 
     companion object {
@@ -155,6 +171,9 @@ class MediaProjectionChannel(
         const val STOP_METHOD = "stopMediaProjectionForegroundService"
         const val START_CAPTURE_METHOD = "startScreenCapture"
         const val STOP_CAPTURE_METHOD = "stopScreenCapture"
+
+        /** Android -> Dart. `{ "trackId": "<id>" }`, after the capture was released. */
+        const val STOPPED_BY_PLATFORM_METHOD = "screenCaptureStoppedByPlatform"
 
         private const val TRACK_ID = "trackId"
         private const val NO_GRANT = "NO_GRANT"
