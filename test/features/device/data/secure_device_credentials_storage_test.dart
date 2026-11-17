@@ -58,9 +58,11 @@ void main() {
   });
 
   group('architecture', () {
-    test('flutter_secure_storage is imported by exactly one file', () async {
+    test('flutter_secure_storage is imported by exactly two files', () async {
       // Everything else must go through the DeviceCredentialsStorage port, so
       // the secret cannot leak into SharedPreferences, a file or a database.
+      // The second file is the ended-remote-session marker: one fixed key
+      // holding a remoteSessionId, never a credential, behind its own port.
       final offenders = <String>[];
 
       await for (final entity in Directory('lib').list(recursive: true)) {
@@ -71,8 +73,9 @@ void main() {
         }
       }
 
-      expect(offenders, [
+      expect(offenders..sort(), [
         'lib/features/device/data/storage/secure_device_credentials_storage.dart',
+        'lib/features/remote_session/data/storage/secure_ended_remote_session_store.dart',
       ]);
     });
 
