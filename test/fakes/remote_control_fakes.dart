@@ -57,6 +57,44 @@ class FakeRemoteControlAccessibilityClient
 
   int settingsOpened = 0;
 
+  /// Every remote touch call that reached the service, in order:
+  /// `('start', touch, x, y)`, `('move', touch, seq, x, y)`,
+  /// `('release', touch, seq, x, y)`, `('cancel', touch, seq)` and
+  /// `('abandon', touch)`. A start also appears in [gestures] as
+  /// `('touch_hold', x, y)`, so it is ordered among the other commands.
+  final List<Object> touchCalls = [];
+
+  /// What every move answers.
+  RemoteTouchMoveOutcome touchMoveOutcome = RemoteTouchMoveOutcome.accepted;
+
+  /// What every start answers at once, or `null` to wait for [answerStart].
+  RemoteTouchStartOutcome? touchStartOutcome;
+
+  final List<Completer<RemoteTouchStartOutcome>> _touchStarts = [];
+  final List<Completer<RemoteTouchReleaseOutcome>> _touchReleases = [];
+  final List<Completer<void>> _touchCancels = [];
+  final StreamController<int> _touchEnds = StreamController<int>.broadcast();
+
+  /// The oldest start still waiting gets [outcome]: the hold is over.
+  void answerStart([
+    RemoteTouchStartOutcome outcome = RemoteTouchStartOutcome.held,
+  ]) => _touchStarts.removeAt(0).complete(outcome);
+
+  /// The oldest release still waiting gets [outcome].
+  void answerRelease([
+    RemoteTouchReleaseOutcome outcome = RemoteTouchReleaseOutcome.completed,
+  ]) => _touchReleases.removeAt(0).complete(outcome);
+
+  /// The oldest cancel still waiting is over.
+  void answerCancel() => _touchCancels.removeAt(0).complete();
+
+  int get pendingTouchStarts => _touchStarts.length;
+  int get pendingTouchReleases => _touchReleases.length;
+  int get pendingTouchCancels => _touchCancels.length;
+
+  /// What the Android side says when a touch ends on its own.
+  void pushTouchEnded(int touch) => _touchEnds.add(touch);
+
   final List<Completer<RemoteGestureOutcome>> _heldGestures = [];
   final StreamController<RemoteControlAccessibilityStatus> _statusChanges =
       StreamController<RemoteControlAccessibilityStatus>.broadcast();
@@ -135,6 +173,59 @@ class FakeRemoteControlAccessibilityClient
     if (holdGestures) await _answer();
     return imeEnterOutcome;
   }
+
+  @override
+  Future<RemoteTouchStartOutcome> startTouch({
+    required int touch,
+    required double x,
+    required double y,
+  }) {
+    touchCalls.add(('start', touch, x, y));
+    gestures.add(('touch_hold', x, y));
+    final immediate = touchStartOutcome;
+    if (immediate != null) return Future.value(immediate);
+    final started = Completer<RemoteTouchStartOutcome>();
+    _touchStarts.add(started);
+    return started.future;
+  }
+
+  @override
+  Future<RemoteTouchMoveOutcome> moveTouch({
+    required int touch,
+    required int seq,
+    required double x,
+    required double y,
+  }) async {
+    touchCalls.add(('move', touch, seq, x, y));
+    return touchMoveOutcome;
+  }
+
+  @override
+  Future<RemoteTouchReleaseOutcome> releaseTouch({
+    required int touch,
+    required int seq,
+    required double x,
+    required double y,
+  }) {
+    touchCalls.add(('release', touch, seq, x, y));
+    final released = Completer<RemoteTouchReleaseOutcome>();
+    _touchReleases.add(released);
+    return released.future;
+  }
+
+  @override
+  Future<void> cancelTouch({required int touch, required int seq}) {
+    touchCalls.add(('cancel', touch, seq));
+    final cancelled = Completer<void>();
+    _touchCancels.add(cancelled);
+    return cancelled.future;
+  }
+
+  @override
+  void abandonTouch({required int touch}) => touchCalls.add(('abandon', touch));
+
+  @override
+  Stream<int> get touchEnds => _touchEnds.stream;
 
   @override
   Future<void> openAccessibilitySettings() async => settingsOpened++;

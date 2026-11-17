@@ -123,6 +123,105 @@ final class RemoteSetTextCommand extends RemoteControlCommand {
   String toString() => 'RemoteSetTextCommand($id)';
 }
 
+/// One message about a remote touch session: one finger, put down by a
+/// [RemoteTouchHoldCommand] and kept down until a [RemoteTouchReleaseCommand]
+/// or a [RemoteTouchCancelCommand].
+///
+/// [touch] names the finger and [id] the message. [touch] is chosen by the
+/// sender and means nothing outside the `control` channel and the peer
+/// connection it arrived on: a touch with the same name on a new connection is
+/// another touch.
+///
+/// Positions are normalized exactly as in [RemoteTapCommand].
+sealed class RemoteTouchCommand extends RemoteControlCommand {
+  const RemoteTouchCommand(super.id, this.touch);
+
+  /// In UTF-16 code units, as every length in this protocol.
+  static const int maxTouchLength = 64;
+
+  final String touch;
+}
+
+/// Puts the finger down, and keeps it down past this device's long-press
+/// timeout. It is the touch's `seq` 0, which is never sent.
+///
+/// Like a long press it names no duration: how long is long enough is the
+/// device's setting.
+final class RemoteTouchHoldCommand extends RemoteTouchCommand {
+  const RemoteTouchHoldCommand({
+    required String id,
+    required String touch,
+    required this.x,
+    required this.y,
+  }) : super(id, touch);
+
+  final double x;
+  final double y;
+
+  @override
+  List<Object?> get props => [id, touch, x, y];
+}
+
+/// A message that comes after the hold, and so carries a [seq].
+sealed class RemoteTouchFollowUpCommand extends RemoteTouchCommand {
+  const RemoteTouchFollowUpCommand(super.id, super.touch, this.seq);
+
+  /// The largest [seq] accepted: it fits in 32 bits on the bridge and is an
+  /// exact number in a browser.
+  static const int maxSeq = 2147483647;
+
+  /// Strictly greater than the last one accepted for the same [touch].
+  final int seq;
+}
+
+/// Moves the finger, without lifting it. The same position again is a
+/// keepalive.
+final class RemoteTouchMoveCommand extends RemoteTouchFollowUpCommand {
+  const RemoteTouchMoveCommand({
+    required String id,
+    required String touch,
+    required int seq,
+    required this.x,
+    required this.y,
+  }) : super(id, touch, seq);
+
+  final double x;
+  final double y;
+
+  @override
+  List<Object?> get props => [id, touch, seq, x, y];
+}
+
+/// Takes the finger to a position and lifts it there.
+final class RemoteTouchReleaseCommand extends RemoteTouchFollowUpCommand {
+  const RemoteTouchReleaseCommand({
+    required String id,
+    required String touch,
+    required int seq,
+    required this.x,
+    required this.y,
+  }) : super(id, touch, seq);
+
+  final double x;
+  final double y;
+
+  @override
+  List<Object?> get props => [id, touch, seq, x, y];
+}
+
+/// Takes the finger away without a release: Android sees it cancelled, not
+/// lifted, so nothing is dropped. It names no position.
+final class RemoteTouchCancelCommand extends RemoteTouchFollowUpCommand {
+  const RemoteTouchCancelCommand({
+    required String id,
+    required String touch,
+    required int seq,
+  }) : super(id, touch, seq);
+
+  @override
+  List<Object?> get props => [id, touch, seq];
+}
+
 /// Runs the IME action of the field that has input focus.
 ///
 /// Not a newline and not a key press: it is whatever action that field

@@ -4,6 +4,7 @@ import 'package:remote_control_device/features/remote_control/domain/entities/re
 import 'package:remote_control_device/features/remote_control/domain/entities/remote_control_command.dart';
 import 'package:remote_control_device/features/remote_control/domain/entities/remote_control_error.dart';
 import 'package:remote_control_device/features/remote_control/domain/remote_control_accessibility_client.dart';
+import 'package:remote_control_device/features/remote_control/domain/remote_touch_controller.dart';
 
 /// Runs commands one at a time, in the order they were submitted.
 ///
@@ -14,8 +15,17 @@ import 'package:remote_control_device/features/remote_control/domain/remote_cont
 /// It does not decide whether a command may run: the caller checks that before
 /// submitting, and calls [discardPending] the moment the answer changes. A
 /// gesture already running cannot be recalled, and is simply left to finish.
+///
+/// A `touch_hold` takes its turn like any command and keeps it until its touch
+/// has ended, which is later than its ack: [RemoteTouchController.run] is what
+/// the queue waits on, not the hold. Nothing queued behind it runs while the
+/// finger is down. A remote touch is the one thing [discardPending] does not
+/// leave to finish, because it never finishes by itself.
 class RemoteControlCommandQueue {
-  RemoteControlCommandQueue(this._accessibility);
+  RemoteControlCommandQueue(
+    this._accessibility, {
+    RemoteTouchController? touches,
+  }) : touches = touches ?? RemoteTouchController(_accessibility);
 
   /// A browser that floods the channel gets refusals rather than taps that run
   /// long after anyone meant them.
@@ -23,14 +33,28 @@ class RemoteControlCommandQueue {
 
   final RemoteControlAccessibilityClient _accessibility;
 
+  /// The remote touch a `touch_hold` in this queue starts, and that its
+  /// `touch_move`, `touch_release` and `touch_cancel` go to directly.
+  final RemoteTouchController touches;
+
   final Queue<_Pending> _pending = Queue<_Pending>();
   bool _draining = false;
 
   /// Queues [command]. [onAck] is called exactly once, with what became of it.
+  ///
+  /// A `touch_hold` is registered with [touches] before it gets here, and
+  /// [onAck] is then the sink [RemoteTouchController.register] answered. The
+  /// messages that follow a hold never queue.
   void submit(
     RemoteControlCommand command,
     void Function(RemoteControlAck ack) onAck,
   ) {
+    if (command is RemoteTouchFollowUpCommand) {
+      onAck(
+        RemoteControlAck.failure(command.id, RemoteControlError.touchEnded),
+      );
+      return;
+    }
     if (_pending.length >= maxPending) {
       onAck(
         RemoteControlAck.failure(
@@ -38,15 +62,18 @@ class RemoteControlCommandQueue {
           RemoteControlError.gestureRejected,
         ),
       );
+      if (command is RemoteTouchHoldCommand) touches.drop(command);
       return;
     }
     _pending.add(_Pending(command, onAck));
     _drain();
   }
 
-  /// Drops everything that has not started. Each is answered as refused, since
-  /// nothing will run it.
+  /// Ends the remote touch, if there is one, without waiting, and then drops
+  /// everything that has not started. Each of those is answered as refused,
+  /// since nothing will run it.
   void discardPending() {
+    touches.abandon();
     while (_pending.isNotEmpty) {
       final pending = _pending.removeFirst();
       pending.onAck(
@@ -55,6 +82,9 @@ class RemoteControlCommandQueue {
           RemoteControlError.sessionNotActive,
         ),
       );
+      if (pending.command case final RemoteTouchHoldCommand hold) {
+        touches.drop(hold);
+      }
     }
   }
 
@@ -63,6 +93,10 @@ class RemoteControlCommandQueue {
     _draining = true;
     while (_pending.isNotEmpty) {
       final pending = _pending.removeFirst();
+      if (pending.command case final RemoteTouchHoldCommand hold) {
+        await touches.run(hold, pending.onAck);
+        continue;
+      }
       pending.onAck(await _execute(pending.command));
     }
     _draining = false;
@@ -99,6 +133,9 @@ class RemoteControlCommandQueue {
         _accessibility.performSetText(text),
       ),
       RemoteImeEnterCommand() => _imeEnter(_accessibility.performImeEnter()),
+      // Never here: a hold is run by [touches] in [_drain], and what follows
+      // a hold is refused by [submit].
+      RemoteTouchCommand() => Future.value(RemoteControlError.gestureRejected),
     };
     return error == null
         ? RemoteControlAck.success(command.id)
