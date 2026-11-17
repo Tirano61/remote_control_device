@@ -13,8 +13,9 @@ import io.flutter.plugin.common.MethodChannel
  *
  * Transport and nothing else. Whether a gesture may run is decided in Dart, in
  * `WebRtcSessionBloc`, against the remote session; by the time [TAP_METHOD], [LONG_PRESS_METHOD],
- * [SWIPE_METHOD], [BACK_METHOD], [HOME_METHOD], [RECENTS_METHOD], [SET_TEXT_METHOD] or
- * [IME_ENTER_METHOD] arrives the decision is made.
+ * [SWIPE_METHOD], [BACK_METHOD], [HOME_METHOD], [RECENTS_METHOD], [SET_TEXT_METHOD],
+ * [IME_ENTER_METHOD] or one of the remote touch methods arrives the decision is made. A remote
+ * touch is named by a handle Dart chooses, never by the sender's own name for it.
  * Failures are answered as outcomes, never thrown across the boundary.
  *
  * The text of a [SET_TEXT_METHOD] may be a password. It goes to the service and nowhere else, and
@@ -22,7 +23,8 @@ import io.flutter.plugin.common.MethodChannel
  *
  * It also pushes [AVAILABILITY_CHANGED_METHOD] the other way, because the user enables the
  * service from Settings while the application is in the background and has to find it enabled
- * on the way back.
+ * on the way back, and [TOUCH_ENDED_METHOD], because a touch can end here (its watchdog, its
+ * lifetime, the display changing) while Dart is waiting for it.
  */
 class RemoteControlAccessibilityChannel(
     private val context: Context,
@@ -37,11 +39,15 @@ class RemoteControlAccessibilityChannel(
         availability.onChanged = { available ->
             channel?.invokeMethod(AVAILABILITY_CHANGED_METHOD, available)
         }
+        availability.onTouchEnded = { handle ->
+            channel?.invokeMethod(TOUCH_ENDED_METHOD, handle)
+        }
     }
 
     /** The service is left alone: it belongs to Android, and only the user can turn it off. */
     fun detach() {
         availability.onChanged = null
+        availability.onTouchEnded = null
         channel?.setMethodCallHandler(null)
         channel = null
     }
@@ -111,6 +117,67 @@ class RemoteControlAccessibilityChannel(
             // No arguments: which field and which action are the device's to find, not the call's.
             IME_ENTER_METHOD -> availability.imeEnter(answerAction("ime_enter", result))
 
+            // A handle Dart chose, and a position: how long the hold lasts is the device's.
+            START_TOUCH_METHOD -> {
+                val handle = call.argument<Any?>(TOUCH) as? Int
+                val x = call.argument<Any?>(X) as? Double
+                val y = call.argument<Any?>(Y) as? Double
+                if (handle == null || x == null || y == null) {
+                    result.success(RemoteTouchOutcome.INVALID.wire)
+                    return
+                }
+                availability.startTouch(handle, x, y) { outcome ->
+                    Log.i(TAG, "touch $handle hold ${outcome.wire}")
+                    result.success(outcome.wire)
+                }
+            }
+
+            // Answered at once, and not logged: there may be thirty of these a second.
+            MOVE_TOUCH_METHOD -> {
+                val handle = call.argument<Any?>(TOUCH) as? Int
+                val seq = integerArgument(call, SEQ)
+                val x = call.argument<Any?>(X) as? Double
+                val y = call.argument<Any?>(Y) as? Double
+                if (handle == null || seq == null || x == null || y == null) {
+                    result.success(RemoteTouchOutcome.INVALID.wire)
+                    return
+                }
+                result.success(availability.moveTouch(handle, seq, x, y).wire)
+            }
+
+            RELEASE_TOUCH_METHOD -> {
+                val handle = call.argument<Any?>(TOUCH) as? Int
+                val seq = integerArgument(call, SEQ)
+                val x = call.argument<Any?>(X) as? Double
+                val y = call.argument<Any?>(Y) as? Double
+                if (handle == null || seq == null || x == null || y == null) {
+                    result.success(RemoteTouchOutcome.INVALID.wire)
+                    return
+                }
+                availability.releaseTouch(handle, seq, x, y) { outcome ->
+                    Log.i(TAG, "touch $handle release ${outcome.wire}")
+                    result.success(outcome.wire)
+                }
+            }
+
+            CANCEL_TOUCH_METHOD -> {
+                val handle = call.argument<Any?>(TOUCH) as? Int
+                if (handle == null) {
+                    result.success(RemoteTouchOutcome.INVALID.wire)
+                    return
+                }
+                availability.cancelTouch(handle) { outcome ->
+                    Log.i(TAG, "touch $handle cancel ${outcome.wire}")
+                    result.success(outcome.wire)
+                }
+            }
+
+            // Waits for nothing: whatever ended the session must not wait for a finger.
+            ABANDON_TOUCH_METHOD -> {
+                (call.argument<Any?>(TOUCH) as? Int)?.let(availability::abandonTouch)
+                result.success(null)
+            }
+
             SETTINGS_METHOD -> try {
                 // Only opens the screen. Enabling the service is the user's, in Android's own UI.
                 context.startActivity(
@@ -125,6 +192,14 @@ class RemoteControlAccessibilityChannel(
             else -> result.notImplemented()
         }
     }
+
+    /** An integer, as the codec sends one: 32 bits when it fits, 64 when not. Never a double. */
+    private fun integerArgument(call: MethodCall, name: String): Long? =
+        when (val value = call.argument<Any?>(name)) {
+            is Int -> value.toLong()
+            is Long -> value
+            else -> null
+        }
 
     /** Android only says it took the action, so that is what the log says. */
     private fun answerAction(
@@ -151,6 +226,12 @@ class RemoteControlAccessibilityChannel(
         const val IME_ENTER_METHOD = "performImeEnter"
         const val SETTINGS_METHOD = "openAccessibilitySettings"
         const val AVAILABILITY_CHANGED_METHOD = "accessibilityServiceAvailabilityChanged"
+        const val START_TOUCH_METHOD = "startRemoteTouch"
+        const val MOVE_TOUCH_METHOD = "moveRemoteTouch"
+        const val RELEASE_TOUCH_METHOD = "releaseRemoteTouch"
+        const val CANCEL_TOUCH_METHOD = "cancelRemoteTouch"
+        const val ABANDON_TOUCH_METHOD = "abandonRemoteTouch"
+        const val TOUCH_ENDED_METHOD = "remoteTouchEnded"
 
         private const val X = "x"
         private const val Y = "y"
@@ -160,6 +241,8 @@ class RemoteControlAccessibilityChannel(
         private const val END_Y = "endY"
         private const val DURATION_MS = "durationMs"
         private const val TEXT = "text"
+        private const val TOUCH = "touch"
+        private const val SEQ = "seq"
 
         private const val SETTINGS_FAILED = "ACCESSIBILITY_SETTINGS_FAILED"
     }

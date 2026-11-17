@@ -35,4 +35,10 @@ enum RemoteControlError {
 
   /// The focused field lists `ACTION_IME_ENTER`, and Android did not take it.
   imeActionRejected,
+
+  /// The touch a `touch_*` message names cannot go on, or does not exist.
+  ///
+  /// One code for every reason, on purpose: the sender does the same thing
+  /// whatever it was, and the reason stays in the device's log.
+  touchEnded,
 }

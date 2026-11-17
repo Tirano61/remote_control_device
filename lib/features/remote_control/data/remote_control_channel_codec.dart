@@ -25,6 +25,10 @@ abstract final class RemoteControlChannelCodec {
   static const String _recentsType = 'recents';
   static const String _setTextType = 'set_text';
   static const String _imeEnterType = 'ime_enter';
+  static const String _touchHoldType = 'touch_hold';
+  static const String _touchMoveType = 'touch_move';
+  static const String _touchReleaseType = 'touch_release';
+  static const String _touchCancelType = 'touch_cancel';
   static const String _ackType = 'ack';
 
   /// Decodes a frame, or answers `null` when there is nothing to report.
@@ -76,6 +80,10 @@ abstract final class RemoteControlChannelCodec {
       _imeEnterType => RemoteControlCommandReceived(
         RemoteImeEnterCommand(id: id),
       ),
+      _touchHoldType => _decodeTouchHold(id, payload),
+      _touchMoveType => _decodeTouchMove(id, payload),
+      _touchReleaseType => _decodeTouchRelease(id, payload),
+      _touchCancelType => _decodeTouchCancel(id, payload),
       _ => _rejected(id, RemoteControlError.unsupportedCommand),
     };
   }
@@ -157,6 +165,70 @@ abstract final class RemoteControlChannelCodec {
     );
   }
 
+  /// No `seq`: the hold is the touch's 0, and one sent anyway is an extra
+  /// field like any other.
+  static RemoteControlInboundMessage _decodeTouchHold(
+    String id,
+    Map<String, dynamic> payload,
+  ) {
+    final touch = _touch(payload['touch']);
+    final x = _normalized(payload['x']);
+    final y = _normalized(payload['y']);
+    if (touch == null || x == null || y == null) {
+      return _rejected(id, RemoteControlError.invalidCommand);
+    }
+    return RemoteControlCommandReceived(
+      RemoteTouchHoldCommand(id: id, touch: touch, x: x, y: y),
+    );
+  }
+
+  static RemoteControlInboundMessage _decodeTouchMove(
+    String id,
+    Map<String, dynamic> payload,
+  ) {
+    final touch = _touch(payload['touch']);
+    final seq = _seq(payload['seq']);
+    final x = _normalized(payload['x']);
+    final y = _normalized(payload['y']);
+    if (touch == null || seq == null || x == null || y == null) {
+      return _rejected(id, RemoteControlError.invalidCommand);
+    }
+    return RemoteControlCommandReceived(
+      RemoteTouchMoveCommand(id: id, touch: touch, seq: seq, x: x, y: y),
+    );
+  }
+
+  static RemoteControlInboundMessage _decodeTouchRelease(
+    String id,
+    Map<String, dynamic> payload,
+  ) {
+    final touch = _touch(payload['touch']);
+    final seq = _seq(payload['seq']);
+    final x = _normalized(payload['x']);
+    final y = _normalized(payload['y']);
+    if (touch == null || seq == null || x == null || y == null) {
+      return _rejected(id, RemoteControlError.invalidCommand);
+    }
+    return RemoteControlCommandReceived(
+      RemoteTouchReleaseCommand(id: id, touch: touch, seq: seq, x: x, y: y),
+    );
+  }
+
+  /// No position: an `x` or a `y` sent with it is ignored.
+  static RemoteControlInboundMessage _decodeTouchCancel(
+    String id,
+    Map<String, dynamic> payload,
+  ) {
+    final touch = _touch(payload['touch']);
+    final seq = _seq(payload['seq']);
+    if (touch == null || seq == null) {
+      return _rejected(id, RemoteControlError.invalidCommand);
+    }
+    return RemoteControlCommandReceived(
+      RemoteTouchCancelCommand(id: id, touch: touch, seq: seq),
+    );
+  }
+
   static String encodeAck(RemoteControlAck ack) => jsonEncode(<String, Object>{
     'v': protocolVersion,
     'type': _ackType,
@@ -184,6 +256,23 @@ abstract final class RemoteControlChannelCodec {
     return value;
   }
 
+  /// A non-empty string of at most [RemoteTouchCommand.maxTouchLength] code
+  /// units, or `null`. Kept exactly as received.
+  static String? _touch(Object? value) {
+    if (value is! String || value.isEmpty) return null;
+    if (value.length > RemoteTouchCommand.maxTouchLength) return null;
+    return value;
+  }
+
+  /// An integer in `1..maxSeq`, or `null`. Whether it is greater than the last
+  /// one is a question about the touch, not about the message, and is asked
+  /// where the touch is known.
+  static int? _seq(Object? value) {
+    if (value is! int) return null;
+    if (value < 1 || value > RemoteTouchFollowUpCommand.maxSeq) return null;
+    return value;
+  }
+
   static RemoteControlInboundMessage _rejected(
     String id,
     RemoteControlError error,
@@ -199,5 +288,6 @@ abstract final class RemoteControlChannelCodec {
     RemoteControlError.textRejected => 'text_rejected',
     RemoteControlError.imeActionUnavailable => 'ime_action_unavailable',
     RemoteControlError.imeActionRejected => 'ime_action_rejected',
+    RemoteControlError.touchEnded => 'touch_ended',
   };
 }

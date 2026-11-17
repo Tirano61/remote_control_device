@@ -220,6 +220,10 @@ class _AssignedPanel extends StatelessWidget {
 /// technician can also move with a tap; the text replaces what was there; and
 /// the shared picture shows whatever a field displays.
 ///
+/// Dragging is named on its own because what it moves stays moved: an icon, a
+/// file, an item in a list. It is the same consent, not a second one, and no
+/// drag asks again.
+///
 /// The keyboard action is whatever the focused field exposes, so it is not
 /// called "Enter" (it need not insert a line) and the examples stay examples:
 /// a field may offer another action, or none.
@@ -228,7 +232,8 @@ class _ControlDisclosure extends StatelessWidget {
 
   static const List<String> _abilities = [
     'Ver la pantalla que se comparta.',
-    'Tocar, mantener pulsado y deslizar sobre la pantalla.',
+    'Tocar, mantener pulsado, deslizar y arrastrar elementos sobre la '
+        'pantalla.',
     'Usar Atrás, Inicio y Recientes.',
     'Introducir texto en el campo que esté seleccionado, reemplazando su '
         'contenido.',

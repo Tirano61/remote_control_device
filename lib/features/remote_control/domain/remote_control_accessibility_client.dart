@@ -58,6 +58,51 @@ enum RemoteImeEnterOutcome {
   unavailable,
 }
 
+/// What became of the hold that starts a remote touch.
+enum RemoteTouchStartOutcome {
+  /// The finger is down, has been down longer than this device's long-press
+  /// timeout, and the touch goes on.
+  held,
+
+  /// The touch ended before the hold was over: cancelled, abandoned, or
+  /// cancelled by Android.
+  ended,
+
+  /// It could not start: Android refused the stroke, something else is running,
+  /// or something it needed could not be read.
+  rejected,
+
+  /// Continued strokes do not exist on this Android version (below 8.0).
+  unsupported,
+
+  /// The accessibility service is not connected.
+  unavailable,
+}
+
+/// What became of one move of a remote touch.
+enum RemoteTouchMoveOutcome {
+  /// The position was taken. Not that the finger is there yet.
+  accepted,
+
+  /// The touch cannot go on, or is not there.
+  ended,
+
+  /// The accessibility service is not connected.
+  unavailable,
+}
+
+/// What became of the release of a remote touch.
+enum RemoteTouchReleaseOutcome {
+  /// The final stroke completed: Android received the end of the contact.
+  completed,
+
+  /// The touch cannot go on, or is not there, and was not released.
+  ended,
+
+  /// The accessibility service is not connected.
+  unavailable,
+}
+
 /// The boundary `AccessibilityService` lives behind.
 ///
 /// Nothing here can enable the service, because nothing can: Android requires
@@ -129,6 +174,53 @@ abstract interface class RemoteControlAccessibilityClient {
   /// [performSetText] it is a reason the Android side looks at the active
   /// window.
   Future<RemoteImeEnterOutcome> performImeEnter();
+
+  /// Puts a finger down at a normalized position and keeps it down, and
+  /// completes once the hold is over or the touch could not get that far.
+  ///
+  /// [touch] is a handle the caller chooses, and the only name the Android side
+  /// knows the touch by. Never throws. Like [tap], it runs whatever it is given.
+  Future<RemoteTouchStartOutcome> startTouch({
+    required int touch,
+    required double x,
+    required double y,
+  });
+
+  /// Gives the finger of [touch] a new position, and completes as soon as the
+  /// Android side has taken it or refused it, not when the finger is there.
+  ///
+  /// Never throws. Like [tap], it runs whatever it is given.
+  Future<RemoteTouchMoveOutcome> moveTouch({
+    required int touch,
+    required int seq,
+    required double x,
+    required double y,
+  });
+
+  /// Lifts the finger of [touch] at a position, and completes when Android
+  /// says what became of the final stroke.
+  ///
+  /// Never throws. Like [tap], it runs whatever it is given.
+  Future<RemoteTouchReleaseOutcome> releaseTouch({
+    required int touch,
+    required int seq,
+    required double x,
+    required double y,
+  });
+
+  /// Takes the finger of [touch] away without a release, and completes when it
+  /// is gone, or there was none. Never throws.
+  Future<void> cancelTouch({required int touch, required int seq});
+
+  /// Ends [touch] on the Android side without waiting for anything: the
+  /// session, the channel or the peer connection it belonged to is gone.
+  ///
+  /// Never throws, and there is nothing to wait for.
+  void abandonTouch({required int touch});
+
+  /// The handle of every touch that ended on the Android side on its own: its
+  /// watchdog, its lifetime, the display changing, Android cancelling it.
+  Stream<int> get touchEnds;
 
   /// Opens Android's accessibility settings. Never throws.
   Future<void> openAccessibilitySettings();

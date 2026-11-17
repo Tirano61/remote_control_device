@@ -39,16 +39,38 @@ class MethodChannelRemoteControlAccessibilityClient
   static const String settingsMethod = 'openAccessibilitySettings';
   static const String availabilityChangedMethod =
       'accessibilityServiceAvailabilityChanged';
+  static const String startTouchMethod = 'startRemoteTouch';
+  static const String moveTouchMethod = 'moveRemoteTouch';
+  static const String releaseTouchMethod = 'releaseRemoteTouch';
+  static const String cancelTouchMethod = 'cancelRemoteTouch';
+  static const String abandonTouchMethod = 'abandonRemoteTouch';
+  static const String touchEndedMethod = 'remoteTouchEnded';
 
   final Duration gestureTimeout;
 
   /// The handler goes on when someone listens rather than at construction,
-  /// which happens before the Flutter binding exists.
+  /// which happens before the Flutter binding exists, and comes off when
+  /// nobody listens to either stream.
   late final StreamController<RemoteControlAccessibilityStatus> _statusChanges =
       StreamController<RemoteControlAccessibilityStatus>.broadcast(
-        onListen: () => channel.setMethodCallHandler(_onNativeCall),
-        onCancel: () => channel.setMethodCallHandler(null),
+        onListen: _listen,
+        onCancel: _unlisten,
       );
+
+  late final StreamController<int> _touchEnds = StreamController<int>.broadcast(
+    onListen: _listen,
+    onCancel: _unlisten,
+  );
+
+  int _listening = 0;
+
+  void _listen() {
+    if (_listening++ == 0) channel.setMethodCallHandler(_onNativeCall);
+  }
+
+  void _unlisten() {
+    if (--_listening == 0) channel.setMethodCallHandler(null);
+  }
 
   @override
   Stream<RemoteControlAccessibilityStatus> get statusChanges =>
@@ -165,6 +187,126 @@ class MethodChannelRemoteControlAccessibilityClient
     }
   }
 
+  /// Answered once the hold is over, which the Android side caps as it caps a
+  /// long press, so [gestureTimeout] covers it. No answer in time is a refusal,
+  /// and the caller abandons the touch.
+  @override
+  Future<RemoteTouchStartOutcome> startTouch({
+    required int touch,
+    required double x,
+    required double y,
+  }) async {
+    try {
+      final outcome = await channel
+          .invokeMethod<String>(startTouchMethod, <String, Object>{
+            'touch': touch,
+            'x': x,
+            'y': y,
+          })
+          .timeout(gestureTimeout);
+      return switch (outcome) {
+        'held' => RemoteTouchStartOutcome.held,
+        'ended' => RemoteTouchStartOutcome.ended,
+        'unsupported' => RemoteTouchStartOutcome.unsupported,
+        'unavailable' => RemoteTouchStartOutcome.unavailable,
+        _ => RemoteTouchStartOutcome.rejected,
+      };
+    } on MissingPluginException {
+      return RemoteTouchStartOutcome.unavailable;
+    } catch (_) {
+      return RemoteTouchStartOutcome.rejected;
+    }
+  }
+
+  /// Answered at once on the Android side. Anything but `accepted` or
+  /// `unavailable`, no answer included, means the touch cannot go on.
+  @override
+  Future<RemoteTouchMoveOutcome> moveTouch({
+    required int touch,
+    required int seq,
+    required double x,
+    required double y,
+  }) async {
+    try {
+      final outcome = await channel
+          .invokeMethod<String>(moveTouchMethod, <String, Object>{
+            'touch': touch,
+            'seq': seq,
+            'x': x,
+            'y': y,
+          })
+          .timeout(gestureTimeout);
+      return switch (outcome) {
+        'accepted' => RemoteTouchMoveOutcome.accepted,
+        'unavailable' => RemoteTouchMoveOutcome.unavailable,
+        _ => RemoteTouchMoveOutcome.ended,
+      };
+    } on MissingPluginException {
+      return RemoteTouchMoveOutcome.unavailable;
+    } catch (_) {
+      return RemoteTouchMoveOutcome.ended;
+    }
+  }
+
+  @override
+  Future<RemoteTouchReleaseOutcome> releaseTouch({
+    required int touch,
+    required int seq,
+    required double x,
+    required double y,
+  }) async {
+    try {
+      final outcome = await channel
+          .invokeMethod<String>(releaseTouchMethod, <String, Object>{
+            'touch': touch,
+            'seq': seq,
+            'x': x,
+            'y': y,
+          })
+          .timeout(gestureTimeout);
+      return switch (outcome) {
+        'completed' => RemoteTouchReleaseOutcome.completed,
+        'unavailable' => RemoteTouchReleaseOutcome.unavailable,
+        _ => RemoteTouchReleaseOutcome.ended,
+      };
+    } on MissingPluginException {
+      return RemoteTouchReleaseOutcome.unavailable;
+    } catch (_) {
+      return RemoteTouchReleaseOutcome.ended;
+    }
+  }
+
+  /// Whatever the answer, the touch is over as far as Dart is concerned.
+  @override
+  Future<void> cancelTouch({required int touch, required int seq}) async {
+    try {
+      await channel
+          .invokeMethod<String>(cancelTouchMethod, <String, Object>{
+            'touch': touch,
+            'seq': seq,
+          })
+          .timeout(gestureTimeout);
+    } catch (_) {
+      // Gone, or unanswered: either way there is nothing left to wait for.
+    }
+  }
+
+  @override
+  void abandonTouch({required int touch}) {
+    unawaited(
+      channel
+          .invokeMethod<void>(abandonTouchMethod, <String, Object>{
+            'touch': touch,
+          })
+          .catchError((Object _) {
+            // No service means no touch: nothing was left down.
+          }),
+    );
+  }
+
+  @override
+  Stream<int> get touchEnds => _touchEnds.stream;
+
   @override
   Future<void> openAccessibilitySettings() async {
     try {
@@ -175,9 +317,14 @@ class MethodChannelRemoteControlAccessibilityClient
   }
 
   Future<void> _onNativeCall(MethodCall call) async {
-    if (call.method != availabilityChangedMethod) return;
-    final available = call.arguments;
-    if (available is bool) _statusChanges.add(_statusOf(available));
+    switch (call.method) {
+      case availabilityChangedMethod:
+        final available = call.arguments;
+        if (available is bool) _statusChanges.add(_statusOf(available));
+      case touchEndedMethod:
+        final touch = call.arguments;
+        if (touch is int) _touchEnds.add(touch);
+    }
   }
 
   static RemoteControlAccessibilityStatus _statusOf(bool available) => available

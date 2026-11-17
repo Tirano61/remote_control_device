@@ -140,6 +140,11 @@ enum class RemoteGestureOutcome(val wire: String) {
  * either. It is read for a long press and for nothing else. See [writeToInputFocus] and
  * [imeEnterOnInputFocus].
  *
+ * A remote touch ([startTouch] to [releaseTouch] or [cancelTouch]) is run by a
+ * [RemoteTouchController] that this owns. While one is down, nothing else runs: a gesture would
+ * cancel its finger, and a global action, a `set_text` or an `ime_enter` would act under it. With no
+ * [touchPort], or below Android 8.0, there are no remote touches and [startTouch] says so.
+ *
  * Pure, and main-thread only: the channel handler, the gesture callback and the service
  * lifecycle all run there.
  */
@@ -149,8 +154,23 @@ class RemoteGestureDispatcher(
     private val performGlobalAction: (Int) -> Boolean,
     private val activeWindow: () -> RemoteTextWindow?,
     private val longPressTimeoutMs: () -> Long,
+    touchPort: RemoteTouchPort? = null,
+    onTouchEnded: (Int) -> Unit = {},
+    log: (String) -> Unit = {},
 ) {
     private var running: Running? = null
+
+    private val touches = RemoteTouchController(
+        port = touchPort,
+        readDisplay = readDisplay,
+        longPressTimeoutMs = longPressTimeoutMs,
+        isGestureRunning = { running != null },
+        onEnded = onTouchEnded,
+        log = log,
+    )
+
+    /** A gesture is in flight, or a remote touch is down. */
+    private val isBusy: Boolean get() = running != null || touches.isActive
 
     fun tap(normalizedX: Double, normalizedY: Double, answer: (RemoteGestureOutcome) -> Unit) =
         press(normalizedX, normalizedY, answer) { TAP_DURATION_MS }
@@ -211,7 +231,7 @@ class RemoteGestureDispatcher(
         globalAction(AccessibilityService.GLOBAL_ACTION_RECENTS, answer)
 
     fun setText(text: String, answer: (RemoteGestureOutcome) -> Unit) {
-        if (running != null) {
+        if (isBusy) {
             answer(RemoteGestureOutcome.BUSY)
             return
         }
@@ -224,7 +244,7 @@ class RemoteGestureDispatcher(
 
     /** Like [setText], it waits for no gesture: one still running makes it [RemoteGestureOutcome.BUSY]. */
     fun imeEnter(answer: (RemoteGestureOutcome) -> Unit) {
-        if (running != null) {
+        if (isBusy) {
             answer(RemoteGestureOutcome.BUSY)
             return
         }
@@ -232,7 +252,7 @@ class RemoteGestureDispatcher(
     }
 
     private fun globalAction(action: Int, answer: (RemoteGestureOutcome) -> Unit) {
-        if (running != null) {
+        if (isBusy) {
             answer(RemoteGestureOutcome.BUSY)
             return
         }
@@ -250,7 +270,7 @@ class RemoteGestureDispatcher(
         answer: (RemoteGestureOutcome) -> Unit,
         strokeOn: (ScreenCaptureGeometry) -> GestureStroke?,
     ) {
-        if (running != null) {
+        if (isBusy) {
             answer(RemoteGestureOutcome.BUSY)
             return
         }
@@ -282,8 +302,35 @@ class RemoteGestureDispatcher(
         if (!accepted) settle(gesture, RemoteGestureOutcome.REJECTED)
     }
 
-    /** The service is going away and will not report on the gesture it was running. */
+    /** See [RemoteTouchController.start]. */
+    fun startTouch(handle: Int, normalizedX: Double, normalizedY: Double, answer: (RemoteTouchOutcome) -> Unit) =
+        touches.start(handle, normalizedX, normalizedY, answer)
+
+    /** See [RemoteTouchController.move]. */
+    fun moveTouch(handle: Int, seq: Long, normalizedX: Double, normalizedY: Double): RemoteTouchOutcome =
+        touches.move(handle, seq, normalizedX, normalizedY)
+
+    /** See [RemoteTouchController.release]. */
+    fun releaseTouch(
+        handle: Int,
+        seq: Long,
+        normalizedX: Double,
+        normalizedY: Double,
+        answer: (RemoteTouchOutcome) -> Unit,
+    ) = touches.release(handle, seq, normalizedX, normalizedY, answer)
+
+    /** See [RemoteTouchController.cancel]. */
+    fun cancelTouch(handle: Int, answer: (RemoteTouchOutcome) -> Unit) = touches.cancel(handle, answer)
+
+    /** See [RemoteTouchController.abandon]. */
+    fun abandonTouch(handle: Int) = touches.abandon(handle)
+
+    /**
+     * The service is going away and will not report on the gesture it was running. A remote touch
+     * ends too: its finger is cancelled on the way out, as far as Android still lets it be.
+     */
     fun abandon() {
+        touches.abandon()
         running?.let { settle(it, RemoteGestureOutcome.CANCELLED) }
     }
 
@@ -321,6 +368,14 @@ class RemoteControlAvailability {
 
     /** Told about every change. Set while a Flutter engine is attached. */
     var onChanged: ((Boolean) -> Unit)? = null
+
+    /** Told when a remote touch ended on this side. Set while a Flutter engine is attached. */
+    var onTouchEnded: ((Int) -> Unit)? = null
+
+    /** What the dispatcher calls when one of its touches ends. */
+    fun touchEnded(handle: Int) {
+        onTouchEnded?.invoke(handle)
+    }
 
     val isAvailable: Boolean get() = dispatcher != null
 
@@ -415,5 +470,46 @@ class RemoteControlAvailability {
             return
         }
         current.imeEnter(answer)
+    }
+
+    fun startTouch(handle: Int, normalizedX: Double, normalizedY: Double, answer: (RemoteTouchOutcome) -> Unit) {
+        val current = dispatcher
+        if (current == null) {
+            answer(RemoteTouchOutcome.UNAVAILABLE)
+            return
+        }
+        current.startTouch(handle, normalizedX, normalizedY, answer)
+    }
+
+    fun moveTouch(handle: Int, seq: Long, normalizedX: Double, normalizedY: Double): RemoteTouchOutcome =
+        dispatcher?.moveTouch(handle, seq, normalizedX, normalizedY) ?: RemoteTouchOutcome.UNAVAILABLE
+
+    fun releaseTouch(
+        handle: Int,
+        seq: Long,
+        normalizedX: Double,
+        normalizedY: Double,
+        answer: (RemoteTouchOutcome) -> Unit,
+    ) {
+        val current = dispatcher
+        if (current == null) {
+            answer(RemoteTouchOutcome.UNAVAILABLE)
+            return
+        }
+        current.releaseTouch(handle, seq, normalizedX, normalizedY, answer)
+    }
+
+    fun cancelTouch(handle: Int, answer: (RemoteTouchOutcome) -> Unit) {
+        val current = dispatcher
+        if (current == null) {
+            answer(RemoteTouchOutcome.UNAVAILABLE)
+            return
+        }
+        current.cancelTouch(handle, answer)
+    }
+
+    /** Nothing to answer: with no service there is no touch to end. */
+    fun abandonTouch(handle: Int) {
+        dispatcher?.abandonTouch(handle)
     }
 }

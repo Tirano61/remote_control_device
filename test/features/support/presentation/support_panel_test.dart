@@ -207,6 +207,7 @@ void main() {
       expect(said, contains('tocar'));
       expect(said, contains('mantener pulsado'));
       expect(said, contains('deslizar'));
+      expect(said, contains('arrastrar elementos'));
       expect(said, contains('atrás'));
       expect(said, contains('inicio'));
       expect(said, contains('recientes'));
@@ -345,27 +346,36 @@ void main() {
 
       final keyboardLine = find.textContaining('teclado');
       final longPressLine = find.textContaining('mantener pulsado');
+      final dragLine = find.textContaining('arrastrar elementos');
 
       await syncTo(tester, null);
       expect(find.byKey(SupportPanel.controlDisclosureKey), findsNothing);
       expect(keyboardLine, findsNothing);
       expect(longPressLine, findsNothing);
+      expect(dragLine, findsNothing);
 
       await syncTo(tester, waitingRequest);
       expect(find.byKey(SupportPanel.controlDisclosureKey), findsNothing);
       expect(keyboardLine, findsNothing);
       expect(longPressLine, findsNothing);
+      expect(dragLine, findsNothing);
 
       await syncTo(tester, assignedRequest);
       expect(find.byKey(SupportPanel.controlDisclosureKey), findsOneWidget);
       expect(keyboardLine, findsOneWidget);
       expect(longPressLine, findsOneWidget);
+      expect(
+        dragLine,
+        findsOneWidget,
+        reason: 'the same line as the long press',
+      );
 
       await tester.tap(find.byKey(SupportPanel.acceptButtonKey));
       await settle(tester);
       expect(find.byKey(SupportPanel.controlDisclosureKey), findsNothing);
       expect(keyboardLine, findsNothing);
       expect(longPressLine, findsNothing);
+      expect(dragLine, findsNothing);
     });
 
     testWidgets('leaves with the prompt when it is rejected', (tester) async {
@@ -382,6 +392,7 @@ void main() {
       expect(find.byKey(SupportPanel.controlDisclosureKey), findsNothing);
       expect(find.textContaining('teclado'), findsNothing);
       expect(find.textContaining('mantener pulsado'), findsNothing);
+      expect(find.textContaining('arrastrar'), findsNothing);
     });
   });
 
