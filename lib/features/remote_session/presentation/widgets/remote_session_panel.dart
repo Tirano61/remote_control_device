@@ -131,9 +131,9 @@ class RemoteSessionPanel extends StatelessWidget {
             ),
           ),
         ],
-        // Hidden on the same terms as the screen line: while reconnecting or
-        // finishing, this is not what the user needs to read or act on.
-        if (!state.closing && connected) const RemoteControlStatus(),
+        // Hidden on the same terms as the screen line: while reconnecting this
+        // is not what the user needs to read or act on.
+        if (connected) const RemoteControlStatus(),
         if (technician != null) ...[
           const SizedBox(height: 8),
           Text(
@@ -147,17 +147,15 @@ class RemoteSessionPanel extends StatelessWidget {
         const SizedBox(height: 24),
         OutlinedButton(
           key: closeButtonKey,
-          // Disabled only while the close itself is in flight. A tablet that
-          // lost the network may still try: the request either reaches the
-          // backend or fails and can be repeated, and taking the button away
-          // would leave the user unable to end an assistance they no longer
-          // want. A working peer connection does not take it away either —
-          // that is precisely when ending the assistance matters most.
-          onPressed: state.closing
-              ? null
-              : () => context.read<RemoteSessionBloc>().add(
-                  const RemoteSessionCloseRequested(),
-                ),
+          // Always available, the network included: pressing it ends the
+          // assistance on this tablet at once, whether or not the backend can
+          // be told. A working peer connection does not take it away either —
+          // that is precisely when ending the assistance matters most. The
+          // panel is replaced the moment it is pressed, which is also what
+          // makes a second press impossible.
+          onPressed: () => context.read<RemoteSessionBloc>().add(
+            const RemoteSessionCloseRequested(),
+          ),
           child: const Padding(
             padding: EdgeInsets.symmetric(vertical: 12),
             child: Text('FINALIZAR ASISTENCIA'),
@@ -168,8 +166,9 @@ class RemoteSessionPanel extends StatelessWidget {
   }
 
   /// The one line that tells the user what is happening, in this order of
-  /// precedence: an action of their own, a connection they have lost, and then
-  /// what the assistance actually is.
+  /// precedence: a connection they have lost, and then what the assistance
+  /// actually is. Their own FINALIZAR is not on the list: it replaces this
+  /// panel with [RemoteSessionEndedPanel].
   ///
   /// That last part is the whole change `ACTIVE` brings. The backend now writes
   /// it when the technician reports the connection, so the row is no longer
@@ -182,14 +181,14 @@ class RemoteSessionPanel extends StatelessWidget {
   /// and its event follow — in which the local reading is the only one there
   /// is. Saying "connecting to the technician" then would be false.
   String _headline({required bool connected, required bool established}) {
-    if (state.closing) return 'Finalizando la asistencia...';
     if (!connected) return 'Reconectando...';
 
     return switch (state) {
       RemoteSessionActive() => 'Asistencia en curso',
-      RemoteSessionConnecting() => established
-          ? 'Conexión remota establecida'
-          : 'Conectando con el técnico...',
+      RemoteSessionConnecting() =>
+        established
+            ? 'Conexión remota establecida'
+            : 'Conectando con el técnico...',
     };
   }
 
@@ -198,10 +197,10 @@ class RemoteSessionPanel extends StatelessWidget {
   /// Only one thing is ever said here, and only while the headline is
   /// `Asistencia en curso`: that the link this tablet holds is up. Under any
   /// other headline it would either repeat it — the `CONNECTING` case already
-  /// says exactly this — or contradict it, which is what the "reconnecting" and
-  /// "finishing" cases are protected from by [_headline] having returned first.
+  /// says exactly this — or contradict it, which is what the "reconnecting"
+  /// case is protected from by [_headline] having returned first.
   String? _detail({required bool connected, required bool established}) {
-    if (state.closing || !connected) return null;
+    if (!connected) return null;
     if (state is! RemoteSessionActive) return null;
 
     return established ? 'Conexión remota establecida' : null;
@@ -218,7 +217,7 @@ class RemoteSessionPanel extends StatelessWidget {
   /// already saying the connection is the problem, and a capture that is still
   /// running locally is not what the user needs to read at that moment.
   String? _screenLine(ScreenCaptureStatus status, {required bool connected}) {
-    if (state.closing || !connected) return null;
+    if (!connected) return null;
 
     return switch (status) {
       ScreenCaptureStatus.idle => null,
@@ -236,7 +235,7 @@ class RemoteSessionPanel extends StatelessWidget {
   /// here: nothing measures elapsed time, and nothing is filled in when the
   /// field is absent.
   String? _connectedSince({required bool connected}) {
-    if (state.closing || !connected) return null;
+    if (!connected) return null;
     if (state is! RemoteSessionActive) return null;
 
     final connectedAt = state.session.connectedAt?.toLocal();
@@ -267,6 +266,77 @@ class _Note extends StatelessWidget {
           color: theme.colorScheme.error,
         ),
       ),
+    );
+  }
+}
+
+/// What the screen shows once the user has pressed `FINALIZAR ASISTENCIA`.
+///
+/// The assistance is over on this tablet from that press: the technician can
+/// no longer act on it, the peer connection is closed and the screen is no
+/// longer captured. That is said plainly and first. What may still be open is
+/// only whether the *server* has recorded it, and that is said separately and
+/// honestly — the screen never claims the backend closed a session it did not
+/// confirm, and never suggests the screen is still being shared.
+///
+/// There is no screen line, no remote-control status and no FINALIZAR button
+/// here: there is nothing left to share, to control or to end. The one action,
+/// REINTENTAR, only tells the server again; it cannot resume anything.
+class RemoteSessionEndedPanel extends StatelessWidget {
+  const RemoteSessionEndedPanel({required this.state, super.key});
+
+  static const Key retryButtonKey = Key('remote-session-ended-retry-button');
+
+  /// The sentence shown when the server could not confirm the close.
+  static const String unconfirmedMessage =
+      'La asistencia terminó en esta tablet, pero no se pudo confirmar el '
+      'cierre con el servidor.';
+
+  final RemoteSessionEndedLocally state;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final unconfirmed = !state.confirming && state.lastFailure != null;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text('Asistencia remota', style: theme.textTheme.titleMedium),
+        const SizedBox(height: 8),
+        Text(
+          state.confirming
+              ? 'Finalizando la asistencia...'
+              : 'Asistencia finalizada',
+          style: theme.textTheme.headlineSmall,
+        ),
+        const SizedBox(height: 8),
+        Text(
+          'El técnico ya no puede controlar esta tablet ni ver su pantalla.',
+          style: theme.textTheme.bodyMedium,
+        ),
+        if (unconfirmed)
+          const _Note(unconfirmedMessage)
+        else if (!state.confirming) ...[
+          const SizedBox(height: 4),
+          Text(
+            'Confirmando el cierre con el servidor...',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.outline,
+            ),
+          ),
+        ],
+        if (unconfirmed) ...[
+          const SizedBox(height: 12),
+          OutlinedButton(
+            key: retryButtonKey,
+            onPressed: () => context.read<RemoteSessionBloc>().add(
+              const RemoteSessionCloseRequested(),
+            ),
+            child: const Text('REINTENTAR'),
+          ),
+        ],
+      ],
     );
   }
 }

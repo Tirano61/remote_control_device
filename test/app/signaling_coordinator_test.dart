@@ -103,6 +103,7 @@ void main() {
         remoteSessionRepository,
       ),
       closeRemoteSession: CloseRemoteSession(remoteSessionRepository),
+      endedSessionStore: FakeEndedRemoteSessionStore(),
     );
     signalingBloc = SignalingBloc(client: client);
 

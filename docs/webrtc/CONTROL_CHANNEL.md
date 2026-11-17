@@ -671,7 +671,11 @@ Back, no Home, no Recents, no text and no IME action. For a `set_text` or an
 session the window is not looked at either.
 
 Pressing FINALIZAR ASISTENCIA stops commands immediately, without waiting for the
-backend to confirm the close.
+backend to confirm the close, and for good: a failed close, a later `GET
+/current` that still says `ACTIVE`, a late `remote-session:active` or a restart of
+the application never makes that session's commands run again. The data channel
+and the peer connection are closed in the same step. See
+[docs/remote_session/LIFECYCLE.md](../remote_session/LIFECYCLE.md).
 
 Starting with `set_text`, the assistance consent UI explicitly discloses remote text
 entry. `SupportPanel` shows it above `PERMITIR` and `RECHAZAR`, for that one assistance:

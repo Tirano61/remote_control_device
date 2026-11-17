@@ -79,6 +79,7 @@ void main() {
         remoteSessionRepository,
       ),
       closeRemoteSession: CloseRemoteSession(remoteSessionRepository),
+      endedSessionStore: FakeEndedRemoteSessionStore(),
     );
     realtimeBloc = DeviceRealtimeBloc(
       client: client,
@@ -564,16 +565,15 @@ void main() {
     expect(find.byKey(RemoteSessionPanel.closeButtonKey), findsNothing);
   });
 
-  testWidgets('a second tap while closing cannot start another close', (
-    tester,
-  ) async {
+  testWidgets('pressing FINALIZAR ends it on screen before the server answers',
+      (tester) async {
     await pumpAccepted(tester);
-    remoteSessionRepository.currentResult = connectingRemoteSession;
+    remoteSessionRepository.currentResult = activatedRemoteSession;
     remoteSessionBloc.add(const RemoteSessionSyncRequested());
     await settle(tester);
 
-    // The close is held open so the state can be observed while it is in
-    // flight — which is the only moment the guard matters.
+    // The close is held open so the screen can be observed while it is in
+    // flight.
     final gate = Completer<void>();
     remoteSessionRepository.closeGate = gate;
     remoteSessionRepository.currentQueue.add(noRemoteSession);
@@ -583,15 +583,59 @@ void main() {
 
     expect(find.text('Finalizando la asistencia...'), findsOneWidget);
     expect(
-      tester
-          .widget<OutlinedButton>(find.byKey(RemoteSessionPanel.closeButtonKey))
-          .onPressed,
-      isNull,
+      find.text(
+        'El técnico ya no puede controlar esta tablet ni ver su pantalla.',
+      ),
+      findsOneWidget,
     );
+    // Nothing left to press, to share or to control: the live panel is gone,
+    // which is also why a second press cannot start another close.
+    expect(find.byKey(RemoteSessionPanel.closeButtonKey), findsNothing);
+    expect(find.byKey(RemoteSessionPanel.screenCaptureLineKey), findsNothing);
+    expect(find.byType(RemoteControlStatus), findsNothing);
+    expect(find.byKey(RemoteSessionEndedPanel.retryButtonKey), findsNothing);
 
     gate.complete();
     await settle(tester);
     expect(remoteSessionRepository.closeCount, 1);
+    expect(find.byType(RemoteSessionEndedPanel), findsNothing);
+  });
+
+  testWidgets('a close the server could not confirm says so, and only that', (
+    tester,
+  ) async {
+    await pumpAccepted(tester);
+    remoteSessionRepository.currentResult = activatedRemoteSession;
+    remoteSessionBloc.add(const RemoteSessionSyncRequested());
+    await settle(tester);
+    remoteSessionRepository.closeResult = closeUnreachable;
+
+    await tester.tap(find.byKey(RemoteSessionPanel.closeButtonKey));
+    await settle(tester);
+
+    expect(find.text('Asistencia finalizada'), findsOneWidget);
+    expect(
+      find.text(RemoteSessionEndedPanel.unconfirmedMessage),
+      findsOneWidget,
+    );
+    // Never "still sharing", never the live panel back.
+    expect(find.byKey(RemoteSessionPanel.closeButtonKey), findsNothing);
+    expect(find.textContaining('compartiendo'), findsNothing);
+    expect(find.text('Asistencia en curso'), findsNothing);
+    expect(find.byKey(SupportPanel.requestButtonKey), findsNothing);
+
+    // REINTENTAR only tells the server again.
+    remoteSessionRepository.closeResult = const Ok(closedSession);
+    remoteSessionRepository.currentResult = noRemoteSession;
+    await tester.ensureVisible(
+      find.byKey(RemoteSessionEndedPanel.retryButtonKey),
+    );
+    await tester.tap(find.byKey(RemoteSessionEndedPanel.retryButtonKey));
+    await settle(tester);
+
+    expect(remoteSessionRepository.closeCount, 2);
+    expect(find.byType(RemoteSessionEndedPanel), findsNothing);
+    expect(find.text('Asistencia en curso'), findsNothing);
   });
 
   testWidgets('an unknown session state offers to ask again, not to request', (

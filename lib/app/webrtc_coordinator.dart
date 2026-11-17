@@ -67,9 +67,13 @@ class WebRtcCoordinator {
     );
   }
 
+  /// Authorisation first, then existence. When the user ends the assistance
+  /// both become `null` at once, and the order is the order the tablet lets go:
+  /// commands stop being obeyed and a remote touch is released before the peer
+  /// connection and the screen capture are taken down.
   void _forwardRemoteSession(RemoteSessionState state) {
-    _webRtcBloc.add(WebRtcRemoteSessionChanged(_liveIdOf(state)));
     _webRtcBloc.add(WebRtcActiveRemoteSessionChanged(_activeIdOf(state)));
+    _webRtcBloc.add(WebRtcRemoteSessionChanged(_liveIdOf(state)));
   }
 
   void _onSignalingMessage(RemoteSignalingMessage message) {
@@ -95,18 +99,22 @@ class WebRtcCoordinator {
   };
 
   /// The live session, or `null`. `RemoteSessionLive` is exactly the backend's
-  /// `CONNECTING`/`ACTIVE`; everything else — no session, one that could not be
-  /// read, a cleared identity — is "no assistance", which is the safe reading.
+  /// `CONNECTING`/`ACTIVE` that the user has not ended; everything else — no
+  /// session, one that could not be read, a cleared identity, an assistance the
+  /// user ended here whatever the backend still says — is "no assistance",
+  /// which is the safe reading.
   static String? _liveIdOf(RemoteSessionState state) => switch (state) {
     RemoteSessionLive(:final session) => session.id,
     _ => null,
   };
 
-  /// The session a control command may run in, or `null`: `ACTIVE`, and not on
-  /// its way out. A user who pressed FINALIZAR ASISTENCIA has withdrawn their
-  /// consent from that moment, however long the backend takes to confirm it.
+  /// The session a control command may run in, or `null`: `ACTIVE`. A user who
+  /// pressed FINALIZAR ASISTENCIA has withdrawn their consent from that moment:
+  /// the state is then [RemoteSessionEndedLocally], never `ACTIVE` again for
+  /// that session, however long the backend takes to confirm it — or if it
+  /// never can.
   static String? _activeIdOf(RemoteSessionState state) => switch (state) {
-    RemoteSessionActive(:final session, closing: false) => session.id,
+    RemoteSessionActive(:final session) => session.id,
     _ => null,
   };
 

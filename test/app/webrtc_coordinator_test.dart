@@ -57,6 +57,7 @@ void main() {
   late FakeDeviceAuthRepository authRepository;
   late FakeSupportRepository supportRepository;
   late FakeRemoteSessionRepository remoteSessionRepository;
+  late FakeEndedRemoteSessionStore endedSessionStore;
   late FakeWebRtcPeerConnectionFactory peerFactory;
   late FakeScreenCaptureClient screenCapture;
   late FakeRemoteControlAccessibilityClient accessibility;
@@ -83,6 +84,7 @@ void main() {
     authRepository = FakeDeviceAuthRepository(tokenStore: tokenStore);
     supportRepository = FakeSupportRepository();
     remoteSessionRepository = FakeRemoteSessionRepository();
+    endedSessionStore = FakeEndedRemoteSessionStore();
     peerFactory = FakeWebRtcPeerConnectionFactory();
     credentialRevocation = DeviceCredentialRevocation();
 
@@ -119,6 +121,7 @@ void main() {
         remoteSessionRepository,
       ),
       closeRemoteSession: CloseRemoteSession(remoteSessionRepository),
+      endedSessionStore: endedSessionStore,
     );
     signalingBloc = SignalingBloc(client: client);
     screenCapture = FakeScreenCaptureClient();
@@ -568,18 +571,22 @@ void main() {
 
         remoteSessionBloc.add(const RemoteSessionCloseRequested());
         await settle();
-        expect(remoteSessionBloc.state, isA<RemoteSessionActive>());
+        // Ended here while the backend has still said nothing.
+        expect(
+          remoteSessionBloc.state,
+          const RemoteSessionEndedLocally(
+            testRemoteSessionId,
+            confirming: true,
+          ),
+        );
 
         channel.pushTap('after-end');
         await settle();
 
+        // Not even refused: the channel it would have come in on is closed.
         expect(accessibility.taps, isEmpty);
-        expect(channel.sentAcks, const [
-          RemoteControlAck.failure(
-            'after-end',
-            RemoteControlError.sessionNotActive,
-          ),
-        ]);
+        expect(channel.isClosed, isTrue);
+        expect(channel.sentAcks, isEmpty);
 
         closing.complete();
       },

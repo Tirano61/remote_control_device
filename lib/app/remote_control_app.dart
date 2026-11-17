@@ -71,6 +71,7 @@ class _RemoteControlAppState extends State<RemoteControlApp> {
     _remoteSessionBloc = RemoteSessionBloc(
       loadCurrentRemoteSession: dependencies.loadCurrentRemoteSession,
       closeRemoteSession: dependencies.closeRemoteSession,
+      endedSessionStore: dependencies.endedRemoteSessionStore,
     );
     // The signaling half of the same socket the realtime bloc holds. It is
     // handed only that port, so it can neither open, close nor observe the
