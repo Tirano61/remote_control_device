@@ -204,8 +204,13 @@ class FakeScreenCaptureClient implements ScreenCaptureClient {
     return outcome;
   }
 
+  /// Called at the moment [stop] is, before anything is released. Lets a test
+  /// observe what had already been taken down by then.
+  void Function()? onStop;
+
   @override
   Future<void> stop() async {
+    onStop?.call();
     stopCount++;
     _active = false;
     _remoteSessionId = null;

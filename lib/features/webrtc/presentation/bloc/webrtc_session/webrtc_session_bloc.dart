@@ -204,6 +204,12 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   /// that keeps them apart.
   String? _screenCaptureSessionId;
 
+  /// The remote session a capture is being *requested* for — the Android
+  /// dialog may be open, or the service still starting — or `null`. Lets an
+  /// assistance that ends meanwhile abandon the request instead of finding a
+  /// capture running for it later.
+  String? _screenCaptureRequestId;
+
   // ----------------------------------------------------------------- offer
 
   Future<void> _onOfferReceived(
@@ -385,7 +391,31 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
       emit(_restate());
     }
 
-    final result = await _screenCapture.requestAndStart(sessionId);
+    _screenCaptureRequestId = sessionId;
+    final ScreenCaptureResult result;
+    try {
+      result = await _screenCapture.requestAndStart(sessionId);
+    } finally {
+      if (_screenCaptureRequestId == sessionId) _screenCaptureRequestId = null;
+    }
+
+    if (_liveRemoteSessionId != sessionId) {
+      // The assistance ended while the user was answering the Android dialog
+      // or while the capture was starting — FINALIZAR, a close by the
+      // technician, a dropped identity. A screen granted for a session that is
+      // no longer live is not shared with anyone: it is stopped on the spot,
+      // and nothing here records it as running. A refusal or a failure is not
+      // recorded either: there is no assistance left for it to describe.
+      if (result is ScreenCaptureStarted) {
+        _log(
+          'screen capture stopped: its remote session ended while it '
+          'was starting',
+        );
+        await _stopScreenCapture();
+      }
+      if (!isClosed) emit(_restate());
+      return;
+    }
 
     switch (result) {
       case ScreenCaptureStarted(:final videoTrack):
@@ -604,6 +634,21 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     }
   }
 
+  /// The assistance ended — by either end, by a closed event, by the user of
+  /// this tablet before the backend confirmed it, or by a device identity that
+  /// is no longer valid — or it is a different assistance now. All of them
+  /// arrive as this one event with a different id or with none, and all of
+  /// them are taken down in the same order:
+  ///
+  /// ```text
+  /// 1. control     no command is obeyed and a remote touch is let go
+  ///                (synchronous: nothing is awaited before it)
+  /// 2. peer        the data channel and the peer connection are closed
+  /// 3. screen      MediaProjection is stopped, including one still starting
+  /// ```
+  ///
+  /// The order is the order of what a technician could still do: act on the
+  /// tablet, receive its screen, and only then nothing.
   Future<void> _onRemoteSessionChanged(
     WebRtcRemoteSessionChanged event,
     Emitter<WebRtcSessionState> emit,
@@ -612,33 +657,46 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     if (sessionId == _liveRemoteSessionId) return;
     _liveRemoteSessionId = sessionId;
 
-    // The screen is released here and nowhere else. `MediaProjection` belongs
-    // to the remote session: it survives a peer connection being rebuilt, and
-    // it must not survive the assistance ending — by either end, by a closed
-    // event, or by a device identity that is no longer valid, all of which
-    // arrive as this one event with a different id or with none.
+    // 1. A session that is no longer live cannot be the active one, whatever
+    // order the coordinator's events arrive in. Withdrawn before the first
+    // await, so no command queued behind this event can slip through.
+    if (_activeRemoteSessionId != null && _activeRemoteSessionId != sessionId) {
+      _activeRemoteSessionId = null;
+    }
+    if (!_isControlAuthorized) _commandQueue.discardPending();
+
+    // 2. The assistance this peer connection belongs to is over, or it is a
+    // different assistance now. Either way nothing of the old one may survive:
+    // a peer connection that outlived its remote session would be a technician
+    // still reaching the tablet after the session ended.
+    final peerGone =
+        _negotiationSessionId != null && sessionId != _negotiationSessionId;
+    if (peerGone) {
+      _log('negotiation closed: the remote session it belonged to is gone');
+      await _teardownPeer();
+      _negotiationSessionId = null;
+    }
+
+    // 3. The screen is released here and nowhere else. `MediaProjection`
+    // belongs to the remote session: it survives a peer connection being
+    // rebuilt, and it must not survive the assistance ending. A capture still
+    // being started for the session that ended is abandoned too — the client
+    // drops it at its next step — rather than being left to finish for nobody.
     var released = false;
-    if (_screenCaptureSessionId != null &&
-        _screenCaptureSessionId != sessionId) {
+    final captureSession = _screenCaptureSessionId ?? _screenCaptureRequestId;
+    if (captureSession != null && captureSession != sessionId) {
       _log('screen capture stopped: its remote session is gone');
       released = await _stopScreenCapture();
     }
 
-    // The assistance this peer connection belongs to is over, or it is a
-    // different assistance now. Either way nothing of the old one may survive:
-    // a peer connection that outlived its remote session would be a technician
-    // still reaching the tablet after the backend says the session is closed.
-    if (_negotiationSessionId == null || sessionId == _negotiationSessionId) {
-      // Nothing to tear down, but the screen line on the panel has just
+    if (isClosed) return;
+    if (peerGone) {
+      emit(WebRtcIdle(screenCapture: _screenCaptureStatus));
+    } else if (released) {
+      // Nothing was torn down, but the screen line on the panel has just
       // changed and the state is the only way it hears about it.
-      if (released && !isClosed) emit(_restate());
-      return;
+      emit(_restate());
     }
-
-    _log('negotiation closed: the remote session it belonged to is gone');
-    await _teardownPeer();
-    _negotiationSessionId = null;
-    emit(WebRtcIdle(screenCapture: _screenCaptureStatus));
   }
 
   Future<void> _onActiveRemoteSessionChanged(
