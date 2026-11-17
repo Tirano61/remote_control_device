@@ -69,8 +69,13 @@ final class RemoteSessionClosureAnnounced extends RemoteSessionEvent {
   List<Object?> get props => [remoteSessionId];
 }
 
-/// The user pressed `FINALIZAR ASISTENCIA`. Only a deliberate press produces
-/// this event.
+/// The user pressed `FINALIZAR ASISTENCIA`, or `REINTENTAR` on an assistance
+/// already ended here whose close the backend has not confirmed. Only a
+/// deliberate press produces this event.
+///
+/// The first press ends the assistance on this tablet at once and for good;
+/// the close sent to the backend only reports it. A repeat sends the close
+/// again and never resumes anything.
 final class RemoteSessionCloseRequested extends RemoteSessionEvent {
   const RemoteSessionCloseRequested();
 }
