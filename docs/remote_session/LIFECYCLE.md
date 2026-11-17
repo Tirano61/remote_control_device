@@ -15,8 +15,13 @@ REST is the state. Realtime only says "look again".
 with one exception, which only points one way:
 
 ```text
-The user of the tablet can end the assistance here without asking anyone.
+Anything that withdraws the technician's access may act before REST answers.
+Nothing that grants it may.
 ```
+
+Three things withdraw it: FINALIZAR on the tablet, `remote-session:closed` for
+the session held, and the tablet losing the means to confirm the session (see
+[Authority](#authority)).
 
 ## States
 
@@ -25,15 +30,18 @@ The user of the tablet can end the assistance here without asking anyone.
 | State | Meaning | Control | Peer / screen |
 | --- | --- | --- | --- |
 | `RemoteSessionInitial` / `Loading` | not asked yet / first read in flight | no | no |
-| `RemoteSessionIdle` | the backend says there is no live session | no | no |
+| `RemoteSessionIdle` | the backend says there is no live session (`lastClosure`: who closed the previous one from the other side) | no | no |
 | `RemoteSessionConnecting` | backend `CONNECTING` | no (`session_not_active`) | may negotiate |
-| `RemoteSessionActive` | backend `ACTIVE` | yes, on the current channel | yes |
-| `RemoteSessionEndedLocally` | the user pressed FINALIZAR; see below | **no** | **torn down** |
+| `RemoteSessionActive`, `confirmed` | backend `ACTIVE`, confirmed after the socket last came up | yes, on the current channel | yes |
+| `RemoteSessionActive`, `suspended` | backend `ACTIVE` last time, not confirmable now | **no** | kept, at most for the grace period |
+| `RemoteSessionEndedLocally` | ended here: FINALIZAR (`userRequest`) or grace expired (`authorityLost`) | **no** | **torn down** |
+| `RemoteSessionClosedRemotely` | `remote-session:closed` named the session held | **no** | **torn down** |
 | `RemoteSessionUnavailable` | the first read failed: unknown, not "none" | no | no |
 
-`RemoteSessionLive` (`Connecting` or `Active`) is the only family the coordinators
-read as "an assistance exists". `RemoteSessionEndedLocally` is deliberately not in
-it.
+`RemoteSessionLive` (`Connecting` or `Active`, either authority) is the only
+family the coordinators read as "an assistance exists". Only `Active` +
+`confirmed` is read as "a command may run". `RemoteSessionEndedLocally` and
+`RemoteSessionClosedRemotely` are deliberately outside the live family.
 
 ## Four things that are not the same
 
@@ -110,6 +118,9 @@ else.
 
 A session in the ended set is never mapped to a live state again:
 
+The same table holds for a session ended because its grace period ran out, and,
+except for the close being re-sent, for one closed by the backend.
+
 | What arrives later | Result |
 | --- | --- |
 | `GET /current` returns it `ACTIVE` or `CONNECTING` | stays ended; the close is sent once more |
@@ -159,15 +170,152 @@ With the current backend contract the device cannot make the backend close a
 session it cannot reach. While the confirmation is pending the backend keeps the
 session `ACTIVE` and its request `ACCEPTED`: the technician remains blocked from
 starting another session and the tablet from making a new request, until the
-close lands or the technician presses FINALIZAR on their side. A server-side
-timeout (`SYSTEM` close on abandonment) is the backend's to add; this client does
-not rely on one.
+close lands, the technician presses FINALIZAR on their side, or the backend's own
+automatic close (`SYSTEM`, backend Prompt 31, not merged at the time of writing)
+ends it. This client does not rely on that close; it only reacts to it.
 
-## The technician's FINALIZAR
+## The technician's FINALIZAR, and the backend's SYSTEM close
 
-Unchanged: `remote-session:closed` causes a read, the empty answer moves the
-state to `Idle`, and the same `WebRtcRemoteSessionChanged(null)` teardown runs,
-in the same order.
+`remote-session:closed` naming the session held is acted on before the read:
+
+```text
+remote-session:closed { remoteSessionId, endedBy }   endedBy TECHNICIAN, SYSTEM,
+  │                                                  or anything else: same path
+  │  synchronous, before any await
+  ├─ the id is recorded as closed by the backend (in memory; CLOSED is terminal)
+  ├─ state ──> RemoteSessionClosedRemotely(endedBy)
+  │
+  ├─ WebRtcActiveRemoteSessionChanged(null)   control withdrawn, touch abandoned
+  ├─ WebRtcRemoteSessionChanged(null)         channel + peer closed, capture stopped
+  ├─ SignalingSessionEnded                    room left
+  │
+  └─ GET /current
+        null             ──> Idle(lastClosure: endedBy)
+        same session live ──> still ClosedRemotely (a read that was overtaken)
+        another session   ──> adopted the normal way (a new request and PERMITIR)
+        failure           ──> still ClosedRemotely(lastFailure)
+```
+
+A closure naming another session withdraws nothing held; it is recorded, so a
+read that later returns that id live is still refused, and a read follows as for
+any cue. The id in the payload is never adopted: it only matches.
+
+## Authority
+
+The tablet hears that a session was closed only over the `/devices` socket. With
+the socket down, a session the backend may already have closed is still `ACTIVE`
+on the tablet, while WebRTC, which does not go through the backend, keeps
+working. That was C2. The tablet now treats the socket as what its authority
+hangs on.
+
+```text
+socket up, and a GET /current that STARTED after it came up says ACTIVE
+                                    ──> confirmed: commands run
+socket drops                        ──> suspended at once (synchronous):
+                                        commands refused with session_not_active,
+                                        queued ones dropped, a touch abandoned.
+                                        Peer, channel and screen kept.
+                                        Grace period starts (45 s).
+socket back                         ──> still suspended; GET /current is sent
+  GET says ACTIVE, same session     ──> confirmed again; grace cancelled.
+                                        Commands sent while suspended were
+                                        refused, not queued: none of them runs.
+  GET says null / another session   ──> the session is over: everything torn
+                                        down (Idle(lastClosure: unknown))
+  GET fails, times out, 401, 5xx    ──> stays suspended; grace keeps running
+grace runs out while suspended      ──> ended here, exactly as FINALIZAR:
+                                        RemoteSessionEndedLocally(authorityLost),
+                                        marker written, POST close sent (and
+                                        re-sent on the next reconnection if the
+                                        backend still says ACTIVE)
+```
+
+Read epochs. Every change of the socket's state, every closure of the session
+held, and every reset moves a counter. A read remembers the counter it started
+with and can only confirm if it is unchanged and the socket is up when it
+answers. So:
+
+* a GET in flight when the socket drops, or when it comes back, confirms nothing;
+* a GET that started while the socket was down confirms nothing after it is back;
+* a GET that answers `ACTIVE` after `remote-session:closed` for that session maps
+  to closed, whatever its epoch.
+
+A failure never upgrades: a confirmed session stays confirmed through a failed
+read only while the socket stays up (the channel that would carry a close is
+still there); a suspended one stays suspended.
+
+### Why 45 s, and when it starts
+
+`RemoteSessionBloc.defaultAuthorityGracePeriod` = 45 s, counted from the moment
+**this tablet** sees its socket leave `connected`. The backend's own grace
+(`REMOTE_SESSION_DISCONNECT_GRACE_MS`, 60 s) starts when **the backend** notices
+the device has no joined socket. The two clocks are not assumed to agree:
+
+* with Socket.IO defaults (`pingInterval` 25 s + `pingTimeout` 20 s) either side
+  may notice a dead connection up to ~45 s after it died, and a clean close is
+  seen at once by both; so the backend may start its 60 s earlier or later than
+  the tablet starts its 45 s;
+* control does not depend on the window at all: it is suspended from the
+  tablet's first instant of doubt. The window only bounds how long the screen may
+  keep flowing to a peer the tablet cannot vouch for;
+* 45 < 60, so when both notice together the tablet has stopped sharing before
+  the backend could have closed the session with `SYSTEM`;
+* it still fits several reconnection attempts (2 s doubling up to 20 s) plus the
+  `/current` read that has to follow them;
+* it is not restarted by a socket that flaps, or by a reconnection whose read
+  fails.
+
+Worst case for the screen after a backend `SYSTEM` close the tablet never heard:
+the tablet's own detection delay (up to ~45 s for a half-open connection) plus
+45 s. For control: only the detection delay, during which the tablet still
+believes its socket is up. See "Residual risks".
+
+### Peer connection FAILED or CLOSED
+
+Not a backend matter, but the same principle: when the peer that carried the
+screen fails, is closed by the other end, or is abandoned mid-negotiation,
+control of it is gone with it (generation bumped, queue dropped, touch
+abandoned), and the capture is stopped after 20 s
+(`WebRtcSessionBloc.defaultOrphanCaptureTimeout`) unless a new offer for the
+same live session attaches it. The device never renegotiates by itself.
+
+### MediaProjection stopped by Android
+
+See [SCREEN_SHARING.md](../webrtc/SCREEN_SHARING.md#when-the-user-stops-the-share-from-android).
+Control in that session is withdrawn for good and its peer closed; the session
+itself stays for FINALIZAR or the technician.
+
+### What the user sees
+
+| Situation | Headline | Control line |
+| --- | --- | --- |
+| ACTIVE, confirmed | Asistencia en curso | Control remoto: habilitado |
+| CONNECTING | Conectando con el técnico... | Control remoto: disponible cuando la asistencia esté activa |
+| socket down | Reconectando... | Control remoto: suspendido hasta confirmar con el servidor |
+| socket back, not reconciled | Verificando la asistencia... | Control remoto: suspendido hasta confirmar con el servidor |
+| grace expired | Asistencia interrumpida + "Se perdió la conexión con el servidor y la asistencia se detuvo por seguridad." | (no panel line: torn down) |
+| closed by the backend | Asistencia finalizada + who closed it | (torn down) |
+| ended here | Asistencia finalizada / Finalizando la asistencia... | (torn down) |
+| screen stopped by Android | unchanged headline, "Pantalla: Android detuvo la captura" | Control remoto: deshabilitado en esta asistencia |
+
+The accessibility service being enabled is never enough for "habilitado".
+
+### Residual risks
+
+* **Detection delay.** Until the tablet's socket leaves `connected`, the tablet
+  cannot know. A half-open TCP connection is detected only by the Socket.IO ping
+  timeout (up to ~45 s). Control keeps running in that interval if the backend
+  closed the session without the event reaching the tablet. Closing it needs
+  something the backend does not offer today (a heartbeat or an expiry the tablet
+  can check), or a shorter ping configuration on both sides.
+* **Socket up, HTTP down.** A confirmed session stays confirmed while the socket
+  is up, even if `/current` fails: the socket is what would carry a close. If the
+  backend could close a session without emitting the event on a live socket, the
+  tablet would not notice until the next reconnection.
+* **Grace expiry sends a DEVICE close.** The backend records `endedBy: DEVICE`
+  for a session the tablet ended because it could not confirm it.
+* **Backend Prompt 31 not merged.** Before it, nothing writes `SYSTEM`; the
+  device's behaviour does not depend on it, only the E2E below does.
 
 ## Seen on a device
 
@@ -223,3 +371,27 @@ device authentication as a revoked credential, the credentials are cleared and
 the tablet asks for re-enrollment. FINALIZAR stayed irreversible through it and
 the pending close was confirmed after re-enrolling, because the marker survives
 clearing the credentials.
+
+## Authority loss: pending physical validation
+
+Not run yet. To be done jointly with `remote_control_backend` on branch
+`feature/backend-remote-session-lifecycle` (Prompt 31), on the **T10A only**
+(never the MDT1065), debug build of `fix/device-session-authority-loss`. No
+mobile-mcp or UiAutomation on the tablet; anything that needs a tap on the tablet
+(PERMITIR, the MediaProjection dialog, FINALIZAR) is done by hand. Infrastructure
+interruptions (stopping the tunnel, cutting Wi-Fi) only when coordinated.
+
+Suggested backend settings for the run: `REMOTE_SESSION_DISCONNECT_GRACE_MS`
+left at 60000 for one pass, and one pass at 20000 so the backend closes before
+the tablet's 45 s.
+
+| # | Step | Expected on the tablet (logcat `remote-session`, `webrtc`, `RemoteControlScreen`) |
+| --- | --- | --- |
+| 1 | Assistance ACTIVE, socket and peer up; trigger a `SYSTEM` close from the backend (technician tab closed, grace expires) | `closed by the backend (system): control withdrawn`; peer CLOSED; capture stopped and released; panel "El servidor cerró la asistencia porque se perdió la conexión." |
+| 2 | Same as 1 with a DRAG held from the web | touch cancelled `reason=abandoned`, no release logged |
+| 3 | Assistance ACTIVE; block only the socket (tunnel down) while WebRTC stays up | `authority ... suspended`; web gets `session_not_active` acks; video keeps flowing; panel "Reconectando..." + "suspendido" |
+| 4 | Restore within 45 s | socket back, `/current` ACTIVE, control works again; commands sent during the cut never executed |
+| 5 | Keep the socket blocked > 45 s | `not confirmed within 45 s: ending it on this tablet`; peer CLOSED; capture stopped; panel "Asistencia interrumpida" |
+| 6 | Restore after 5 | pending close sent (or `/current` null if the backend closed with SYSTEM); no new peer, no capture, no command |
+| 7 | Press *Stop sharing* in Android's own controls during an ACTIVE assistance | `capture stopped by the platform: reported to Dart`; control withdrawn; peer closed; "Pantalla: Android detuvo la captura" |
+| 8 | New request, PERMITIR, new session | MediaProjection dialog shown again; control only after ACTIVE |
