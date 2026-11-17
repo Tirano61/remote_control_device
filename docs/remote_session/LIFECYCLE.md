@@ -168,3 +168,58 @@ not rely on one.
 Unchanged: `remote-session:closed` causes a read, the empty answer moves the
 state to `Idle`, and the same `WebRtcRemoteSessionChanged(null)` teardown runs,
 in the same order.
+
+## Seen on a device
+
+Validated on 2026-11-17 on the T10A (`LSTT10M2026081504`, Android 16), debug
+build of this branch, against the shared backend through a VS Code dev tunnel and
+the web console on `localhost:5173`. Times are the tablet's logcat. FINALIZAR was
+pressed on the tablet itself, never through mobile-mcp or UiAutomation.
+
+```text
+normal close (12:11:28)      data channel reset +0 ms, peer CLOSED +4 ms, capture
+                             stopped +61 ms and released +79 ms. No tap reached the
+                             tablet afterwards; no media projection, no foreground
+                             service, no notification. Backend closed the session.
+
+close without HTTP          port forwarding stopped (tunnel answers 404). Peer
+(13:51:09)                  CLOSED, capture stopped +68 ms and released +86 ms.
+                             Panel: "La asistencia terminó en esta tablet, pero no
+                             se pudo confirmar el cierre con el servidor." with
+                             REINTENTAR; REINTENTAR while unreachable failed again
+                             and resumed nothing. Credentials kept.
+
+reconnection                 forwarding restored: socket reconnected, the pending
+                             close reached the backend (its history recorded it,
+                             with nobody pressing FINALIZAR on the web) and the
+                             tablet went to Idle. No new peer, no capture.
+
+FINALIZAR during a DRAG      touch 1 started 14:04:40.852, held 41.358, moving.
+(14:04:51)                   FINALIZAR at 51.282; touch 1 cancelled
+                             reason=abandoned at 51.416 (+134 ms), no release
+                             logged. Peer CLOSED 51.442, capture stopped 51.484
+                             and released 51.495. InputDispatcher afterwards:
+                             "no displays touched". Backend closed the session.
+```
+
+What the DRAG run does and does not show:
+
+- FINALIZAR was pressed with a key event (`KEYCODE_ENTER` on the focused button),
+  not `input tap`. An injected touch makes Android cancel an accessibility gesture
+  by itself, which would have ended the drag regardless of this code.
+- The drag ran over this application's own window, which must be in front for
+  FINALIZAR to be pressed, so there was no drop target. "No drop" rests on the log
+  (the touch ended `abandoned`, never `released`) and on no pointer remaining
+  down, not on an item that visibly failed to drop.
+- The abandon went through the stroke-mismatch cancel described in
+  `docs/webrtc/CONTROL_CHANNEL.md`. The pointer was gone afterwards, but the
+  `ACTION_CANCEL` itself was not observed, so that note stays provisional.
+- The data channel has no log line of its own on the T10A in this run; its
+  closing is implied by the peer connection reaching `CLOSED`.
+
+Seen during the validation, outside this change: a `401` from something other
+than the backend (a dev tunnel switched to private) is taken by the existing
+device authentication as a revoked credential, the credentials are cleared and
+the tablet asks for re-enrollment. FINALIZAR stayed irreversible through it and
+the pending close was confirmed after re-enrolling, because the marker survives
+clearing the credentials.
