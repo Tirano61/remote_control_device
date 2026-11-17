@@ -4,6 +4,7 @@ import 'dart:developer' as developer;
 import 'package:equatable/equatable.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:remote_control_device/core/async/timer_factory.dart';
 import 'package:remote_control_device/features/remote_control/domain/entities/remote_control_ack.dart';
 import 'package:remote_control_device/features/remote_control/domain/entities/remote_control_command.dart';
 import 'package:remote_control_device/features/remote_control/domain/entities/remote_control_error.dart';
@@ -96,12 +97,22 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     required WebRtcIceConfiguration iceConfiguration,
     required ScreenCaptureClient screenCapture,
     required RemoteControlAccessibilityClient remoteControl,
+    Duration orphanCaptureTimeout = defaultOrphanCaptureTimeout,
+    TimerFactory timerFactory = systemTimerFactory,
   }) : _peerConnectionFactory = peerConnectionFactory,
        _signaling = signaling,
        _iceConfiguration = iceConfiguration,
        _screenCapture = screenCapture,
        _remoteControl = remoteControl,
+       _orphanCaptureTimeout = orphanCaptureTimeout,
+       _timerFactory = timerFactory,
        super(const WebRtcIdle()) {
+    on<WebRtcScreenCaptureEndedByPlatform>(_onScreenCaptureEndedByPlatform);
+    on<_WebRtcOrphanCaptureExpired>(_onOrphanCaptureExpired);
+    _platformStopSubscription = _screenCapture.endedByPlatform.listen(
+      (remoteSessionId) =>
+          add(WebRtcScreenCaptureEndedByPlatform(remoteSessionId)),
+    );
     on<WebRtcOfferReceived>(_onOfferReceived);
     on<WebRtcRemoteIceReceived>(_onRemoteIceReceived);
     on<WebRtcSignalingAvailabilityChanged>(_onSignalingAvailabilityChanged);
@@ -114,6 +125,19 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     on<WebRtcControlMessageReceived>(_onControlMessageReceived);
   }
 
+  /// How long a running screen capture may outlive the peer connection that
+  /// carried it — after that connection FAILED, was CLOSED by the other end,
+  /// or was abandoned while negotiating — before it is stopped.
+  ///
+  /// Within the window a new offer for the same live session reuses the
+  /// capture without asking the user again, which is what a technician whose
+  /// browser reconnects needs. After it, nobody is receiving the screen and
+  /// nobody has said they will: MediaProjection is stopped, and a later offer
+  /// goes through Android's dialog again. 20 s is a browser reload or an ICE
+  /// restart on the web side; anything slower is a new negotiation in all but
+  /// name, and deserves a new consent.
+  static const Duration defaultOrphanCaptureTimeout = Duration(seconds: 20);
+
   static const String _loggerName = 'webrtc';
 
   final WebRtcPeerConnectionFactory _peerConnectionFactory;
@@ -121,6 +145,26 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   final WebRtcIceConfiguration _iceConfiguration;
   final ScreenCaptureClient _screenCapture;
   final RemoteControlAccessibilityClient _remoteControl;
+  final Duration _orphanCaptureTimeout;
+  final TimerFactory _timerFactory;
+
+  late final StreamSubscription<String> _platformStopSubscription;
+
+  /// The generation whose peer connection the running capture is attached to,
+  /// or `null`. A capture with no current peer attached to it has no receiver.
+  int? _captureAttachedGeneration;
+
+  /// Stops a capture left without a receiver; see [defaultOrphanCaptureTimeout].
+  Timer? _orphanCaptureTimer;
+
+  /// The remote session for which Android stopped the screen capture by itself
+  /// (MediaProjection `onStop`), or `null`.
+  ///
+  /// Control in that session is withdrawn for good, its peer connection is
+  /// closed and no new offer for it is answered: the user (or the system) took
+  /// the screen away, and neither a renegotiation nor a silent new capture is
+  /// how that is undone. A different session, with its own consent, clears it.
+  String? _screenRevokedSessionId;
 
   /// The remote touch, if any. Its `touch_hold` waits in [_commandQueue] like
   /// any command; what follows it comes here directly. Every path that drops
@@ -235,6 +279,12 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     // cannot confirm is live is one the backend would refuse to relay for.
     if (_liveRemoteSessionId != sessionId) {
       _log('offer ignored: there is no live remote session with that id');
+      return;
+    }
+    if (_screenRevokedSessionId == sessionId) {
+      // Android took the screen away in this session. Answering would rebuild
+      // a peer the user has just cut, and ask for the screen again unbidden.
+      _log('offer ignored: Android stopped the screen capture in $sessionId');
       return;
     }
 
@@ -443,6 +493,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
         }
         switch (attachment) {
           case ScreenVideoAttachment.attached:
+            _captureAttachedGeneration = generation;
             _log('video track attached');
           case ScreenVideoAttachment.noVideoTransceiver:
           case ScreenVideoAttachment.failed:
@@ -474,6 +525,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
         _screenCaptureStatus != ScreenCaptureStatus.idle;
 
     _screenCaptureSessionId = null;
+    _captureAttachedGeneration = null;
     _screenCaptureStatus = ScreenCaptureStatus.idle;
     try {
       await _screenCapture.stop();
@@ -657,6 +709,18 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     if (sessionId == _liveRemoteSessionId) return;
     _liveRemoteSessionId = sessionId;
 
+    // A screen Android took away belongs to the session it was taken from. The
+    // next assistance starts clean, with its own Android dialog.
+    var screenLineReset = false;
+    if (_screenRevokedSessionId != null &&
+        _screenRevokedSessionId != sessionId) {
+      _screenRevokedSessionId = null;
+      if (_screenCaptureStatus == ScreenCaptureStatus.stoppedBySystem) {
+        _screenCaptureStatus = ScreenCaptureStatus.idle;
+        screenLineReset = true;
+      }
+    }
+
     // 1. A session that is no longer live cannot be the active one, whatever
     // order the coordinator's events arrive in. Withdrawn before the first
     // await, so no command queued behind this event can slip through.
@@ -692,7 +756,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     if (isClosed) return;
     if (peerGone) {
       emit(WebRtcIdle(screenCapture: _screenCaptureStatus));
-    } else if (released) {
+    } else if (released || screenLineReset) {
       // Nothing was torn down, but the screen line on the panel has just
       // changed and the state is the only way it hears about it.
       emit(_restate());
@@ -709,7 +773,92 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
 
   bool get _isControlAuthorized =>
       _activeRemoteSessionId != null &&
-      _activeRemoteSessionId == _negotiationSessionId;
+      _activeRemoteSessionId == _negotiationSessionId &&
+      _negotiationSessionId != _screenRevokedSessionId;
+
+  // ----------------------------------------------------- screen withdrawn
+
+  /// Android stopped the capture by itself: the user pressed *Stop sharing* in
+  /// the system controls, or another projection took over.
+  ///
+  /// The screen was the condition the technician was working under, so what
+  /// depended on it goes in the same order as every other withdrawal:
+  ///
+  /// ```text
+  /// 1. control   withdrawn for this session; a remote touch abandoned and
+  ///              queued commands dropped, before anything is awaited
+  /// 2. peer      the data channel and the peer connection are closed
+  /// 3. screen    already released by the client; recorded as stopped by the
+  ///              system, never restarted from here
+  /// ```
+  ///
+  /// The remote session itself is not closed: that is the user's FINALIZAR, or
+  /// the technician's. Offers for it are no longer answered.
+  Future<void> _onScreenCaptureEndedByPlatform(
+    WebRtcScreenCaptureEndedByPlatform event,
+    Emitter<WebRtcSessionState> emit,
+  ) async {
+    final sessionId = event.remoteSessionId;
+    if (sessionId != _screenCaptureSessionId) {
+      // A capture this bloc had already let go of, or one for another session.
+      _log('platform stop ignored: it is not the capture in use');
+      return;
+    }
+
+    _screenRevokedSessionId = sessionId;
+    _commandQueue.discardPending();
+    _screenCaptureSessionId = null;
+    _captureAttachedGeneration = null;
+    _screenCaptureStatus = ScreenCaptureStatus.stoppedBySystem;
+    _log('screen capture stopped by Android for $sessionId: control withdrawn');
+    // Said before anything is awaited: nothing may go on reading "sharing".
+    emit(_restate());
+
+    if (_negotiationSessionId == sessionId) {
+      await _teardownPeer();
+      _negotiationSessionId = null;
+      _log('negotiation closed: Android stopped its screen capture');
+    }
+    if (!isClosed) emit(WebRtcIdle(screenCapture: _screenCaptureStatus));
+  }
+
+  // ---------------------------------------------------------- orphan screen
+
+  /// Whether the running capture is attached to the current peer connection.
+  bool get _captureHasReceiver =>
+      _peer != null && _captureAttachedGeneration == _generation;
+
+  /// Starts or cancels the orphan-capture deadline after every state change.
+  @override
+  void onChange(Change<WebRtcSessionState> change) {
+    super.onChange(change);
+    final sessionId = _screenCaptureSessionId;
+    if (sessionId == null || _captureHasReceiver) {
+      _orphanCaptureTimer?.cancel();
+      _orphanCaptureTimer = null;
+      return;
+    }
+    if (_orphanCaptureTimer != null) return;
+    _log(
+      'screen capture has no receiver: stopping it in '
+      '${_orphanCaptureTimeout.inSeconds} s unless a new peer takes it',
+    );
+    _orphanCaptureTimer = _timerFactory(_orphanCaptureTimeout, () {
+      _orphanCaptureTimer = null;
+      if (!isClosed) add(_WebRtcOrphanCaptureExpired(sessionId));
+    });
+  }
+
+  Future<void> _onOrphanCaptureExpired(
+    _WebRtcOrphanCaptureExpired event,
+    Emitter<WebRtcSessionState> emit,
+  ) async {
+    if (_screenCaptureSessionId != event.remoteSessionId) return;
+    if (_captureHasReceiver) return;
+    _log('screen capture stopped: no peer connection took it in time');
+    await _stopScreenCapture();
+    if (!isClosed) emit(_restate());
+  }
 
   // ------------------------------------------------------- peer connection
 
@@ -1133,6 +1282,9 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
 
   @override
   Future<void> close() async {
+    _orphanCaptureTimer?.cancel();
+    _orphanCaptureTimer = null;
+    await _platformStopSubscription.cancel();
     await _teardownPeer();
     // The screen goes with the application. A capture that outlived the
     // process that authorised it would be a notification the user cannot get

@@ -83,11 +83,24 @@ class _AssistanceSection extends StatelessWidget {
         // Not the support panel: until the server records the close, its
         // request is still ACCEPTED and a new one could not be made anyway.
         RemoteSessionEndedLocally() => RemoteSessionEndedPanel(state: state),
+        // Closed by the technician or by the backend: already let go here.
+        RemoteSessionClosedRemotely() => RemoteSessionClosedRemotelyPanel(
+          state: state,
+        ),
         // Unknown is not the same as none: while it is unknown whether a
         // technician is connected, the screen says so and offers to ask again
         // rather than offering to request assistance.
         RemoteSessionUnavailable(:final failure) =>
           RemoteSessionUnavailablePanel(failure: failure),
+        // No session, after one closed from the other side: say who closed it
+        // above what the user can act on now.
+        RemoteSessionIdle(:final lastClosure?) => Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            RemoteSessionClosureNote(endedBy: lastClosure),
+            const SupportPanel(),
+          ],
+        ),
         // No session, or not asked yet: the support request is what the user
         // can act on.
         _ => const SupportPanel(),

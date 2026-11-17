@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:remote_control_device/core/error/failures.dart';
 import 'package:remote_control_device/core/result/result.dart';
 import 'package:remote_control_device/features/remote_session/domain/entities/remote_session.dart';
+import 'package:remote_control_device/features/remote_session/domain/entities/remote_session_ended_by.dart';
 import 'package:remote_control_device/features/remote_session/domain/usecases/close_remote_session.dart';
 import 'package:remote_control_device/features/remote_session/domain/usecases/load_current_remote_session.dart';
 import 'package:remote_control_device/features/remote_session/presentation/bloc/remote_session/remote_session_bloc.dart';
@@ -22,7 +23,10 @@ void main() {
       loadCurrentRemoteSession: LoadCurrentRemoteSession(repository),
       closeRemoteSession: CloseRemoteSession(repository),
       endedSessionStore: endedSessionStore,
-    );
+    )
+      // The realtime channel is up, as RemoteSessionCoordinator reports it on
+      // a connected tablet: reads made from here on may confirm a session.
+      ..add(const RemoteSessionAuthorityChannelChanged(available: true));
   });
 
   tearDown(() async => bloc.close());
@@ -357,21 +361,34 @@ void main() {
       await reachConnecting();
       repository.currentResult = noRemoteSession;
 
-      bloc.add(const RemoteSessionClosureAnnounced(testRemoteSessionId));
+      bloc.add(
+        const RemoteSessionClosureAnnounced(
+          testRemoteSessionId,
+          endedBy: RemoteSessionEndedBy.technician,
+        ),
+      );
       await settle();
 
       expect(repository.currentCount, 2);
-      expect(bloc.state, const RemoteSessionIdle());
+      expect(
+        bloc.state,
+        const RemoteSessionIdle(lastClosure: RemoteSessionEndedBy.technician),
+      );
     });
 
-    test('an event the backend contradicts does not end the session', () async {
-      await reachConnecting();
-      // `/current` still holds it: whatever that event was about, this session
-      // is live, and the user is not told the assistance ended.
-      bloc.add(const RemoteSessionClosureAnnounced(testRemoteSessionId));
-      await settle();
+    test('a read that still returns the closed session cannot revive it', () {
+      // CLOSED is terminal at the backend: a `/current` that still says live
+      // was overtaken by the close. The withdrawal stands.
+      return () async {
+        await reachConnecting();
+        bloc.add(const RemoteSessionClosureAnnounced(testRemoteSessionId));
+        await settle();
 
-      expect(bloc.state, isA<RemoteSessionConnecting>());
+        expect(
+          bloc.state,
+          const RemoteSessionClosedRemotely(testRemoteSessionId),
+        );
+      }();
     });
   });
 
@@ -398,7 +415,11 @@ void main() {
       await sync();
 
       expect(repository.currentCount, 3);
-      expect(bloc.state, const RemoteSessionIdle());
+      // The session the tablet held is gone, and nobody here ended it.
+      expect(
+        bloc.state,
+        const RemoteSessionIdle(lastClosure: RemoteSessionEndedBy.unknown),
+      );
     });
 
     test('a first read that fails says so, and does not claim there is none',

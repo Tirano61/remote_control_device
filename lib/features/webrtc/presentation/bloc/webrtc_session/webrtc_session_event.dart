@@ -164,3 +164,26 @@ final class WebRtcControlMessageReceived extends WebRtcPeerEvent {
   @override
   List<Object?> get props => [generation, message];
 }
+
+/// Android stopped the screen capture for [remoteSessionId] by itself:
+/// MediaProjection's `onStop`, reported by the capture client. Control in that
+/// session is withdrawn and its peer connection closed.
+final class WebRtcScreenCaptureEndedByPlatform extends WebRtcSessionEvent {
+  const WebRtcScreenCaptureEndedByPlatform(this.remoteSessionId);
+
+  final String remoteSessionId;
+
+  @override
+  List<Object?> get props => [remoteSessionId];
+}
+
+/// A capture left without a peer connection ran out of time. Raised only by
+/// the bloc's own timer.
+final class _WebRtcOrphanCaptureExpired extends WebRtcSessionEvent {
+  const _WebRtcOrphanCaptureExpired(this.remoteSessionId);
+
+  final String remoteSessionId;
+
+  @override
+  List<Object?> get props => [remoteSessionId];
+}

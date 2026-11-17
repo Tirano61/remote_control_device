@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:remote_control_device/features/remote_session/domain/entities/remote_session_ended_by.dart';
 import 'package:remote_control_device/app/device_realtime_coordinator.dart';
 import 'package:remote_control_device/app/remote_session_coordinator.dart';
 import 'package:remote_control_device/app/support_coordinator.dart';
@@ -368,11 +369,17 @@ void main() {
     supportRepository.currentResult = const Ok<SupportRequest?>(null);
 
     await client.emit(
-      const RealtimeRemoteSessionClosed(testRemoteSessionId),
+      const RealtimeRemoteSessionClosed(
+        testRemoteSessionId,
+        endedBy: 'TECHNICIAN',
+      ),
     );
     await settle();
 
-    expect(remoteSessionBloc.state, const RemoteSessionIdle());
+    expect(
+      remoteSessionBloc.state,
+      const RemoteSessionIdle(lastClosure: RemoteSessionEndedBy.technician),
+    );
     // And the request the screen would otherwise fall back to is re-read, so
     // the tablet does not end up offering to cancel a COMPLETED request.
     expect(supportBloc.state, const SupportIdle());

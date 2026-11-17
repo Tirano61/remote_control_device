@@ -14,7 +14,7 @@ import 'package:remote_control_device/features/webrtc/presentation/bloc/webrtc_s
 /// SignalingBloc.state      joined session id     ──> may this device relay?
 ///
 /// RemoteSessionBloc.state  live session id       ──> does the assistance exist?
-///                          active session id     ──> may a command be obeyed?
+///                          active + confirmed id ──> may a command be obeyed?
 /// ```
 ///
 /// Only the first of those starts anything. The rest are preconditions, and the
@@ -108,13 +108,20 @@ class WebRtcCoordinator {
     _ => null,
   };
 
-  /// The session a control command may run in, or `null`: `ACTIVE`. A user who
-  /// pressed FINALIZAR ASISTENCIA has withdrawn their consent from that moment:
-  /// the state is then [RemoteSessionEndedLocally], never `ACTIVE` again for
-  /// that session, however long the backend takes to confirm it — or if it
-  /// never can.
+  /// The session a control command may run in, or `null`: `ACTIVE`, and
+  /// *confirmed*. A user who pressed FINALIZAR ASISTENCIA has withdrawn their
+  /// consent from that moment: the state is then [RemoteSessionEndedLocally],
+  /// never `ACTIVE` again for that session. A session the backend closed is
+  /// [RemoteSessionClosedRemotely]. And an `ACTIVE` session whose
+  /// authorisation the tablet cannot currently confirm — the realtime channel
+  /// is down, or back but not reconciled — is suspended: still live, so the
+  /// peer and the screen survive a short outage, but obeying nothing.
   static String? _activeIdOf(RemoteSessionState state) => switch (state) {
-    RemoteSessionActive(:final session) => session.id,
+    RemoteSessionActive(
+      :final session,
+      authority: RemoteSessionAuthority.confirmed,
+    ) =>
+      session.id,
     _ => null,
   };
 

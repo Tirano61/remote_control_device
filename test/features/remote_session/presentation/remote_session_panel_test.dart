@@ -32,6 +32,7 @@ import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_ice
 import 'package:remote_control_device/features/webrtc/presentation/bloc/webrtc_session/webrtc_session_bloc.dart';
 import 'package:remote_control_device/core/result/result.dart';
 
+import '../../../fakes/manual_timers.dart';
 import '../../../fakes/device_fakes.dart';
 import '../../../fakes/realtime_fakes.dart';
 import '../../../fakes/remote_control_fakes.dart';
@@ -49,6 +50,7 @@ void main() {
   late FakeDeviceRealtimeClient client;
   late InMemoryDeviceTokenStore tokenStore;
   late SupportBloc supportBloc;
+  late ManualTimers timers;
   late RemoteSessionBloc remoteSessionBloc;
   late DeviceRealtimeBloc realtimeBloc;
   late WebRtcSessionBloc webRtcBloc;
@@ -62,6 +64,7 @@ void main() {
   /// a different zone from the one `testWidgets` drives, and `pump` would never
   /// run its continuations.
   void createBlocs() {
+    timers = ManualTimers();
     supportRepository = FakeSupportRepository();
     remoteSessionRepository = FakeRemoteSessionRepository();
     client = FakeDeviceRealtimeClient();
@@ -80,6 +83,8 @@ void main() {
       ),
       closeRemoteSession: CloseRemoteSession(remoteSessionRepository),
       endedSessionStore: FakeEndedRemoteSessionStore(),
+      // Deadlines never fire on their own inside testWidgets' fake clock.
+      timerFactory: timers.factory,
     );
     realtimeBloc = DeviceRealtimeBloc(
       client: client,
@@ -103,6 +108,7 @@ void main() {
       iceConfiguration: const WebRtcIceConfiguration.none(),
       screenCapture: screenCapture,
       remoteControl: accessibility,
+      timerFactory: timers.factory,
     );
     remoteControlAccessibilityBloc = RemoteControlAccessibilityBloc(
       client: accessibility,
@@ -112,6 +118,16 @@ void main() {
     addTearDown(realtimeBloc.close);
     addTearDown(webRtcBloc.close);
     addTearDown(remoteControlAccessibilityBloc.close);
+    // What RemoteSessionCoordinator does in the application: the session's
+    // authority hangs on the realtime channel being up.
+    final authority = realtimeBloc.stream.listen(
+      (state) => remoteSessionBloc.add(
+        RemoteSessionAuthorityChannelChanged(
+          available: state is DeviceRealtimeConnected,
+        ),
+      ),
+    );
+    addTearDown(authority.cancel);
   }
 
   Widget harness() => MultiBlocProvider(
@@ -184,11 +200,30 @@ void main() {
     expect(find.byKey(RemoteSessionPanel.screenCaptureLineKey), findsNothing);
   });
 
+  /// Negotiates a peer connection the way the coordinator would, and pushes it
+  /// all the way to the success condition: connection connected, control
+  /// channel open.
+  Future<void> establishPeerConnection(WidgetTester tester) async {
+    webRtcBloc.add(
+      const WebRtcSignalingAvailabilityChanged(testRemoteSessionId),
+    );
+    webRtcBloc.add(const WebRtcRemoteSessionChanged(testRemoteSessionId));
+    webRtcBloc.add(WebRtcOfferReceived(offerFor()));
+    await settle(tester);
+
+    final peer = peerFactory.last;
+    peer.pushConnectionState(WebRtcConnectionState.connected);
+    final channel = peer.pushDataChannel();
+    await settle(tester);
+    channel.pushState(WebRtcDataChannelState.open);
+    await settle(tester);
+  }
+
   group('remote control line', () {
     Future<void> pumpLive(WidgetTester tester) async {
       await pumpAccepted(tester);
-      remoteSessionRepository.currentResult = connectingRemoteSession;
-      remoteSessionBloc.add(const RemoteSessionAnnounced(testRemoteSessionId));
+      remoteSessionRepository.currentResult = activeRemoteSession;
+      remoteSessionBloc.add(const RemoteSessionSyncRequested());
       await settle(tester);
     }
 
@@ -197,6 +232,23 @@ void main() {
 
       expect(find.text('Control remoto: habilitado'), findsOneWidget);
       expect(find.byKey(RemoteControlStatus.enableButtonKey), findsNothing);
+    });
+
+    testWidgets('CONNECTING does not claim control is enabled yet', (
+      tester,
+    ) async {
+      await pumpAccepted(tester);
+      remoteSessionRepository.currentResult = connectingRemoteSession;
+      remoteSessionBloc.add(const RemoteSessionAnnounced(testRemoteSessionId));
+      await settle(tester);
+
+      expect(find.text('Control remoto: habilitado'), findsNothing);
+      expect(
+        find.text(
+          'Control remoto: disponible cuando la asistencia esté activa',
+        ),
+        findsOneWidget,
+      );
     });
 
     testWidgets('a disabled service offers the way to Android settings', (
@@ -236,37 +288,68 @@ void main() {
       expect(find.byKey(RemoteControlStatus.lineKey), findsNothing);
     });
 
-    testWidgets('it steps aside while the tablet is reconnecting', (
-      tester,
-    ) async {
+    testWidgets('it says suspended while the tablet is reconnecting, even '
+        'with the service enabled', (tester) async {
       await pumpLive(tester);
-      expect(find.byKey(RemoteControlStatus.lineKey), findsOneWidget);
+      expect(find.text('Control remoto: habilitado'), findsOneWidget);
 
       client.push(const RealtimeDisconnected());
       await settle(tester);
 
-      expect(find.byKey(RemoteControlStatus.lineKey), findsNothing);
+      expect(find.text('Control remoto: habilitado'), findsNothing);
+      expect(
+        find.text('Control remoto: suspendido hasta confirmar con el servidor'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('back online, it stays suspended until the backend confirms', (
+      tester,
+    ) async {
+      await pumpLive(tester);
+      client.push(const RealtimeDisconnected());
+      await settle(tester);
+
+      // The socket is back but no read has been made since.
+      client.push(const RealtimeConnected());
+      await settle(tester);
+      expect(find.text('Verificando la asistencia...'), findsOneWidget);
+      expect(find.text('Control remoto: habilitado'), findsNothing);
+
+      remoteSessionBloc.add(const RemoteSessionSyncRequested());
+      await settle(tester);
+      expect(find.text('Asistencia en curso'), findsOneWidget);
+      expect(find.text('Control remoto: habilitado'), findsOneWidget);
+    });
+
+    testWidgets('Android stopping the capture withdraws it for good', (
+      tester,
+    ) async {
+      await pumpLive(tester);
+      await establishPeerConnection(tester);
+      expect(find.text('Pantalla: compartiendo'), findsOneWidget);
+
+      // The peer teardown that follows awaits real stream closes, which the
+      // widget tester's fake clock does not drive on its own.
+      await tester.runAsync(() async {
+        screenCapture.endFromPlatform();
+        for (var i = 0; i < 20; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 1));
+        }
+      });
+      await settle(tester);
+
+      expect(find.text('Pantalla: Android detuvo la captura'), findsOneWidget);
+      expect(find.text('Pantalla: compartiendo'), findsNothing);
+      expect(
+        find.text('Control remoto: deshabilitado en esta asistencia'),
+        findsOneWidget,
+      );
+      expect(find.text('Control remoto: habilitado'), findsNothing);
+      // The assistance can still be ended here.
+      expect(find.byKey(RemoteSessionPanel.closeButtonKey), findsOneWidget);
     });
   });
-
-  /// Negotiates a peer connection the way the coordinator would, and pushes it
-  /// all the way to the success condition: connection connected, control
-  /// channel open.
-  Future<void> establishPeerConnection(WidgetTester tester) async {
-    webRtcBloc.add(
-      const WebRtcSignalingAvailabilityChanged(testRemoteSessionId),
-    );
-    webRtcBloc.add(const WebRtcRemoteSessionChanged(testRemoteSessionId));
-    webRtcBloc.add(WebRtcOfferReceived(offerFor()));
-    await settle(tester);
-
-    final peer = peerFactory.last;
-    peer.pushConnectionState(WebRtcConnectionState.connected);
-    final channel = peer.pushDataChannel();
-    await settle(tester);
-    channel.pushState(WebRtcDataChannelState.open);
-    await settle(tester);
-  }
 
   testWidgets('a connected peer with an open control channel says so', (
     tester,
@@ -565,41 +648,43 @@ void main() {
     expect(find.byKey(RemoteSessionPanel.closeButtonKey), findsNothing);
   });
 
-  testWidgets('pressing FINALIZAR ends it on screen before the server answers',
-      (tester) async {
-    await pumpAccepted(tester);
-    remoteSessionRepository.currentResult = activatedRemoteSession;
-    remoteSessionBloc.add(const RemoteSessionSyncRequested());
-    await settle(tester);
+  testWidgets(
+    'pressing FINALIZAR ends it on screen before the server answers',
+    (tester) async {
+      await pumpAccepted(tester);
+      remoteSessionRepository.currentResult = activatedRemoteSession;
+      remoteSessionBloc.add(const RemoteSessionSyncRequested());
+      await settle(tester);
 
-    // The close is held open so the screen can be observed while it is in
-    // flight.
-    final gate = Completer<void>();
-    remoteSessionRepository.closeGate = gate;
-    remoteSessionRepository.currentQueue.add(noRemoteSession);
+      // The close is held open so the screen can be observed while it is in
+      // flight.
+      final gate = Completer<void>();
+      remoteSessionRepository.closeGate = gate;
+      remoteSessionRepository.currentQueue.add(noRemoteSession);
 
-    await tester.tap(find.byKey(RemoteSessionPanel.closeButtonKey));
-    await settle(tester);
+      await tester.tap(find.byKey(RemoteSessionPanel.closeButtonKey));
+      await settle(tester);
 
-    expect(find.text('Finalizando la asistencia...'), findsOneWidget);
-    expect(
-      find.text(
-        'El técnico ya no puede controlar esta tablet ni ver su pantalla.',
-      ),
-      findsOneWidget,
-    );
-    // Nothing left to press, to share or to control: the live panel is gone,
-    // which is also why a second press cannot start another close.
-    expect(find.byKey(RemoteSessionPanel.closeButtonKey), findsNothing);
-    expect(find.byKey(RemoteSessionPanel.screenCaptureLineKey), findsNothing);
-    expect(find.byType(RemoteControlStatus), findsNothing);
-    expect(find.byKey(RemoteSessionEndedPanel.retryButtonKey), findsNothing);
+      expect(find.text('Finalizando la asistencia...'), findsOneWidget);
+      expect(
+        find.text(
+          'El técnico ya no puede controlar esta tablet ni ver su pantalla.',
+        ),
+        findsOneWidget,
+      );
+      // Nothing left to press, to share or to control: the live panel is gone,
+      // which is also why a second press cannot start another close.
+      expect(find.byKey(RemoteSessionPanel.closeButtonKey), findsNothing);
+      expect(find.byKey(RemoteSessionPanel.screenCaptureLineKey), findsNothing);
+      expect(find.byType(RemoteControlStatus), findsNothing);
+      expect(find.byKey(RemoteSessionEndedPanel.retryButtonKey), findsNothing);
 
-    gate.complete();
-    await settle(tester);
-    expect(remoteSessionRepository.closeCount, 1);
-    expect(find.byType(RemoteSessionEndedPanel), findsNothing);
-  });
+      gate.complete();
+      await settle(tester);
+      expect(remoteSessionRepository.closeCount, 1);
+      expect(find.byType(RemoteSessionEndedPanel), findsNothing);
+    },
+  );
 
   testWidgets('a close the server could not confirm says so, and only that', (
     tester,
