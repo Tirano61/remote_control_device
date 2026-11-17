@@ -79,7 +79,9 @@ RealtimeSupportAssigned? parseSupportAssignedPayload(Object? payload) {
 /// Returns `null` for anything that does not match. Realtime payloads are
 /// untrusted input shaped by whatever is on the other end of the socket, and a
 /// malformed one must produce no signal at all rather than a half-built one.
-RealtimeRemoteSessionCreated? parseRemoteSessionCreatedPayload(Object? payload) {
+RealtimeRemoteSessionCreated? parseRemoteSessionCreatedPayload(
+  Object? payload,
+) {
   if (payload is! Map) return null;
 
   final remoteSessionId = payload['remoteSessionId'];
@@ -135,12 +137,12 @@ RealtimeRemoteSessionActivated? parseRemoteSessionActivePayload(
 /// { "remoteSessionId": "3d1b9e64-...", "endedBy": "TECHNICIAN" }
 /// ```
 ///
-/// Only `remoteSessionId` is required. `endedBy` is documented, is read by
-/// nothing in this client, and — being a `RemoteSessionEndedBy` — may grow
-/// values this build has never heard of; refusing the event over a field that
-/// changes nothing would turn a contract extension into a tablet stuck on
-/// "assistance in progress". What the event means is "ask again", and the
-/// answer to that comes from REST.
+/// Only `remoteSessionId` is required. `endedBy` is carried when it is a short
+/// upper-case token and dropped otherwise: it is only shown to the user, and —
+/// being a `RemoteSessionEndedBy` — may grow values this build has never heard
+/// of (`SYSTEM` is the one the backend's automatic close writes). Refusing the
+/// event over a field that changes nothing would turn a contract extension into
+/// a tablet that keeps obeying a technician whose session is over.
 ///
 /// Returns `null` for anything that does not carry a usable session id.
 RealtimeRemoteSessionClosed? parseRemoteSessionClosedPayload(Object? payload) {
@@ -149,8 +151,17 @@ RealtimeRemoteSessionClosed? parseRemoteSessionClosedPayload(Object? payload) {
   final remoteSessionId = payload['remoteSessionId'];
   if (remoteSessionId is! String || remoteSessionId.isEmpty) return null;
 
-  return RealtimeRemoteSessionClosed(remoteSessionId);
+  final endedBy = payload['endedBy'];
+  return RealtimeRemoteSessionClosed(
+    remoteSessionId,
+    endedBy: endedBy is String && _endedByToken.hasMatch(endedBy)
+        ? endedBy
+        : null,
+  );
 }
+
+/// What an `endedBy` value may look like to be carried at all.
+final RegExp _endedByToken = RegExp(r'^[A-Z_]{1,32}$');
 
 /// Whether a `connect_error` is the namespace middleware refusing the token.
 ///
