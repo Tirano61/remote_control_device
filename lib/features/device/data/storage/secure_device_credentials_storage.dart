@@ -7,7 +7,8 @@ import 'package:remote_control_device/features/device/domain/storage/device_cred
 /// `flutter_secure_storage` 11 defaults to AES/GCM data encryption with the
 /// storage key wrapped by an RSA key held in the Android Keystore, so the
 /// `deviceSecret` never sits in plaintext in SharedPreferences, a file or a
-/// database. This is the only place in the app that touches that package.
+/// database. Together with `SecureEndedRemoteSessionStore`, which keeps one
+/// non-secret key beside these, it is the only code that touches that package.
 class SecureDeviceCredentialsStorage implements DeviceCredentialsStorage {
   const SecureDeviceCredentialsStorage({FlutterSecureStorage? secureStorage})
     : _storage = secureStorage ?? const FlutterSecureStorage();

@@ -12,13 +12,16 @@ import '../../../fakes/remote_session_fakes.dart';
 
 void main() {
   late FakeRemoteSessionRepository repository;
+  late FakeEndedRemoteSessionStore endedSessionStore;
   late RemoteSessionBloc bloc;
 
   setUp(() {
     repository = FakeRemoteSessionRepository();
+    endedSessionStore = FakeEndedRemoteSessionStore();
     bloc = RemoteSessionBloc(
       loadCurrentRemoteSession: LoadCurrentRemoteSession(repository),
       closeRemoteSession: CloseRemoteSession(repository),
+      endedSessionStore: endedSessionStore,
     );
   });
 
@@ -279,7 +282,7 @@ void main() {
       expect(bloc.state, const RemoteSessionIdle());
     });
 
-    test('a close that failed for the network leaves the session alone',
+    test('a close that failed for the network keeps the assistance ended',
         () async {
       await reachConnecting();
       repository.closeResult = closeUnreachable;
@@ -287,13 +290,16 @@ void main() {
       bloc.add(const RemoteSessionCloseRequested());
       await settle();
 
-      // Nothing is known to have happened at the backend: the session is still
-      // there and the user may press again.
-      final state = bloc.state;
-      expect(state, isA<RemoteSessionConnecting>());
-      expect((state as RemoteSessionConnecting).session, connectingSession);
-      expect(state.closing, isFalse);
-      expect(state.lastFailure, isA<NetworkFailure>());
+      // Nothing is known to have happened at the backend — and that does not
+      // matter here: the user ended the assistance, and only its confirmation
+      // is pending. It never goes back to live.
+      expect(
+        bloc.state,
+        const RemoteSessionEndedLocally(
+          testRemoteSessionId,
+          lastFailure: NetworkFailure(),
+        ),
+      );
       expect(repository.currentCount, 1);
     });
   });
@@ -323,18 +329,26 @@ void main() {
       expect(bloc.state, const RemoteSessionIdle(lastFailure: NotFoundFailure()));
     });
 
-    test('a 409 whose re-read still finds the session keeps it', () async {
+    test('a 409 whose re-read still finds the session keeps it ended here',
+        () async {
       // The other documented 409: the session is live but its request cannot be
-      // completed. Nothing local is invented either way.
+      // completed. The backend still holds it; the tablet still refuses it.
       await reachConnecting();
       repository.closeResult = closeConflict;
 
       bloc.add(const RemoteSessionCloseRequested());
       await settle();
 
-      final state = bloc.state;
-      expect(state, isA<RemoteSessionConnecting>());
-      expect((state as RemoteSessionConnecting).closing, isFalse);
+      expect(
+        bloc.state,
+        const RemoteSessionEndedLocally(
+          testRemoteSessionId,
+          lastFailure: ConflictFailure(),
+        ),
+      );
+      // One close, one re-read: a 409 is not answered with another close.
+      expect(repository.closeCount, 1);
+      expect(repository.currentCount, 2);
     });
   });
 
@@ -447,7 +461,7 @@ void main() {
   });
 
   group('the states the screen distinguishes', () {
-    test('are loading, none, live, closing and unknown', () async {
+    test('are loading, none, live, ended here and unknown', () async {
       final seen = <RemoteSessionState>[];
       final subscription = bloc.stream.listen(seen.add);
 
@@ -462,12 +476,14 @@ void main() {
       expect(seen.map((state) => state.runtimeType), [
         RemoteSessionLoading,
         RemoteSessionConnecting,
-        // The close in flight — what the prompt calls "closing".
-        RemoteSessionConnecting,
+        // The close in flight: already ended here, not yet confirmed.
+        RemoteSessionEndedLocally,
         RemoteSessionIdle,
       ]);
-      expect((seen[1] as RemoteSessionConnecting).closing, isFalse);
-      expect((seen[2] as RemoteSessionConnecting).closing, isTrue);
+      expect(
+        seen[2],
+        const RemoteSessionEndedLocally(testRemoteSessionId, confirming: true),
+      );
     });
 
     test('a CLOSED session is never shown as live', () async {

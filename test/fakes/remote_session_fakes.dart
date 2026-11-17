@@ -6,6 +6,7 @@ import 'package:remote_control_device/features/remote_session/domain/entities/re
 import 'package:remote_control_device/features/remote_session/domain/entities/remote_session_status.dart';
 import 'package:remote_control_device/features/remote_session/domain/entities/remote_session_technician.dart';
 import 'package:remote_control_device/features/remote_session/domain/repositories/remote_session_repository.dart';
+import 'package:remote_control_device/features/remote_session/domain/storage/ended_remote_session_store.dart';
 
 import 'support_fakes.dart';
 
@@ -130,7 +131,9 @@ const Ok<RemoteSession?> noRemoteSession = Ok<RemoteSession?>(null);
 const Ok<RemoteSession?> connectingRemoteSession = Ok<RemoteSession?>(
   connectingSession,
 );
-const Ok<RemoteSession?> activeRemoteSession = Ok<RemoteSession?>(activeSession);
+const Ok<RemoteSession?> activeRemoteSession = Ok<RemoteSession?>(
+  activeSession,
+);
 final Ok<RemoteSession?> activatedRemoteSession = Ok<RemoteSession?>(
   activatedSession,
 );
@@ -142,3 +145,40 @@ const Err<RemoteSession> closeUnreachable = Err<RemoteSession>(
 );
 const Err<RemoteSession> closeConflict = Err<RemoteSession>(ConflictFailure());
 const Err<RemoteSession> closeNotFound = Err<RemoteSession>(NotFoundFailure());
+
+/// An [EndedRemoteSessionStore] in memory. Sharing one instance between two
+/// blocs is how a test stands for the application being killed and opened
+/// again: the second bloc starts with nothing but what was stored.
+class FakeEndedRemoteSessionStore implements EndedRemoteSessionStore {
+  FakeEndedRemoteSessionStore([this.value]);
+
+  String? value;
+
+  /// Every operation that reached the store, in order: `'read'`,
+  /// `('write', id)` and `'clear'`.
+  final List<Object> calls = [];
+
+  /// When true, every operation throws, as a store that cannot be reached.
+  bool failing = false;
+
+  @override
+  Future<String?> read() async {
+    calls.add('read');
+    if (failing) throw const EndedRemoteSessionStoreException('test');
+    return value;
+  }
+
+  @override
+  Future<void> write(String remoteSessionId) async {
+    calls.add(('write', remoteSessionId));
+    if (failing) throw const EndedRemoteSessionStoreException('test');
+    value = remoteSessionId;
+  }
+
+  @override
+  Future<void> clear() async {
+    calls.add('clear');
+    if (failing) throw const EndedRemoteSessionStoreException('test');
+    value = null;
+  }
+}

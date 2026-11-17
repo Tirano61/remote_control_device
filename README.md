@@ -12,6 +12,10 @@ consent → foreground service → capture order, and what happens when the user
 declines — is written up in
 [docs/webrtc/SCREEN_SHARING.md](docs/webrtc/SCREEN_SHARING.md).
 
+How the device holds and ends a remote session — including why FINALIZAR
+ASISTENCIA is irreversible on the tablet even when the server cannot be reached —
+is in [docs/remote_session/LIFECYCLE.md](docs/remote_session/LIFECYCLE.md).
+
 ## Backend base URL
 
 The base URL is the only environment-dependent setting and is injected at

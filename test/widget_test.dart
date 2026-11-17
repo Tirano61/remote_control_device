@@ -42,6 +42,7 @@ void main() {
         dependencies: AppDependencies.bootstrap(
           config: config,
           credentialsStorage: FakeDeviceCredentialsStorage(),
+          endedRemoteSessionStore: FakeEndedRemoteSessionStore(),
           deviceInfoProvider: FakeDeviceInfoProvider(),
           realtimeChannel: realtimeClient,
         ),
@@ -100,6 +101,7 @@ void main() {
           remoteSessionRepository,
         ),
         closeRemoteSession: CloseRemoteSession(remoteSessionRepository),
+        endedSessionStore: FakeEndedRemoteSessionStore(),
       );
 
       await tester.pumpWidget(

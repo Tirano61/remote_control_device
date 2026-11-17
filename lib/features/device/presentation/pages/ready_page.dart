@@ -79,6 +79,10 @@ class _AssistanceSection extends StatelessWidget {
     return BlocBuilder<RemoteSessionBloc, RemoteSessionState>(
       builder: (context, state) => switch (state) {
         RemoteSessionLive() => RemoteSessionPanel(state: state),
+        // Ended by the user here, whether or not the server has confirmed it.
+        // Not the support panel: until the server records the close, its
+        // request is still ACCEPTED and a new one could not be made anyway.
+        RemoteSessionEndedLocally() => RemoteSessionEndedPanel(state: state),
         // Unknown is not the same as none: while it is unknown whether a
         // technician is connected, the screen says so and offers to ask again
         // rather than offering to request assistance.

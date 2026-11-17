@@ -44,39 +44,32 @@ final class RemoteSessionIdle extends RemoteSessionState {
 }
 
 /// Shared shape of the two live statuses.
+///
+/// A live state is never one the user of this tablet has ended. The moment
+/// `FINALIZAR ASISTENCIA` is pressed the session leaves this family for
+/// [RemoteSessionEndedLocally], and nothing — a failed close, a late read, a
+/// realtime event, a restart — brings that same session back into it.
 sealed class RemoteSessionLive extends RemoteSessionState {
-  const RemoteSessionLive(
-    this.session, {
-    this.closing = false,
-    this.lastFailure,
-  });
+  const RemoteSessionLive(this.session, {this.lastFailure});
 
   /// As the backend last returned it. The `id` used by
   /// `POST /device/remote-sessions/:id/close` comes from here, so it is always
   /// a value received over an authenticated call.
   final RemoteSession session;
 
-  /// A close is in flight: the button is disabled and a second press cannot
-  /// start another.
-  final bool closing;
-
-  /// Why the last action did not go through. The session itself is unchanged —
-  /// a failed close is never treated as if it had succeeded.
+  /// Why the last read did not go through. The session itself is unchanged: a
+  /// tablet that lost the network is not told the assistance ended.
   final Failure? lastFailure;
 
   @override
-  List<Object?> get props => [session, closing, lastFailure];
+  List<Object?> get props => [session, lastFailure];
 }
 
 /// `CONNECTING` — the session exists and both ends may start connecting. Every
 /// session is born here and stays until the technician reports that the remote
 /// connection came up.
 final class RemoteSessionConnecting extends RemoteSessionLive {
-  const RemoteSessionConnecting(
-    super.session, {
-    super.closing,
-    super.lastFailure,
-  });
+  const RemoteSessionConnecting(super.session, {super.lastFailure});
 }
 
 /// `ACTIVE` — the backend recorded that the remote connection is established,
@@ -92,7 +85,52 @@ final class RemoteSessionConnecting extends RemoteSessionLive {
 /// two are the same fact from different ends, and neither is derived from the
 /// other.
 final class RemoteSessionActive extends RemoteSessionLive {
-  const RemoteSessionActive(super.session, {super.closing, super.lastFailure});
+  const RemoteSessionActive(super.session, {super.lastFailure});
+}
+
+/// The user of this tablet pressed `FINALIZAR ASISTENCIA` for
+/// [remoteSessionId], and the backend has not yet confirmed it `CLOSED`.
+///
+/// Entered *before* anything is sent, and on purpose not a live state: every
+/// coordinator reads it as "no assistance", so the control channel stops
+/// obeying, a remote touch is let go, the peer connection is closed, the
+/// signaling room is left and the screen capture is stopped — all without
+/// waiting for the network.
+///
+/// What it is not is a confirmed close. The backend may still hold the session
+/// `ACTIVE`, and the screen says exactly that: the assistance ended on this
+/// tablet, and the server has or has not been told.
+///
+/// ```text
+/// confirming     the close is on its way to the backend
+/// lastFailure    it did not get there (network, 5xx, 401...): the session is
+///                still ended here, and is reconciled on the next reconnection,
+///                on the next start of the application, or on REINTENTAR
+/// ```
+///
+/// Leaving it takes a backend answer: the `CLOSED` session from the close
+/// itself, or a `/current` that no longer returns this session. It never leads
+/// back to [RemoteSessionLive] for the same session. A *different* session can
+/// only begin the normal way — a new request the user accepts.
+final class RemoteSessionEndedLocally extends RemoteSessionState {
+  const RemoteSessionEndedLocally(
+    this.remoteSessionId, {
+    this.confirming = false,
+    this.lastFailure,
+  });
+
+  /// The session that was ended, as the backend last returned it. Never taken
+  /// from a widget or a realtime payload.
+  final String remoteSessionId;
+
+  /// A close is on its way to the backend: a second one is not started.
+  final bool confirming;
+
+  /// Why the backend could not confirm the close the last time it was asked.
+  final Failure? lastFailure;
+
+  @override
+  List<Object?> get props => [remoteSessionId, confirming, lastFailure];
 }
 
 /// The backend could not be asked, and nothing is known. Deliberately distinct

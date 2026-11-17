@@ -30,7 +30,9 @@ import 'package:remote_control_device/features/screen_capture/data/media_project
 import 'package:remote_control_device/features/screen_capture/data/method_channel_media_projection_service.dart';
 import 'package:remote_control_device/features/screen_capture/domain/screen_capture_client.dart';
 import 'package:remote_control_device/features/remote_session/data/repositories/remote_session_repository_impl.dart';
+import 'package:remote_control_device/features/remote_session/data/storage/secure_ended_remote_session_store.dart';
 import 'package:remote_control_device/features/remote_session/domain/repositories/remote_session_repository.dart';
+import 'package:remote_control_device/features/remote_session/domain/storage/ended_remote_session_store.dart';
 import 'package:remote_control_device/features/remote_session/domain/usecases/close_remote_session.dart';
 import 'package:remote_control_device/features/remote_session/domain/usecases/load_current_remote_session.dart';
 import 'package:remote_control_device/features/support/data/datasources/support_remote_data_source.dart';
@@ -68,6 +70,7 @@ class AppDependencies {
     required this.cancelSupportRequest,
     required this.loadCurrentRemoteSession,
     required this.closeRemoteSession,
+    required this.endedRemoteSessionStore,
     required this.peerConnectionFactory,
     required this.iceConfiguration,
     required this.screenCaptureClient,
@@ -77,6 +80,7 @@ class AppDependencies {
   factory AppDependencies.bootstrap({
     AppConfig? config,
     DeviceCredentialsStorage? credentialsStorage,
+    EndedRemoteSessionStore? endedRemoteSessionStore,
     DeviceInfoProvider? deviceInfoProvider,
     DeviceRealtimeChannel? realtimeChannel,
     WebRtcPeerConnectionFactory? peerConnectionFactory,
@@ -157,6 +161,8 @@ class AppDependencies {
         remoteSessionRepository,
       ),
       closeRemoteSession: CloseRemoteSession(remoteSessionRepository),
+      endedRemoteSessionStore:
+          endedRemoteSessionStore ?? const SecureEndedRemoteSessionStore(),
       // Constructing it opens nothing either: no peer connection exists until
       // an offer arrives.
       peerConnectionFactory:
@@ -223,6 +229,11 @@ class AppDependencies {
 
   final LoadCurrentRemoteSession loadCurrentRemoteSession;
   final CloseRemoteSession closeRemoteSession;
+
+  /// The remote session the user ended on this tablet while the backend has
+  /// not confirmed it, kept across restarts so that it is never resumed. Holds
+  /// one operational id and nothing else.
+  final EndedRemoteSessionStore endedRemoteSessionStore;
 
   /// Builds the peer connection that answers `remote_control_web`. The only
   /// reference to `flutter_webrtc` outside the WebRTC feature's data layer, and

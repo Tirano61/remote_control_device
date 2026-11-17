@@ -96,6 +96,7 @@ void main() {
         remoteSessionRepository,
       ),
       closeRemoteSession: CloseRemoteSession(remoteSessionRepository),
+      endedSessionStore: FakeEndedRemoteSessionStore(),
     );
 
     realtimeCoordinator = DeviceRealtimeCoordinator(

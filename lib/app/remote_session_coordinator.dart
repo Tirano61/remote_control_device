@@ -18,7 +18,7 @@ import 'package:remote_control_device/features/support/presentation/bloc/support
 /// the support request reached ACCEPTED    ──> sync
 /// the device identity was dropped         ──> reset
 ///
-/// a live session stopped being live       ──> re-read the support request
+/// an assistance came to rest              ──> re-read the support request
 /// ```
 ///
 /// `remote-session:active` is the one cue with a condition attached, and the
@@ -78,9 +78,10 @@ class RemoteSessionCoordinator {
   /// the moment the user authorises the technician is worth a read.
   bool _accepted = false;
 
-  /// Whether a live session was held when last seen. Its disappearance is what
-  /// makes the support request worth re-reading.
-  bool _live = false;
+  /// Whether an assistance was in progress when last seen: a live session, or
+  /// one ended here whose close the backend has not confirmed yet. Its coming
+  /// to rest is what makes the support request worth re-reading.
+  bool _engaged = false;
 
   void start() {
     _onRealtimeState(_realtimeBloc.state);
@@ -142,13 +143,18 @@ class RemoteSessionCoordinator {
   }
 
   void _onRemoteSessionState(RemoteSessionState state) {
-    final live = state is RemoteSessionLive;
+    // An assistance ended here but not yet confirmed still counts: its request
+    // is `ACCEPTED` until the backend records the close, so re-reading it then
+    // would find nothing new. The read is worth making when the session comes
+    // to rest — confirmed closed, by either end.
+    final engaged =
+        state is RemoteSessionLive || state is RemoteSessionEndedLocally;
     // A reset is the one way to stop being live without the backend having said
     // anything, and it happens precisely when the device identity is gone. Then
     // there is nothing left to ask with, and the support state has just been
     // cleared for the same reason — re-reading it would only undo that.
-    final ended = _live && !live && state is! RemoteSessionInitial;
-    _live = live;
+    final ended = _engaged && !engaged && state is! RemoteSessionInitial;
+    _engaged = engaged;
 
     // Otherwise: the session and its request are closed in one backend
     // transaction, so a session that is gone means a request that is

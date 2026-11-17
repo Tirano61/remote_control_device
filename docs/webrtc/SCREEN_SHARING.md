@@ -416,6 +416,8 @@ every case below.
 | signaling room lost mid-negotiation | torn down | kept running |
 | the generation went stale during the consent dialog | already gone | kept, for the negotiation that replaced it |
 | the remote session closed, by either end | torn down | stopped |
+| the user pressed FINALIZAR, whether or not the backend confirmed it | torn down first | stopped right after, without waiting for the backend |
+| the assistance ended while the consent dialog was open | already gone | the late grant is stopped on arrival, never attached |
 | a different remote session appeared | torn down | stopped; the next offer asks again |
 | the device credential was revoked | torn down | stopped |
 | the application closed | torn down | stopped |
