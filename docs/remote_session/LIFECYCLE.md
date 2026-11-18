@@ -372,26 +372,91 @@ the tablet asks for re-enrollment. FINALIZAR stayed irreversible through it and
 the pending close was confirmed after re-enrolling, because the marker survives
 clearing the credentials.
 
-## Authority loss: pending physical validation
+## Authority loss: seen on a device
 
-Not run yet. To be done jointly with `remote_control_backend` on branch
-`feature/backend-remote-session-lifecycle` (Prompt 31), on the **T10A only**
-(never the MDT1065), debug build of `fix/device-session-authority-loss`. No
-mobile-mcp or UiAutomation on the tablet; anything that needs a tap on the tablet
-(PERMITIR, the MediaProjection dialog, FINALIZAR) is done by hand. Infrastructure
-interruptions (stopping the tunnel, cutting Wi-Fi) only when coordinated.
+Validated on 2026-11-18 on the T10A (`LSTT10M2026081504`, Android 16), debug build
+of `fix/device-session-authority-loss` (`d154d2c`), against the backend of
+`feature/backend-remote-session-lifecycle` (Prompt 31, `dist` built 07:30 the same
+day, default lifecycle settings: grace 60 s). Tablet and web console
+(`localhost:5173`) both reached the backend through the same VS Code dev tunnel;
+the cuts were made by stopping port forwarding of port 3000 in VS Code, so both
+sockets dropped while WebRTC stayed up over Wi-Fi. Consent (PERMITIR,
+MediaProjection, *Stop sharing*) was given by hand on the tablet; no mobile-mcp or
+UiAutomation. Times are the tablet's clock (about 0.9 s ahead of the PC); Dart
+logs read from the VM service, native ones from logcat, PostgreSQL read-only.
 
-Suggested backend settings for the run: `REMOTE_SESSION_DISCONNECT_GRACE_MS`
-left at 60000 for one pass, and one pass at 20000 so the backend closes before
-the tablet's 45 s.
+```text
+cut, back after the grace (session 806f974a)
+  08:01:31.5  forwarding stopped
+  08:01:36.1  swipe still executed: Android had not noticed yet
+  08:01:40.4  socket down detected (+8.9 s): authority suspended
+  08:01:48.2  swipe rejected (session_not_active)
+  08:02:25.4  45.0 s after detection: ended here (authorityLost); peer closed,
+              capture stopped and released within 0.2 s; POST close 404 (tunnel)
+  08:02:40.4  backend: CLOSED, endedBy SYSTEM, request COMPLETED  (backend clock)
+  08:03:27.9  socket back; GET /current null: "no longer live: confirmed".
+              No peer, no capture, no pointer left down.
 
-| # | Step | Expected on the tablet (logcat `remote-session`, `webrtc`, `RemoteControlScreen`) |
-| --- | --- | --- |
-| 1 | Assistance ACTIVE, socket and peer up; trigger a `SYSTEM` close from the backend (technician tab closed, grace expires) | `closed by the backend (system): control withdrawn`; peer CLOSED; capture stopped and released; panel "El servidor cerró la asistencia porque se perdió la conexión." |
-| 2 | Same as 1 with a DRAG held from the web | touch cancelled `reason=abandoned`, no release logged |
-| 3 | Assistance ACTIVE; block only the socket (tunnel down) while WebRTC stays up | `authority ... suspended`; web gets `session_not_active` acks; video keeps flowing; panel "Reconectando..." + "suspendido" |
-| 4 | Restore within 45 s | socket back, `/current` ACTIVE, control works again; commands sent during the cut never executed |
-| 5 | Keep the socket blocked > 45 s | `not confirmed within 45 s: ending it on this tablet`; peer CLOSED; capture stopped; panel "Asistencia interrumpida" |
-| 6 | Restore after 5 | pending close sent (or `/current` null if the backend closed with SYSTEM); no new peer, no capture, no command |
-| 7 | Press *Stop sharing* in Android's own controls during an ACTIVE assistance | `capture stopped by the platform: reported to Dart`; control withdrawn; peer closed; "Pantalla: Android detuvo la captura" |
-| 8 | New request, PERMITIR, new session | MediaProjection dialog shown again; control only after ACTIVE |
+cut, back within the grace (session 7a4fa33a)
+  08:07:18.6  forwarding stopped
+  08:07:27.4  detected (+8.7 s): suspended. 5 commands rejected while down
+  08:08:09.1  socket back and rejoined; a swipe at 08:08:09.5 still REJECTED:
+              the GET had not answered
+  08:08:10.2  GET /current ACTIVE: confirmed (2.2 s before the grace ran out)
+  08:08:11.9  commands run again. None sent while suspended ran later.
+              Same peer, same capture, no renegotiation; backend kept ACTIVE.
+
+technician gone, SYSTEM close with the tablet connected (same session)
+  08:09:38    console tab closed
+  08:09:52.4  peer FAILED; capture without receiver
+  08:10:12.5  capture stopped exactly 20 s later (orphan window)
+  08:10:37.9  backend: CLOSED, endedBy SYSTEM (60 s after the technician left)
+  08:10:39.4  remote-session:closed (system) received: control withdrawn,
+              room left, GET null. Panel: "El servidor cerró la asistencia
+              porque se perdió la conexión."
+
+Android "Stop sharing" (session 2f16a677)
+  08:19:20.285  system stops the projection
+  08:19:20.296  ScreenCapturer onStop; released 08:19:20.326
+  08:19:20.327  reported to Dart; control withdrawn 08:19:20.342;
+                peer closed 08:19:20.448
+  08:21:44.0    the console resumed the session and sent a new offer:
+                "offer ignored: Android stopped the screen capture"; no peer,
+                no dialog. Panel: "Pantalla: Android detuvo la captura",
+                "Control remoto: deshabilitado en esta asistencia".
+  08:22:11.9    technician FINALIZAR: remote-session:closed (technician)
+                received with the tablet connected; CLOSED TECHNICIAN.
+
+FINALIZAR on the tablet (session 5e2c52c4)
+  08:25:32.46   ended here; peer closed +3 ms; capture stopped +74 ms and
+                released +112 ms; a tap sent afterwards reached nothing;
+                POST close 200, CLOSED DEVICE.
+```
+
+After every revocation: `dumpsys media_projection` null, no
+`MediaProjectionForegroundService`, `InputDispatcher` "no displays touched",
+credentials kept.
+
+What these runs do not show:
+
+* the variant in which the backend closes **inside** the tablet's grace and a
+  reconnection discovers it over REST: with both sides detecting the cut at the
+  same time (~9 s) the tablet's 45 s always ran out before the backend's 60 s.
+  It is covered by `test/app/session_authority_loss_test.dart` only;
+* a DRAG held while control was withdrawn: only the absence of a pointer
+  afterwards was checked on the device. The abandon path was seen on a device in
+  Prompt 29.
+
+Seen during the runs, outside this change:
+
+* detection takes about 9 s after the tunnel stops forwarding; one command ran
+  in that window (the backend still held the session ACTIVE then);
+* when forwarding was restored the tunnel answered as Private (302) for about
+  3 s; the tablet only retried its socket then, so no 401 reached the
+  credential logic;
+* the backend stores `createdAt` in UTC and `connectedAt` / `endedAt` in local
+  time (-03:00) in `timestamp without time zone` columns. If the CONNECTING TTL
+  reads `createdAt` as local time it would fire about 3 h late. Not verified;
+  it is the backend's to check;
+* "remote ICE candidate ignored: it names another session" is also printed when
+  there is no negotiation at all: the reason is right, the wording is not.
