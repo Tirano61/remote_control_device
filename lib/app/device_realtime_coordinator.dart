@@ -13,18 +13,19 @@ import 'package:remote_control_device/features/device/presentation/bloc/session/
 /// session is READY          ──> open the realtime channel
 /// session is anything else  ──> release it
 /// anything says the permanent credential was rejected
-///                           ──> the session wipes it and requires enrollment
+///                           ──> the session withdraws authorisation
 /// ```
 ///
-/// The channel is therefore never opened before a login, during enrollment, or
-/// while re-enrollment is required — the states in which there is no Device JWT
-/// worth presenting.
+/// The channel is therefore never opened before a login, during enrollment,
+/// while authentication is unavailable or after a refusal — the states in which
+/// there is no Device JWT worth presenting.
 ///
-/// "Anything" is meant literally. The socket is no longer the only thing that
-/// can discover a revoked credential: an authenticated REST call that gets a
-/// `401` re-authenticates too, and can be refused too. Both report through
-/// [DeviceCredentialRevocation] and arrive here, so there is one place in the
-/// application that decides what a revoked credential costs — and one only.
+/// "Rejected" means a renewal login answered `401 DEVICE_CREDENTIAL_REJECTED`,
+/// nothing less. The socket is not the only thing that can find that out: an
+/// authenticated REST call that gets a `401` re-authenticates too, and its
+/// login can be refused too. Both report through [DeviceCredentialRevocation]
+/// and arrive here, so there is one place in the application that decides what
+/// a refused credential costs — and one only.
 class DeviceRealtimeCoordinator {
   DeviceRealtimeCoordinator({
     required DeviceSessionBloc sessionBloc,

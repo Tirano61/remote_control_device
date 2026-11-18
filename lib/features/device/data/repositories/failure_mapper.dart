@@ -5,6 +5,9 @@ import 'package:remote_control_device/core/network/api_exception.dart';
 Failure mapApiException(ApiException exception) => switch (exception) {
   NetworkApiException() => NetworkFailure(debugDetail: exception.debugDetail),
   UnauthorizedApiException() => AuthFailure(debugDetail: exception.debugDetail),
+  DeviceCredentialRejectedApiException() => CredentialRejectedFailure(
+    debugDetail: exception.debugDetail,
+  ),
   // Not the backend's answer; nothing was learnt about anything.
   UnexpectedRedirectApiException() => ServerFailure(
     debugDetail: 'redirect ${exception.debugDetail}',

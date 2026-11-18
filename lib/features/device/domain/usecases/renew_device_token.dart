@@ -34,19 +34,23 @@ final class DeviceTokenRenewed extends DeviceTokenRenewal {
   String toString() => 'DeviceTokenRenewed(token: <redacted>)';
 }
 
-/// The backend answered `401` to `POST /device-auth/login`, so the *permanent*
-/// credential — not merely the expired JWT — is no longer accepted. The device
-/// has to be enrolled again.
+/// `POST /device-auth/login` answered `401 DEVICE_CREDENTIAL_REJECTED`: the
+/// backend refused the *permanent* credential, not merely an expired JWT. Also
+/// what an empty secure store yields — there is nothing left to log in with.
 ///
-/// Wiping the credential is not done here: that belongs to the session, which
-/// owns the local installation identity.
+/// It withdraws authorisation; it does not wipe anything. The contract cannot
+/// tell a deactivated device from a replaced credential, and a deactivated one
+/// is accepted again, with the same credential, once an admin reactivates it.
+/// What happens next belongs to the session, which owns the local identity.
 final class DeviceTokenRejected extends DeviceTokenRenewal {
   const DeviceTokenRejected();
 }
 
-/// The backend could not be asked at all (offline, timeout, 5xx) or the secure
-/// store could not be read. Nothing is known about the credential, so it must
-/// be preserved and the attempt retried later.
+/// The backend could not confirm anything: offline, timeout, 5xx, a redirect,
+/// a malformed body, a `401` without `DEVICE_CREDENTIAL_REJECTED` (a proxy or a
+/// private tunnel answers those too), or the secure store could not be read.
+/// Nothing is known about the credential, so it is preserved and the attempt
+/// retried later. The device is not authenticated in the meantime.
 final class DeviceTokenRenewalUnavailable extends DeviceTokenRenewal {
   const DeviceTokenRenewalUnavailable(this.failure);
 
@@ -88,7 +92,10 @@ class RenewDeviceToken {
     final result = await _authenticateDevice(credentials);
     return switch (result) {
       Ok<DeviceSession>(:final value) => DeviceTokenRenewed(value.token),
-      Err<DeviceSession>(failure: AuthFailure()) => const DeviceTokenRejected(),
+      // Only the code confirms a rejection. A bare 401 here is ambiguous and
+      // falls through to "unavailable" with everything else.
+      Err<DeviceSession>(failure: CredentialRejectedFailure()) =>
+        const DeviceTokenRejected(),
       Err<DeviceSession>(:final failure) => DeviceTokenRenewalUnavailable(
         failure,
       ),

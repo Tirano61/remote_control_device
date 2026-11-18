@@ -18,9 +18,25 @@ final class NetworkApiException extends ApiException {
   const NetworkApiException({super.debugDetail});
 }
 
-/// HTTP 401.
+/// HTTP 401 that is **not** a confirmed rejection of the permanent credential.
+///
+/// It is what an expired or refused Device JWT looks like on any
+/// `@DeviceAuth()` route, and also what a proxy, a captive portal or a private
+/// dev tunnel in front of the backend can answer. Nothing can be concluded from
+/// it about the stored `deviceId` + `deviceSecret`.
 final class UnauthorizedApiException extends ApiException {
   const UnauthorizedApiException({super.debugDetail});
+}
+
+/// `POST /device-auth/login` answered `401` with a JSON body whose `code` is
+/// `DEVICE_CREDENTIAL_REJECTED`: the backend checked the credential against its
+/// database and refused it.
+///
+/// The only confirmed rejection there is. It does not say why — unknown
+/// device, deactivated device or replaced credential look the same — and it is
+/// not a proof of origin, only the most specific signal the contract offers.
+final class DeviceCredentialRejectedApiException extends ApiException {
+  const DeviceCredentialRejectedApiException({super.debugDetail});
 }
 
 /// The response was a `3xx`. The backend never redirects, so this is something

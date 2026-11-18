@@ -76,10 +76,10 @@ class SupportCoordinator {
   }
 
   void _onSessionState(DeviceSessionState state) {
-    if (state is DeviceSessionReEnrollmentRequired ||
-        state is DeviceSessionNotEnrolled) {
-      // The request that was on screen belonged to a device identity that no
-      // longer exists here. Keeping it would be showing another device's state.
+    if (withdrawsDeviceAuthorization(state)) {
+      // The request on screen was read with an authorisation this device no
+      // longer holds — refused, unconfirmed, or replaced by a new enrollment.
+      // Keeping it would be showing state the backend has not vouched for.
       _supportBloc.add(const SupportResetRequested());
     }
   }

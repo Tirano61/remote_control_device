@@ -31,8 +31,10 @@ part 'device_realtime_state.dart';
 ///        ↓
 /// POST /device-auth/login with deviceId + deviceSecret
 ///        ├── 200 ──> new Device JWT ──> new socket ──> connected
-///        ├── 401 ──> the credential itself is gone ──> re-enrollment
-///        └── offline/5xx ──> credential preserved ──> retry later
+///        ├── 401 DEVICE_CREDENTIAL_REJECTED ──> the credential itself is
+///        │          refused ──> the session withdraws authorisation
+///        └── anything else (offline, 5xx, a 401 without the code)
+///                   ──> credential preserved ──> retry later
 /// ```
 ///
 /// Exactly one such recovery is attempted per connection. If a *freshly issued*

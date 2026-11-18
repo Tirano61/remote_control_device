@@ -53,7 +53,7 @@ class _RemoteControlAppState extends State<RemoteControlApp> {
       loadDeviceCredentials: dependencies.loadDeviceCredentials,
       authenticateDevice: dependencies.authenticateDevice,
       checkDeviceStatus: dependencies.checkDeviceStatus,
-      clearDeviceCredentials: dependencies.clearDeviceCredentials,
+      suspendDeviceAuthorization: dependencies.suspendDeviceAuthorization,
     );
     _realtimeBloc = DeviceRealtimeBloc(
       client: dependencies.realtimeClient,

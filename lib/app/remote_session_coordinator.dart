@@ -185,11 +185,10 @@ class RemoteSessionCoordinator {
   }
 
   void _onSessionState(DeviceSessionState state) {
-    if (state is DeviceSessionReEnrollmentRequired ||
-        state is DeviceSessionNotEnrolled) {
-      // The session on screen belonged to a device identity that no longer
-      // exists here. A remote assistance session must never outlive the
-      // credential that authorised it.
+    if (withdrawsDeviceAuthorization(state)) {
+      // A remote assistance session must never outlive the authorisation that
+      // allowed it. Resetting it here is what closes the peer connection, the
+      // control channel and the screen capture downstream.
       _remoteSessionBloc.add(const RemoteSessionResetRequested());
     }
   }

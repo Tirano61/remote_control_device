@@ -2,8 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:remote_control_device/core/error/failures.dart';
 import 'package:remote_control_device/features/device/presentation/widgets/failure_messages.dart';
 
-/// Startup could not be completed for a reason that is not a rejected
-/// credential. The enrollment is intact, so the only offered action is retry.
+/// Authentication could not be confirmed, for a reason that is not a refused
+/// credential: no network, a server error, or an answer that confirms nothing
+/// (a redirect, a `401` from something in front of the backend). The
+/// enrollment is intact and the device is not authorised; the session retries
+/// on its own on a bounded backoff, and this screen offers to retry now.
 class ConnectionErrorPage extends StatelessWidget {
   const ConnectionErrorPage({
     required this.failure,
@@ -35,7 +38,7 @@ class ConnectionErrorPage extends StatelessWidget {
                   ),
                   const SizedBox(height: 24),
                   Text(
-                    'Sin conexión con el servidor',
+                    'Autenticación no disponible',
                     style: theme.textTheme.titleLarge,
                     textAlign: TextAlign.center,
                   ),
@@ -43,6 +46,12 @@ class ConnectionErrorPage extends StatelessWidget {
                   Text(
                     FailureMessages.forStartup(failure),
                     style: theme.textTheme.bodyMedium,
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Se reintentará automáticamente.',
+                    style: theme.textTheme.bodySmall,
                     textAlign: TextAlign.center,
                   ),
                   const SizedBox(height: 32),
