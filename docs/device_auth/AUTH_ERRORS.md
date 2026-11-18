@@ -194,3 +194,24 @@ place. Nothing in the application deletes the credential any more.
 * **Activation `401`.** `POST /device-enrollment/activate` has no application
   code; a tunnel's `401` there reads as "code not valid". No stored credential
   is affected.
+
+## Seen on a device
+
+Physical T10A (`LSTT10M2026081504`, publicId `645-589-107`), 2026-11-18, debug
+build of this branch. Faults were injected by a local relay behind a second
+dev-tunnel port (`…-3010`, Public), forwarding to the shared backend; the `…-3000`
+tunnel, the backend and its database were not touched. The rejection in D was
+synthesised by the relay with the exact contract body, so no login reached the
+database. "Store" is a hash of the encrypted secure-storage file (ciphertext
+only, never decrypted), identical in every step.
+
+| Test | Relay | Tablet | Backend (web console) |
+|---|---|---|---|
+| A normal | pass | login 200, check-status 200, socket up, "Conectado" | Online |
+| B ambiguous | `401` HTML (Private-tunnel page), then empty `401`, `302` to another origin, `503` | "Autenticación no disponible", automatic retries 5 s apart, no enrollment screen, `302` not followed | Offline |
+| C recovery | pass | recovered by itself on the next backoff step (~34 s), no tap | Online |
+| D refusal | login `401 DEVICE_CREDENTIAL_REJECTED` | "Autenticación rechazada"; one login, then nothing for 85 s; no socket, no REST call; "Activar de nuevo" shows the replace warning and "Cancelar" returns; an explicit retry still refused | — |
+| E reactivation | pass, then "Reintentar" | login 200 with the same stored credential, check-status 200, socket up | Online |
+
+Not exercised on the device: a refusal discovered at runtime during a live
+remote session (covered by `test/app/webrtc_coordinator_test.dart`, group 19).
