@@ -21,6 +21,7 @@ import 'package:remote_control_device/features/screen_capture/domain/entities/sc
 import 'package:remote_control_device/features/screen_capture/domain/screen_capture_client.dart';
 import 'package:remote_control_device/features/webrtc/domain/control_channel.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/peer_ice_candidate.dart';
+import 'package:remote_control_device/features/webrtc/domain/entities/sdp_origin.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/screen_video_attachment.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_connection_state.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/webrtc_data_channel_state.dart';
@@ -118,6 +119,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     on<WebRtcSignalingAvailabilityChanged>(_onSignalingAvailabilityChanged);
     on<WebRtcRemoteSessionChanged>(_onRemoteSessionChanged);
     on<WebRtcActiveRemoteSessionChanged>(_onActiveRemoteSessionChanged);
+    on<WebRtcRemoteSessionAuthorityChanged>(_onAuthorityChanged);
     on<WebRtcLocalIceProduced>(_onLocalIceProduced);
     on<WebRtcConnectionStateChanged>(_onConnectionStateChanged);
     on<WebRtcDataChannelOffered>(_onDataChannelOffered);
@@ -196,7 +198,31 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
 
   /// The SDP of the offer being negotiated, used only to tell a repeat of the
   /// same offer from a genuinely new one. Never logged and never sent back.
+  ///
+  /// Also the marker of a negotiation that still holds — or is building — a
+  /// peer connection: set when an offer is accepted, cleared by every teardown.
+  /// An offer arriving while it is set is a *replacement*, and goes through
+  /// the recovery rule.
   String? _negotiatedOfferSdp;
+
+  /// The `RTCPeerConnection` identities (see [SdpOrigin]) this device has
+  /// accepted an offer from in [_offerOriginsSessionId], oldest first.
+  ///
+  /// An offer from one of them is never answered again: it is a repeat, a
+  /// stale relay of a connection already replaced, or a renegotiation this
+  /// build does not do. Bounded, and emptied when the live session changes.
+  final Set<String> _acceptedOfferOrigins = <String>{};
+  String? _offerOriginsSessionId;
+  static const int _maxRememberedOfferOrigins = 32;
+
+  /// The live session whose authority is confirmed right now, or `null`. Only
+  /// read when an offer would replace an existing peer connection.
+  String? _confirmedRemoteSessionId;
+
+  /// Remote candidates beyond this many, waiting for an offer to be applied,
+  /// are dropped. A browser trickles a handful; anything past this is not a
+  /// negotiation.
+  static const int _maxPendingRemoteIce = 128;
 
   /// The last state the joined room and the backend session were seen in. Both
   /// are preconditions for accepting an offer and neither is a trigger.
@@ -229,8 +255,13 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   /// ends trying to pair with half the addresses.
   final List<PeerIceCandidate> _pendingRemoteIce = [];
 
-  bool _flushingLocalIce = false;
-  bool _flushingRemoteIce = false;
+  /// The generation whose flush loop is running, or `null`. Per generation and
+  /// not a plain flag: a loop of a replaced peer may still be awaiting its last
+  /// send when the new peer needs to start draining, and it must not hold the
+  /// new one off. The old loop leaves at its next generation check without
+  /// taking anything from the queue.
+  int? _flushingLocalIceGeneration;
+  int? _flushingRemoteIceGeneration;
 
   WebRtcDataChannelState? _controlChannelState;
 
@@ -288,41 +319,100 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
       return;
     }
 
-    final current = state;
-    if (current is WebRtcConnected) {
-      // A healthy peer connection is not replaced by an unexpected offer in
-      // this build. Tearing one down on a duplicate or a stray relay would turn
-      // a working assistance session into a broken one, and the web has no
-      // reason to offer again while its own connection is up.
-      _log('offer ignored: a peer connection is already connected');
+    // Which web `RTCPeerConnection` made this offer. Without it a new offer
+    // cannot be told from a stale one, and none is answered.
+    final origin = SdpOrigin.tryParse(offer.sdp);
+    if (origin == null) {
+      _log('offer ignored: its SDP has no readable origin');
       return;
     }
-    if (current is WebRtcNegotiation &&
-        current is! WebRtcFailed &&
-        current is! WebRtcClosed &&
-        current.remoteSessionId == sessionId &&
-        _negotiatedOfferSdp == offer.sdp) {
-      // The same offer twice: one peer connection, one answer. A second of
-      // either would have the web applying two answers to one offer.
-      _log('offer ignored: it repeats the offer being negotiated');
+    if (_offerOriginsSessionId != sessionId) {
+      _acceptedOfferOrigins.clear();
+      _offerOriginsSessionId = sessionId;
+    }
+    if (_acceptedOfferOrigins.contains(origin.identity)) {
+      // An offer from a connection this device already answered:
+      //
+      //   the same SDP       a repeat; one peer connection, one answer. A
+      //                      second answer would reach a web that is no longer
+      //                      waiting for one.
+      //   anything else      a stale relay of a connection the web has since
+      //                      replaced, or a renegotiation of one — which the
+      //                      web never does: it builds a new connection.
+      //
+      // Neither replaces what this device holds now.
+      _log(
+        offer.sdp == _negotiatedOfferSdp
+            ? 'offer ignored: it repeats the offer being negotiated'
+            : 'offer ignored: it comes from a peer connection already '
+                  'answered in this session',
+      );
       return;
     }
 
-    _log('offer received for $sessionId');
+    // An offer while a negotiation still holds, or is building, a peer
+    // connection is a recovery: the web gave up on its connection and built a
+    // new one, and this side may not have noticed yet — a dead web peer can
+    // read CONNECTED here for tens of seconds. It replaces the old one only
+    // with the session's authority confirmed right now; suspended, the old
+    // peer stays as it is, under the suspension rules.
+    final replacing = _negotiatedOfferSdp != null;
+    if (replacing && _confirmedRemoteSessionId != sessionId) {
+      _log(
+        'recovery offer refused for $sessionId: its authority is not '
+        'confirmed',
+      );
+      return;
+    }
+
+    // Recorded before anything else, so a later relay of this same offer —
+    // even one handled while this is still awaiting — is a repeat.
+    if (_acceptedOfferOrigins.length >= _maxRememberedOfferOrigins) {
+      _acceptedOfferOrigins.remove(_acceptedOfferOrigins.first);
+    }
+    _acceptedOfferOrigins.add(origin.identity);
+
+    if (replacing) {
+      _log(
+        'recovery offer accepted for $sessionId: replacing generation '
+        '$_generation',
+      );
+    } else {
+      _log('offer received for $sessionId');
+    }
 
     // Everything that guards against a concurrent second offer is set here,
-    // before the first await: a later event finds the state, the session and
-    // the SDP already recorded and takes the branch above.
+    // before the first await: a later event finds the session, the SDP and the
+    // origin already recorded.
+    //
+    // And everything the old peer could still do is withdrawn here too, in
+    // this order and synchronously, before a new peer exists:
+    //
+    //   1. generation   the old peer's channel, acks, ICE and state reports
+    //                   are all dropped from this line on
+    //   2. queue        a remote touch is abandoned — never released where the
+    //                   finger happened to be — and queued commands refused
+    //   3. remote ICE   whatever was waiting belonged to the old offer;
+    //                   candidates arriving from now on are for this one
+    //
+    // Closing the old channel and the old connection follows, awaited, before
+    // the new connection is built. There are never two peers, and a command is
+    // obeyed on the new one only through the usual gate: its own open channel,
+    // an ACTIVE session and confirmed authority, at the moment it arrives.
     _generation++;
     final generation = _generation;
+    _commandQueue.discardPending();
+    _pendingRemoteIce.clear();
+    _remoteDescriptionApplied = false;
     _negotiationSessionId = sessionId;
     _negotiatedOfferSdp = offer.sdp;
     emit(WebRtcPreparing(sessionId, screenCapture: _screenCaptureStatus));
 
     // A previous negotiation — failed, closed, or superseded by this offer —
     // releases everything it held before a new one exists, so the two never
-    // share a channel or a candidate queue.
-    await _releasePeer();
+    // share a channel or a candidate queue. The remote candidates already
+    // queued for *this* offer are kept.
+    await _releasePeer(keepRemoteIce: true);
     if (generation != _generation) return;
 
     WebRtcPeerConnection peer;
@@ -548,10 +638,19 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
       _log('remote ICE candidate ignored: it names another session');
       return;
     }
-    if (_peer == null) {
+    if (_negotiatedOfferSdp == null) {
       // No negotiation to attach it to. Signaling is ephemeral by design and
       // nothing buffers it for a peer connection that may never be built.
+      //
+      // A negotiation whose peer is still being built *does* take it: the web
+      // trickles its first candidates — host ones, the likeliest to pair —
+      // right after its offer, and on a recovery they arrive while the old
+      // peer is still being closed.
       _log('remote ICE candidate ignored: there is no peer connection');
+      return;
+    }
+    if (_pendingRemoteIce.length >= _maxPendingRemoteIce) {
+      _log('remote ICE candidate ignored: too many are waiting');
       return;
     }
 
@@ -569,8 +668,9 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   }
 
   Future<void> _flushRemoteIce(int generation) async {
-    if (_flushingRemoteIce) return;
-    _flushingRemoteIce = true;
+    if (generation != _generation) return;
+    if (_flushingRemoteIceGeneration == generation) return;
+    _flushingRemoteIceGeneration = generation;
     try {
       while (_pendingRemoteIce.isNotEmpty) {
         if (generation != _generation) return;
@@ -588,7 +688,9 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
         }
       }
     } finally {
-      _flushingRemoteIce = false;
+      if (_flushingRemoteIceGeneration == generation) {
+        _flushingRemoteIceGeneration = null;
+      }
     }
   }
 
@@ -608,13 +710,14 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   /// were gathered in. New candidates appended while this is draining are
   /// picked up by the same loop rather than racing it.
   Future<void> _flushLocalIce(int generation) async {
-    if (_flushingLocalIce) return;
+    if (generation != _generation) return;
+    if (_flushingLocalIceGeneration == generation) return;
     if (!_answerDelivered) return;
 
     final sessionId = _negotiationSessionId;
     if (sessionId == null) return;
 
-    _flushingLocalIce = true;
+    _flushingLocalIceGeneration = generation;
     try {
       while (_pendingLocalIce.isNotEmpty) {
         if (generation != _generation) return;
@@ -641,7 +744,9 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
         }
       }
     } finally {
-      _flushingLocalIce = false;
+      if (_flushingLocalIceGeneration == generation) {
+        _flushingLocalIceGeneration = null;
+      }
     }
   }
 
@@ -708,6 +813,14 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     final sessionId = event.remoteSessionId;
     if (sessionId == _liveRemoteSessionId) return;
     _liveRemoteSessionId = sessionId;
+    // A session that is no longer live cannot be the confirmed one either.
+    if (_confirmedRemoteSessionId != sessionId) {
+      _confirmedRemoteSessionId = null;
+    }
+    if (_offerOriginsSessionId != sessionId) {
+      _acceptedOfferOrigins.clear();
+      _offerOriginsSessionId = null;
+    }
 
     // A screen Android took away belongs to the session it was taken from. The
     // next assistance starts clean, with its own Android dialog.
@@ -769,6 +882,19 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   ) async {
     _activeRemoteSessionId = event.remoteSessionId;
     if (!_isControlAuthorized) _commandQueue.discardPending();
+  }
+
+  /// Recorded and nothing more. Losing it does not touch a negotiation already
+  /// under way — a recovery that was accepted has already closed the old peer,
+  /// and the new one is held exactly as the old one would have been: kept
+  /// through the suspension's grace period, obeying nothing, and taken down
+  /// with the session if the grace runs out. That is RemoteSessionBloc's
+  /// decision, and it reaches here as the live session going away.
+  Future<void> _onAuthorityChanged(
+    WebRtcRemoteSessionAuthorityChanged event,
+    Emitter<WebRtcSessionState> emit,
+  ) async {
+    _confirmedRemoteSessionId = event.remoteSessionId;
   }
 
   bool get _isControlAuthorized =>
@@ -1237,7 +1363,12 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   /// Idempotent, and it has to be: a failed transport, a closed remote session,
   /// a lost signaling room and a dropped credential all lead here and none of
   /// them can know whether it is first.
-  Future<void> _releasePeer() async {
+  ///
+  /// [keepRemoteIce] is for the one caller that releases the old peer on
+  /// behalf of a new offer: the remote candidates queued by then were sent
+  /// after that offer, for the connection about to be built, and the offer flow
+  /// already emptied the queue of everything older.
+  Future<void> _releasePeer({bool keepRemoteIce = false}) async {
     // Before the channel goes: no queued command outlives the connection it
     // came in on. A gesture already running cannot be recalled and is left to
     // finish, and its ack finds the generation moved on. A remote touch is
@@ -1258,7 +1389,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     _peer = null;
 
     _pendingLocalIce.clear();
-    _pendingRemoteIce.clear();
+    if (!keepRemoteIce) _pendingRemoteIce.clear();
     _remoteDescriptionApplied = false;
     _answerDelivered = false;
 

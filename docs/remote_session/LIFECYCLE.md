@@ -279,6 +279,12 @@ abandoned), and the capture is stopped after 20 s
 (`WebRtcSessionBloc.defaultOrphanCaptureTimeout`) unless a new offer for the
 same live session attaches it. The device never renegotiates by itself.
 
+The web may also give up on its connection before this side notices, and
+offer from a new one while the tablet's peer still reads CONNECTED. That offer
+replaces the peer only with the session's authority **confirmed**; suspended,
+it is refused and the old peer kept. See
+[PEER_RECOVERY.md](../webrtc/PEER_RECOVERY.md).
+
 ### MediaProjection stopped by Android
 
 See [SCREEN_SHARING.md](../webrtc/SCREEN_SHARING.md#when-the-user-stops-the-share-from-android).
