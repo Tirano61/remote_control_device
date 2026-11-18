@@ -163,20 +163,28 @@ RealtimeRemoteSessionClosed? parseRemoteSessionClosedPayload(Object? payload) {
 /// What an `endedBy` value may look like to be carried at all.
 final RegExp _endedByToken = RegExp(r'^[A-Z_]{1,32}$');
 
+/// The exact `connect_error` message `REALTIME.md` documents for a refused
+/// handshake, whatever the reason.
+const String handshakeRejectedMessage = 'Unauthorized';
+
 /// Whether a `connect_error` is the namespace middleware refusing the token.
 ///
-/// The backend answers a single generic `Unauthorized` for every rejection
-/// reason. Socket.IO delivers it as the `CONNECT_ERROR` packet data — a map
-/// carrying `message` — while a transport failure (no network, timeout, backend
-/// down) arrives as an exception object instead. Telling them apart is what
-/// decides between "renew the Device JWT" and "wait for the network".
+/// The backend answers the single generic string `Unauthorized` for every
+/// rejection reason. Socket.IO delivers it as the `CONNECT_ERROR` packet data —
+/// a map carrying `message` — while a transport failure (no network, timeout,
+/// backend down, an upgrade answered by a proxy) arrives as an exception
+/// object or a different message instead. Telling them apart decides between
+/// "renew the Device JWT" and "wait for the network".
+///
+/// The match is exact, not "contains": a proxy page or an error text that
+/// happens to mention "unauthorized" is not the namespace speaking. And even
+/// the exact message is never a revocation — it only starts a renewal login,
+/// and only that login's `401 DEVICE_CREDENTIAL_REJECTED` confirms anything.
 ///
 /// Anything unrecognised is treated as a transport failure: assuming an
 /// authentication problem would make a flaky network trigger login attempts.
-bool isUnauthorizedHandshakeError(Object? error) {
-  final message = _handshakeErrorMessage(error);
-  return message != null && message.toLowerCase().contains('unauthorized');
-}
+bool isUnauthorizedHandshakeError(Object? error) =>
+    _handshakeErrorMessage(error) == handshakeRejectedMessage;
 
 String? _handshakeErrorMessage(Object? error) {
   if (error is String) return error;
