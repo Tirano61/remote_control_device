@@ -172,8 +172,12 @@ session not live, and the offer flow re-checks the generation after every await.
   does that; if it ever does, this rule has to learn renegotiation.
 * **Reusing the track on a new peer** relies on the plugin not disposing a
   track it does not own when the old peer is closed (`replaceTrack` does not
-  transfer ownership). The same path is used after FAILED; it is to be confirmed
-  on the tablet during the E2E below.
+  transfer ownership). Seen working on the T10A: three recoveries in a row on
+  one capture (see "Seen on a device").
+* **A real network cut is not scenario F.** Blocking the browser's UDP makes
+  the tablet notice first (FAILED after ~18 s), so the web's later offer takes
+  the ordinary "offer after FAILED" path. In that run the console also never
+  offered again; that is the web's to investigate (see below).
 
 ## Tests
 
@@ -195,10 +199,10 @@ shared backend through the VS Code dev tunnel, the web console of Prompt 23 on
 `localhost:5173`. No mobile-mcp, no UiAutomation; every consent (support
 request, MediaProjection) is given by the user on the tablet.
 
-```text
-adb logcat -c
-adb logcat | grep -E "\[webrtc\]|\[screen\]|\[remote_control\]"
-```
+Dart logs (`[webrtc]`, `[screen]`, `[remote-session]`) are `dart:developer`
+records: read them from the VM service of a `flutter run` debug session, not
+from logcat. Native ones (`RemoteControlScreen`, `RemoteControlInput`) are in
+logcat.
 
 1. Start an assistance and reach ACTIVE: video visible, a tap works.
 2. Reproduce scenario F: make the web's peer fail while the tablet keeps its
@@ -214,3 +218,99 @@ adb logcat | grep -E "\[webrtc\]|\[screen\]|\[remote_control\]"
 5. A tap, a swipe, a DRAG, BACK/HOME/RECENTS, SET_TEXT and IME_ENTER work on
    the new connection; nothing sent before the failure runs afterwards.
 6. FINALIZAR on the tablet still ends everything at once.
+
+## Seen on a device
+
+Validated on 2026-11-18 on the T10A (`LSTT10M2026081504`, Android 16), debug
+build of this branch (`1318c2f`, installed as an update with `flutter run`:
+enrolment and credentials kept), against the backend `dist` of
+`feature/backend-remote-session-lifecycle` (merged in `main` as `07b7c74`) through
+the VS Code dev tunnel, and the console of `fix/web-remote-session-recovery`
+(`0de681c`) served on `localhost:5173`. Both clients used the same STUN server.
+PERMITIR and every MediaProjection consent were given by hand on the tablet; no
+mobile-mcp, no UiAutomation. Tablet times from its Dart logs (the tablet's clock
+runs ~0.36 s ahead of the PC), web and backend times from the PC.
+
+Updating the APK disabled the accessibility service on the T10A; the user
+enabled it again by hand.
+
+### How scenario F was produced
+
+A network cut cannot produce it (see "Residual risks"). The console's tab got a
+test-only hook, injected from DevTools before the application started and never
+part of `remote_control_web`: `window.RTCPeerConnection` wrapped so that
+`connectionState` can be made to read `failed` and a `connectionstatechange`
+dispatched. `dart_webrtc` reads `connectionState` in that handler, so the console
+took its ordinary failure path — release the connection, check REST, build a
+new one, offer — while its real connection and the tablet's were both
+connected. No signaling was invented and nothing in the protocol changed; the
+hook only decides when the console *believes* its connection failed.
+
+### Recovery (session `cbf0eec8`, ACTIVE, authority confirmed)
+
+```text
+web     11:47:16.882  connection reads failed (real: connected); old one closed
+web     11:47:18.877  REST confirmed the session; new RTCPeerConnection
+tablet  11:46:52.988  last state of the old peer: connected (nothing after)
+tablet  11:47:19.640  webrtc:offer received
+        11:47:19.644  recovery offer accepted: replacing generation 4
+        11:47:19.769  capture reused (no dialog), 19.789 video track attached
+        11:47:20.160  answer relayed
+        11:47:20.471  peer connection connected; 20.493 control channel open
+web                   video back; "Control remoto: listo"
+tablet  11:47:45.0    swipe completed; 47.5 recents, 49.9 back accepted by android
+```
+
+Twice more in the same session: generation 5 replaced at 11:48:21.690
+(connected 22.478; swipe, home) and generation 6 at 11:48:54.050 (connected
+56.034). Each web connection had its own origin (hashed `o=` identity:
+`9c42395a`, `f445b50e`, `bce6af16`, …), every one `sess-version` 2: one offer
+per connection, as the identification assumes. On the web never more than one
+connection was not `closed`; on the tablet one peer at a time.
+
+MediaProjection across the three recoveries: one projection
+(`dumpsys media_projection`: TYPE_SCREEN_CAPTURE), one foreground service, the
+capture started at 11:46:50 and never started again; the 20 s orphan window was
+cancelled each time by the attach.
+
+### Revocation during a recovery
+
+```text
+web     11:49:28.343  connection reads failed; FINALIZAR pressed 0.5 s later
+tablet  11:49:31.431  recovery offer accepted: replacing generation 7
+                      (relayed by the backend just before the close committed)
+backend 11:49:30.862  CLOSED, endedBy TECHNICIAN
+tablet  11:49:31.572  answer created
+        11:49:32.042  remote-session:closed: control withdrawn
+        11:49:32.050  negotiation closed; 32.131 capture stopped
+        11:49:33.063  the answer in flight refused by the backend (unauthorized)
+```
+
+Revocation won: MediaProjection `null`, no foreground service, `InputDispatcher`
+"no displays touched".
+
+### Other runs
+
+* **SYSTEM close** (session `30c77376`): with the console tab closed, the
+  backend closed the session 60 s later (`endedBy SYSTEM`, 11:40:52.8);
+  `remote-session:closed` reached the tablet at 11:40:53.9 and its negotiation
+  was closed at once.
+* **Network cut** (same session): Chrome's UDP blocked 11:33:37–11:35:08 with a
+  temporary Windows Firewall rule (removed afterwards). Tablet: disconnected
+  +7.8 s, failed +17.8 s, capture stopped at +37.8 s (orphan window). The
+  console showed "No se pudo establecer la conexión" and sent no offer, neither
+  during nor after the cut.
+* **A new assistance afterwards** (session `6d74c6ea`): a first offer, with its
+  own MediaProjection dialog; swipe completed. FINALIZAR on the tablet at
+  12:05:29.295: negotiation closed +8 ms, capture stopped +206 ms; POST close
+  200; backend CLOSED, `endedBy DEVICE`; nothing left running.
+
+### Not shown on the device
+
+* duplicate and stale offers, ICE and data channels of an old generation, and
+  two offers in quick succession: the console never produces them and nothing
+  was injected into signaling — covered by tests only;
+* a DRAG held during a recovery, suspended authority during one, and FINALIZAR
+  pressed on the tablet during one: tests only (suspension and the DRAG abandon
+  were seen on the device in earlier prompts);
+* SET_TEXT and IME_ENTER were not sent in these runs.
