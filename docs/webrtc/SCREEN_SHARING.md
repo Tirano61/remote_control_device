@@ -412,6 +412,7 @@ every case below.
 | What happened | Peer connection | Screen capture |
 | --- | --- | --- |
 | a new offer for the same session | rebuilt | reused, no second dialog |
+| a recovery offer while this peer still reads CONNECTED ([PEER_RECOVERY.md](PEER_RECOVERY.md)) | replaced, with authority confirmed | reused, no second dialog |
 | the transport failed or closed | torn down | kept running |
 | signaling room lost mid-negotiation | torn down | kept running |
 | the generation went stale during the consent dialog | already gone | kept, for the negotiation that replaced it |

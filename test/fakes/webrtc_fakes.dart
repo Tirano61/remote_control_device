@@ -201,10 +201,15 @@ class FakeWebRtcPeerConnection implements WebRtcPeerConnection {
     localDescriptions.add(description);
   }
 
+  /// When set, [addRemoteIceCandidate] does not answer until completed: a
+  /// candidate still being applied when the connection is replaced.
+  Completer<void>? addRemoteIceCandidateGate;
+
   @override
   Future<void> addRemoteIceCandidate(PeerIceCandidate candidate) async {
     calls.add('addRemoteIceCandidate');
     addedRemoteCandidates.add(candidate);
+    await addRemoteIceCandidateGate?.future;
   }
 
   @override

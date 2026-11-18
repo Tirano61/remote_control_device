@@ -93,6 +93,23 @@ final class WebRtcActiveRemoteSessionChanged extends WebRtcSessionEvent {
   List<Object?> get props => [remoteSessionId];
 }
 
+/// The live session whose authorisation the tablet can confirm right now
+/// changed: [remoteSessionId] is a `CONNECTING` or `ACTIVE` session with
+/// `RemoteSessionAuthority.confirmed`, or `null`.
+///
+/// It decides one thing: whether an offer may *replace* a peer connection that
+/// already exists. A first offer is answered on a live session alone, as it
+/// always was; tearing down a working connection for a new one takes a session
+/// the backend is known, right now, to still hold for this technician.
+final class WebRtcRemoteSessionAuthorityChanged extends WebRtcSessionEvent {
+  const WebRtcRemoteSessionAuthorityChanged(this.remoteSessionId);
+
+  final String? remoteSessionId;
+
+  @override
+  List<Object?> get props => [remoteSessionId];
+}
+
 // -------------------------------------------------------------- from a peer
 
 /// Internal. A callback from a peer connection, tagged with the generation that

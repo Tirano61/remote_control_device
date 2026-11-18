@@ -612,6 +612,96 @@ void main() {
       },
     );
 
+    test('E2E F: the web offers from a new connection while this peer still '
+        'reads CONNECTED; it is replaced and control comes back', () async {
+      final oldChannel = await reachOpenChannel();
+      await activate();
+      final old = peerFactory.last;
+      oldChannel.pushTap('t-1');
+      await settle();
+      expect(accessibility.taps, hasLength(1));
+
+      await client.deliver(offerReceived(sdp: testSecondOfferSdp));
+      await settle();
+
+      expect(old.isClosed, isTrue);
+      expect(oldChannel.isClosed, isTrue);
+      expect(peerFactory.createCount, 2);
+      expect(client.sentAnswers, hasLength(2));
+      expect(client.sentOffers, isEmpty);
+
+      final peer = peerFactory.last;
+      peer.pushConnectionState(WebRtcConnectionState.connected);
+      final channel = peer.pushDataChannel();
+      await settle();
+      channel.pushState(WebRtcDataChannelState.open);
+      await settle();
+      channel.pushTap('t-2');
+      oldChannel.pushTap('t-old');
+      await settle();
+
+      expect(accessibility.taps, hasLength(2));
+      expect(channel.sentAcks, const [RemoteControlAck.success('t-2')]);
+      // One capture for the whole assistance, never stopped in between.
+      expect(screenCapture.stopCount, 0);
+      expect(
+        webRtcBloc.state,
+        const WebRtcConnected(
+          testRemoteSessionId,
+          controlChannel: WebRtcDataChannelState.open,
+          screenCapture: ScreenCaptureStatus.active,
+        ),
+      );
+    });
+
+    test('a recovery offer is not answered until a read after the reconnection '
+        'confirms the session', () async {
+      final oldChannel = await reachOpenChannel();
+      await activate();
+      final old = peerFactory.last;
+      final reading = Completer<void>();
+      remoteSessionRepository.currentGate = reading;
+
+      await client.emit(const RealtimeDisconnected());
+      await settle();
+      await client.emit(const RealtimeConnected());
+      await settle();
+      expect(
+        remoteSessionBloc.state,
+        isA<RemoteSessionActive>().having(
+          (state) => state.authority,
+          'authority',
+          RemoteSessionAuthority.suspended,
+        ),
+      );
+
+      await client.deliver(offerReceived(sdp: testSecondOfferSdp));
+      await settle();
+      expect(peerFactory.createCount, 1);
+      expect(old.isClosed, isFalse);
+      expect(oldChannel.isClosed, isFalse);
+
+      reading.complete();
+      remoteSessionRepository.currentGate = null;
+      await settle();
+      expect(
+        remoteSessionBloc.state,
+        isA<RemoteSessionActive>().having(
+          (state) => state.authority,
+          'authority',
+          RemoteSessionAuthority.confirmed,
+        ),
+      );
+
+      // Confirmed: an offer from that connection, if the web sends it again,
+      // now replaces the peer. (Today's web does not resend on its own: it has
+      // no answer deadline. See docs/webrtc/PEER_RECOVERY.md.)
+      await client.deliver(offerReceived(sdp: testSecondOfferSdp));
+      await settle();
+      expect(peerFactory.createCount, 2);
+      expect(old.isClosed, isTrue);
+    });
+
     test('a tap does not disturb the screen capture', () async {
       final channel = await reachOpenChannel();
       await activate();

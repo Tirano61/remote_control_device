@@ -226,14 +226,16 @@ void main() {
       expect(signaling.sentAnswers, hasLength(1));
     });
 
-    test('a healthy connection is not replaced by a stray offer', () async {
+    test('a connection is not replaced without confirmed authority', () async {
       final peer = await negotiate();
       peer.pushConnectionState(WebRtcConnectionState.connected);
       await settle();
       expect(bloc.state, isA<WebRtcConnected>());
 
-      // A different offer, and still refused: destroying a working assistance
-      // session over a duplicate relay is the worse failure.
+      // A genuinely new offer, and still refused: the session's authority was
+      // never confirmed, and tearing down a connection on an offer the tablet
+      // cannot vouch for is the worse failure. See webrtc_peer_recovery_test
+      // for the same offer with authority confirmed.
       await receiveOffer(sdp: testSecondOfferSdp);
 
       expect(factory.createCount, 1);
@@ -1092,6 +1094,8 @@ void main() {
 
     test('a generation that went stale mid-dialog answers nothing', () async {
       await becomeReady();
+      // Replacing a negotiation in flight takes confirmed authority.
+      bloc.add(const WebRtcRemoteSessionAuthorityChanged(testRemoteSessionId));
       final gate = Completer<void>();
       screenCapture.startGate = gate;
 

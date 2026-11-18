@@ -71,8 +71,12 @@ class WebRtcCoordinator {
   /// both become `null` at once, and the order is the order the tablet lets go:
   /// commands stop being obeyed and a remote touch is released before the peer
   /// connection and the screen capture are taken down.
+  ///
+  /// Confirmed authority sits between the two: it is narrower than "live" and
+  /// wider than "may obey", and it is what a recovery offer is checked against.
   void _forwardRemoteSession(RemoteSessionState state) {
     _webRtcBloc.add(WebRtcActiveRemoteSessionChanged(_activeIdOf(state)));
+    _webRtcBloc.add(WebRtcRemoteSessionAuthorityChanged(_confirmedIdOf(state)));
     _webRtcBloc.add(WebRtcRemoteSessionChanged(_liveIdOf(state)));
   }
 
@@ -118,6 +122,18 @@ class WebRtcCoordinator {
   /// peer and the screen survive a short outage, but obeying nothing.
   static String? _activeIdOf(RemoteSessionState state) => switch (state) {
     RemoteSessionActive(
+      :final session,
+      authority: RemoteSessionAuthority.confirmed,
+    ) =>
+      session.id,
+    _ => null,
+  };
+
+  /// The live session the tablet can vouch for right now, `CONNECTING` or
+  /// `ACTIVE`, or `null`. Suspended authority, an ended session or none at all
+  /// all read the same: no peer connection may be replaced.
+  static String? _confirmedIdOf(RemoteSessionState state) => switch (state) {
+    RemoteSessionLive(
       :final session,
       authority: RemoteSessionAuthority.confirmed,
     ) =>
