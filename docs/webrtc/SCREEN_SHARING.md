@@ -432,18 +432,43 @@ replaced it.
 
 ## When the user stops the share from Android
 
-Android's own controls can end a `MediaProjection` at any moment. The capture
-client listens for it and, if told, releases everything and goes inactive — and
-does nothing else. The remote session stays open, the control channel stays
-open, and nothing renegotiates. What to offer the user afterwards is a product
-question this build does not answer.
+Android's own controls can end a `MediaProjection` at any moment (the user
+presses *Stop sharing*, or another projection takes over). The path, end to end:
 
-**Known limitation.** `ScreenCapturer.kt` does handle
-`MediaProjection.Callback.onStop`: it releases its virtual display and stops.
-But nothing tells Dart yet, so the client is *not* told: frames stop, the
-session carries on, and the notification goes away with the session rather than
-with the capture. The listener is attached anyway, ready for the day the
-Android side raises it.
+```text
+MediaProjection.Callback.onStop         helper thread; ignored if the app is
+  ScreenCapturer                         already stopping it itself
+    releases the virtual display, calls onStoppedByPlatform
+  MediaProjectionChannel                 posted to the main thread
+    RunningScreenCapture.stoppedByPlatform(trackId)
+      not the running capture -> nothing (late / already released)
+      the running capture     -> released, then
+    invokeMethod("screenCaptureStoppedByPlatform", {trackId})
+FlutterWebRtcScreenMediaSource           the capture with that track id
+  MediaProjectionScreenCaptureClient     stop(): track, stream, foreground
+                                         service and notification go;
+                                         endedByPlatform <- remoteSessionId
+WebRtcSessionBloc                        in that session:
+  1. control withdrawn for good, a remote touch abandoned, queue dropped
+  2. data channel and peer connection closed
+  3. screen recorded as ScreenCaptureStatus.stoppedBySystem
+```
+
+The remote session itself stays open: ending it is FINALIZAR on the tablet or
+the technician's close. Offers for that session are no longer answered, so a
+reconnecting browser cannot rebuild the peer, and nothing restarts the capture.
+A new assistance (another `remoteSessionId`) starts clean, with its own Android
+dialog. The panel says *Pantalla: Android detuvo la captura* and *Control remoto:
+deshabilitado en esta asistencia*.
+
+## A capture nobody receives
+
+`MediaProjection` belongs to the remote session and survives a peer connection
+being rebuilt, but not indefinitely. When the peer that carried it fails, is
+closed by the other end, or is abandoned while negotiating, the capture is
+stopped after `WebRtcSessionBloc.defaultOrphanCaptureTimeout` (20 s) unless a
+new offer for the same live session attaches it first. After that a new offer
+goes through Android's dialog again. The device never renegotiates on its own.
 
 ## The foreground service
 

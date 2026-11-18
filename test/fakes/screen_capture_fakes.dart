@@ -215,4 +215,21 @@ class FakeScreenCaptureClient implements ScreenCaptureClient {
     _active = false;
     _remoteSessionId = null;
   }
+
+  final StreamController<String> _endedByPlatform =
+      StreamController<String>.broadcast(sync: true);
+
+  @override
+  Stream<String> get endedByPlatform => _endedByPlatform.stream;
+
+  /// Android's MediaProjection `onStop`, as the real client reports it: the
+  /// capture is released first, then its session is announced.
+  void endFromPlatform() {
+    final remoteSessionId = _remoteSessionId;
+    if (remoteSessionId == null) return;
+    _active = false;
+    _remoteSessionId = null;
+    stopCount++;
+    _endedByPlatform.add(remoteSessionId);
+  }
 }

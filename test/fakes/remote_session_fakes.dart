@@ -111,11 +111,20 @@ class FakeRemoteSessionRepository implements RemoteSessionRepository {
   /// way to observe the state *while* a close is in flight.
   Completer<void>? closeGate;
 
+  /// When set, a read decides its answer the moment it is made — what the
+  /// backend said then — and delivers it only once the test completes this:
+  /// a response still on the wire while other things happen.
+  Completer<void>? currentGate;
+
   @override
   Future<Result<RemoteSession?>> current() async {
     currentCount++;
-    if (currentQueue.isNotEmpty) return currentQueue.removeAt(0);
-    return currentResult;
+    final answer = currentQueue.isNotEmpty
+        ? currentQueue.removeAt(0)
+        : currentResult;
+    final gate = currentGate;
+    if (gate != null) await gate.future;
+    return answer;
   }
 
   @override

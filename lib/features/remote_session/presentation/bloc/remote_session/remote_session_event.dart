@@ -56,12 +56,44 @@ final class RemoteSessionActivationAnnounced extends RemoteSessionEvent {
 }
 
 /// `remote-session:closed` was received for [remoteSessionId]: the technician
-/// ended the assistance.
+/// ended the assistance, or the backend did on its own ([endedBy] `system`).
 ///
-/// Also just a cue. The session does not disappear because this arrived — it
-/// disappears because the read it triggers comes back empty.
+/// When it names the session held, the session leaves the live family at once
+/// (control withdrawn, peer and screen taken down) and is never live again.
+/// Then `/current` is read, as for every other cue, and decides what follows.
+/// [endedBy] is only shown to the user.
 final class RemoteSessionClosureAnnounced extends RemoteSessionEvent {
-  const RemoteSessionClosureAnnounced(this.remoteSessionId);
+  const RemoteSessionClosureAnnounced(
+    this.remoteSessionId, {
+    this.endedBy = RemoteSessionEndedBy.unknown,
+  });
+
+  final String remoteSessionId;
+  final RemoteSessionEndedBy endedBy;
+
+  @override
+  List<Object?> get props => [remoteSessionId, endedBy];
+}
+
+/// The channel through which the backend can withdraw a session (the
+/// authenticated realtime connection) came up ([available]) or went down.
+///
+/// Losing it suspends a live session at once: no command runs until a fresh
+/// `/current` read, started after the channel is back, confirms the session
+/// again. Regaining it confirms nothing by itself.
+final class RemoteSessionAuthorityChannelChanged extends RemoteSessionEvent {
+  const RemoteSessionAuthorityChannelChanged({required this.available});
+
+  final bool available;
+
+  @override
+  List<Object?> get props => [available];
+}
+
+/// The grace period of a suspended session ran out. Raised only by the bloc's
+/// own timer.
+final class _RemoteSessionAuthorityGraceExpired extends RemoteSessionEvent {
+  const _RemoteSessionAuthorityGraceExpired(this.remoteSessionId);
 
   final String remoteSessionId;
 

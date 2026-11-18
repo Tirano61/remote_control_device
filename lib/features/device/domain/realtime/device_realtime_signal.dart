@@ -107,23 +107,27 @@ final class RealtimeRemoteSessionActivated extends DeviceRealtimeSignal {
   List<Object?> get props => [remoteSessionId];
 }
 
-/// `remote-session:closed` arrived: the technician ended the assistance.
+/// `remote-session:closed` arrived: the technician — or the backend itself,
+/// `endedBy: SYSTEM` — ended the assistance.
 ///
-/// A cue, not a verdict. The tablet does not drop its session because this
-/// arrived — it re-reads `GET /device/remote-sessions/current` and finds
-/// nothing, which is what actually ends the session on screen. The event is
-/// never emitted for a device-initiated close.
+/// For the session the tablet holds, this is the one realtime notice that is
+/// acted on before REST answers, and only in the safe direction: control is
+/// withdrawn and the peer connection and the screen capture are taken down at
+/// once. `GET /device/remote-sessions/current` is still read afterwards and
+/// still decides what comes next; it can never bring the closed session back.
+/// The event is never emitted for a device-initiated close.
 ///
-/// `endedBy` travels in the payload and is deliberately not carried: nothing in
-/// this client branches on who closed a session, and a value it does not act on
-/// has no business crossing into the domain.
+/// [endedBy] is the raw `RemoteSessionEndedBy` token, or `null` when the
+/// payload carried none. It is shown to the user and decides nothing: any
+/// value, known or not, means the session is over.
 final class RealtimeRemoteSessionClosed extends DeviceRealtimeSignal {
-  const RealtimeRemoteSessionClosed(this.remoteSessionId);
+  const RealtimeRemoteSessionClosed(this.remoteSessionId, {this.endedBy});
 
   final String remoteSessionId;
+  final String? endedBy;
 
   @override
-  List<Object?> get props => [remoteSessionId];
+  List<Object?> get props => [remoteSessionId, endedBy];
 }
 
 /// An established connection dropped. The transport retries on its own.

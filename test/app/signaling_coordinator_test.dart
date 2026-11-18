@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:remote_control_device/features/remote_session/domain/entities/remote_session_ended_by.dart';
 import 'package:remote_control_device/app/device_realtime_coordinator.dart';
 import 'package:remote_control_device/app/remote_session_coordinator.dart';
 import 'package:remote_control_device/app/signaling_coordinator.dart';
@@ -311,7 +312,10 @@ void main() {
     await client.emit(const RealtimeRemoteSessionClosed(testRemoteSessionId));
     await settle();
 
-    expect(remoteSessionBloc.state, const RemoteSessionIdle());
+    expect(
+      remoteSessionBloc.state,
+      const RemoteSessionIdle(lastClosure: RemoteSessionEndedBy.unknown),
+    );
     expect(signalingBloc.state, const SignalingIdle());
     // The socket stays exactly where it was: signaling ending is not the
     // channel ending.
@@ -377,7 +381,10 @@ void main() {
       await reachConnected();
       await settle();
 
-      expect(remoteSessionBloc.state, const RemoteSessionIdle());
+      expect(
+        remoteSessionBloc.state,
+        const RemoteSessionIdle(lastClosure: RemoteSessionEndedBy.unknown),
+      );
       expect(signalingBloc.state, const SignalingIdle());
       expect(client.joinedSessionIds, hasLength(1));
     });

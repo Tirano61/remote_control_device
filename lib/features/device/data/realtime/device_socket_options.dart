@@ -22,8 +22,9 @@ const String remoteSessionCreatedEvent = 'remote-session:created';
 /// state in itself: see `RealtimeRemoteSessionActivated`.
 const String remoteSessionActiveEvent = 'remote-session:active';
 
-/// Event the backend emits when the *technician* closes the session. A
-/// device-initiated close emits nothing — the closing side already holds the
+/// Event the backend emits when the *technician* closes the session, or when
+/// the backend closes it by itself (`endedBy: SYSTEM`). A device-initiated
+/// close emits nothing — the closing side already holds the
 /// closed session in its HTTP response.
 const String remoteSessionClosedEvent = 'remote-session:closed';
 
