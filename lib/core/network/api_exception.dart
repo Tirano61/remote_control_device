@@ -23,6 +23,15 @@ final class UnauthorizedApiException extends ApiException {
   const UnauthorizedApiException({super.debugDetail});
 }
 
+/// The response was a `3xx`. The backend never redirects, so this is something
+/// between the tablet and the backend (a tunnel sign-in page, a captive
+/// portal). Redirects are never followed: following one is how a token reaches
+/// a host it was not meant for, and how an intermediary's `401` ends up looking
+/// like the backend's.
+final class UnexpectedRedirectApiException extends ApiException {
+  const UnexpectedRedirectApiException({super.debugDetail});
+}
+
 /// HTTP 400.
 final class BadRequestApiException extends ApiException {
   const BadRequestApiException({super.debugDetail});
