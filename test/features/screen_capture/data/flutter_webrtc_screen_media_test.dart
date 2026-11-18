@@ -127,4 +127,57 @@ void main() {
       await capture.dispose();
     });
   });
+
+  group('Android ending the capture (MediaProjection onStop)', () {
+    const source = FlutterWebRtcScreenMediaSource();
+
+    /// What `MediaProjectionChannel.onStoppedByPlatform` sends.
+    Future<void> androidStopped(String trackId) async {
+      await messenger.handlePlatformMessage(
+        channel.name,
+        channel.codec.encodeMethodCall(
+          MethodCall(FlutterWebRtcScreenMediaSource.stoppedByPlatformMethod, {
+            'trackId': trackId,
+          }),
+        ),
+        (_) {},
+      );
+    }
+
+    test('reaches the capture it names, once', () async {
+      reply = (call) => {'trackId': 'track-p'};
+      final capture = await source.open();
+      var ended = 0;
+      capture.onEnded = () => ended++;
+
+      await androidStopped('track-p');
+      await androidStopped('track-p');
+
+      expect(ended, 1);
+    });
+
+    test('a notice for another capture reaches nothing', () async {
+      reply = (call) => {'trackId': 'track-q'};
+      final capture = await source.open();
+      var ended = 0;
+      capture.onEnded = () => ended++;
+
+      await androidStopped('track-old');
+
+      expect(ended, 0);
+      await capture.dispose();
+    });
+
+    test('a capture this application released is not reported', () async {
+      reply = (call) => {'trackId': 'track-r'};
+      final capture = await source.open();
+      var ended = 0;
+      capture.onEnded = () => ended++;
+      await capture.dispose();
+
+      await androidStopped('track-r');
+
+      expect(ended, 0);
+    });
+  });
 }

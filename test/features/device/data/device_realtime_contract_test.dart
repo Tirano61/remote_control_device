@@ -419,10 +419,30 @@ void main() {
 
       expect(signal, isNotNull);
       expect(signal!.remoteSessionId, testRemoteSessionId);
-      // endedBy is documented, read by nothing here, and deliberately not
-      // carried: a value this client does not act on has no business crossing
-      // into the domain.
-      expect(signal.props, [testRemoteSessionId]);
+      // endedBy is carried only to tell the user who closed it.
+      expect(signal.endedBy, 'TECHNICIAN');
+    });
+
+    test('a SYSTEM close by the backend is read like any other', () {
+      final signal = parseRemoteSessionClosedPayload({
+        'remoteSessionId': testRemoteSessionId,
+        'endedBy': 'SYSTEM',
+      });
+
+      expect(signal, isNotNull);
+      expect(signal!.remoteSessionId, testRemoteSessionId);
+      expect(signal.endedBy, 'SYSTEM');
+    });
+
+    test('an endedBy that is not a short token is dropped, not the event', () {
+      for (final endedBy in <Object?>[null, 42, '', 'system', 'X' * 40]) {
+        final signal = parseRemoteSessionClosedPayload({
+          'remoteSessionId': testRemoteSessionId,
+          'endedBy': endedBy,
+        });
+        expect(signal, isNotNull, reason: '$endedBy');
+        expect(signal!.endedBy, isNull, reason: '$endedBy');
+      }
     });
 
     test('the event name matches the contract', () {

@@ -60,7 +60,15 @@ import org.webrtc.VideoSink
  * [SurfaceTextureHelper]'s thread, which is the only thread that reads or moves [framing]. A
  * configuration change arrives on the main thread and is handed to that thread as it is.
  */
-class ScreenCapturer(private val projectionGrant: Intent) : VideoCapturer, VideoSink {
+class ScreenCapturer(
+    private val projectionGrant: Intent,
+    /**
+     * Called once, on the helper's thread, after the platform ended the projection by itself
+     * and this capturer has released everything. Never called for a stop this application
+     * asked for: [release] unregisters the projection callback before stopping it.
+     */
+    private val onStoppedByPlatform: () -> Unit = {},
+) : VideoCapturer, VideoSink {
 
     private lateinit var helper: SurfaceTextureHelper
     private lateinit var observer: CapturerObserver
@@ -89,9 +97,12 @@ class ScreenCapturer(private val projectionGrant: Intent) : VideoCapturer, Video
         override fun onStop() {
             // The user pressed "Stop sharing" in Android's own controls, or another
             // projection took over. The projection is gone either way; what it was drawing
-            // into goes with it.
+            // into goes with it, and Dart is told so it can withdraw what depended on it.
+            // A stop already under way is this application's own, and is not reported.
+            if (stopped.get()) return
             Log.i(TAG, "capture stopped by the platform")
             stopCapture()
+            onStoppedByPlatform()
         }
     }
 

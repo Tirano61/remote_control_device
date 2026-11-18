@@ -236,16 +236,23 @@ class MediaProjectionScreenCaptureClient implements ScreenCaptureClient {
   /// Android ended the capture on its own -- the user pressed *Stop sharing*
   /// in the system controls, or the projection was revoked.
   ///
-  /// Everything this side holds is released and the notification comes down.
-  /// Nothing else happens: the remote session stays open, the control channel
-  /// stays open, and no renegotiation is attempted. Deciding what to offer the
-  /// user after this is a question about product behaviour, and it is not
-  /// answered in this build.
+  /// Everything this side holds is released and the notification comes down,
+  /// and the remote session it belonged to is reported on [endedByPlatform],
+  /// where the negotiation withdraws control and closes the peer. Nothing here
+  /// restarts the capture: that takes a new Android dialog.
   void _onEndedByPlatform() {
     if (_capture == null) return;
+    final remoteSessionId = _remoteSessionId;
     _log('capture stopped by the platform');
     unawaited(stop());
+    if (remoteSessionId != null) _endedByPlatform.add(remoteSessionId);
   }
+
+  final StreamController<String> _endedByPlatform =
+      StreamController<String>.broadcast();
+
+  @override
+  Stream<String> get endedByPlatform => _endedByPlatform.stream;
 
   ScreenCaptureResult _cancelled() {
     _log('capture start abandoned: stopped while starting');

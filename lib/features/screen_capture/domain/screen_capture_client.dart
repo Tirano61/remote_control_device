@@ -59,4 +59,14 @@ abstract interface class ScreenCaptureClient {
   /// revoked credential, the application shutting down — and none of them can
   /// know whether it is first.
   Future<void> stop();
+
+  /// The remote session of every capture that Android ended by itself —
+  /// MediaProjection's `onStop`: the user pressed *Stop sharing* in the system
+  /// controls, or another projection took over.
+  ///
+  /// By the time an id arrives here the capture has already been released and
+  /// the notification taken down. A capture this application stopped itself
+  /// never appears. Nothing restarts the capture in response: that would take
+  /// a new Android dialog, in a new assistance.
+  Stream<String> get endedByPlatform;
 }

@@ -518,20 +518,45 @@ void main() {
       await Future<void>.delayed(Duration.zero);
 
       // The user pressed "Stop sharing" in the system controls. Everything
-      // this side held is released, and that is all: the remote session stays
-      // open, the control channel stays open, and nothing renegotiates.
+      // this side held is released; the negotiation hears about it on
+      // endedByPlatform and decides what the assistance loses.
       expect(client.isActive, isFalse);
       expect(platform.foregroundServiceRunning, isFalse);
     });
 
+    test('it is reported once, with the session it belonged to', () async {
+      final ended = <String>[];
+      final subscription = client.endedByPlatform.listen(ended.add);
+      addTearDown(subscription.cancel);
+      await client.requestAndStart(session);
+      final capture = platform.lastCapture;
+
+      capture.endFromPlatform();
+      capture.endFromPlatform();
+      await _flush();
+
+      expect(ended, [session]);
+      // Nothing was asked for again: a new capture takes a new dialog.
+      expect(
+        platform.calls.where((call) => call == 'consent.request'),
+        hasLength(1),
+      );
+    });
+
     test('a teardown of ours is not mistaken for one of theirs', () async {
+      final ended = <String>[];
+      final subscription = client.endedByPlatform.listen(ended.add);
+      addTearDown(subscription.cancel);
       await client.requestAndStart(session);
       final capture = platform.lastCapture;
 
       await client.stop();
+      capture.endFromPlatform();
+      await _flush();
 
       expect(capture.isListened, isFalse);
       expect(capture.disposeCount, 1);
+      expect(ended, isEmpty);
     });
   });
 }

@@ -48,13 +48,47 @@ class FlutterWebRtcScreenMediaSource implements ScreenMediaSource {
   static const String startCaptureMethod = 'startScreenCapture';
   static const String stopCaptureMethod = 'stopScreenCapture';
 
+  /// Called *by Android* when MediaProjection's `onStop` fired for a capture:
+  /// `{ "trackId": "<id>" }`. The Android side has already released it.
+  static const String stoppedByPlatformMethod =
+      'screenCaptureStoppedByPlatform';
+
   static const String _loggerName = 'screen';
 
   static MethodChannel get _channel =>
       MethodChannelMediaProjectionForegroundService.channel;
 
+  /// The captures this process holds, by track id. Only ever one in practice;
+  /// keyed so that a late notice about a replaced capture reaches nothing.
+  static final Map<String, FlutterWebRtcScreenMediaCapture> _open = {};
+
+  static bool _listening = false;
+
+  /// Installs the handler for calls coming *from* Android on the shared
+  /// channel. Only the one method is answered; anything else is not
+  /// implemented.
+  static void _listen() {
+    if (_listening) return;
+    _listening = true;
+    _channel.setMethodCallHandler((call) async {
+      if (call.method != stoppedByPlatformMethod) {
+        throw MissingPluginException();
+      }
+      final arguments = call.arguments;
+      final trackId = arguments is Map ? arguments['trackId'] : null;
+      if (trackId is! String) return;
+      final capture = _open.remove(trackId);
+      if (capture == null) return;
+      if (kDebugMode) {
+        developer.log('capture stopped by Android', name: _loggerName);
+      }
+      capture._endedByPlatform();
+    });
+  }
+
   @override
   Future<ScreenMediaCapture> open() async {
+    _listen();
     final reply = await _channel.invokeMapMethod<String, Object?>(
       startCaptureMethod,
     );
@@ -79,9 +113,11 @@ class FlutterWebRtcScreenMediaSource implements ScreenMediaSource {
       );
     }
 
-    return FlutterWebRtcScreenMediaCapture(
+    final capture = FlutterWebRtcScreenMediaCapture(
       MediaStreamTrackNative(trackId, 'screen', 'video', true, 'local'),
     );
+    _open[trackId] = capture;
+    return capture;
   }
 
   static Future<void> _stop(String? trackId) async {
@@ -107,14 +143,18 @@ class FlutterWebRtcScreenMediaCapture implements ScreenMediaCapture {
   @override
   List<ScreenVideoTrack> get videoTracks => [_videoTrack];
 
-  /// Kept on the track for the day it fires. Today it does not: the Android
-  /// capturer releases itself when the user presses *Stop sharing* in the
-  /// system controls, but nothing tells Dart, so what they see is the capture
-  /// ending, the assistance carrying on, and the notification going away with
-  /// the session.
+  void Function()? _onEnded;
+
+  /// Called when Android reports MediaProjection's `onStop` for this capture
+  /// over the `screenCaptureStoppedByPlatform` call. The track's own
+  /// `onEnded` is not used: `flutter_webrtc` never fires it for a track this
+  /// application created natively.
   @override
-  set onEnded(void Function()? listener) {
-    _videoTrack.track.onEnded = listener;
+  set onEnded(void Function()? listener) => _onEnded = listener;
+
+  void _endedByPlatform() {
+    if (_disposed) return;
+    _onEnded?.call();
   }
 
   /// Stops this capture natively — the virtual display, the projection and
@@ -125,7 +165,8 @@ class FlutterWebRtcScreenMediaCapture implements ScreenMediaCapture {
     if (_disposed) return;
     _disposed = true;
 
-    _videoTrack.track.onEnded = null;
+    _onEnded = null;
+    FlutterWebRtcScreenMediaSource._open.remove(_videoTrack.id);
     await FlutterWebRtcScreenMediaSource._stop(_videoTrack.id);
   }
 }

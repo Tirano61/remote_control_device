@@ -4,6 +4,7 @@ import 'package:remote_control_device/core/error/failures.dart';
 import 'package:remote_control_device/features/device/presentation/bloc/realtime/device_realtime_bloc.dart';
 import 'package:remote_control_device/features/device/presentation/widgets/failure_messages.dart';
 import 'package:remote_control_device/features/remote_control/presentation/widgets/remote_control_status.dart';
+import 'package:remote_control_device/features/remote_session/domain/entities/remote_session_ended_by.dart';
 import 'package:remote_control_device/features/remote_session/presentation/bloc/remote_session/remote_session_bloc.dart';
 import 'package:remote_control_device/features/screen_capture/domain/entities/screen_capture_status.dart';
 import 'package:remote_control_device/features/webrtc/presentation/bloc/webrtc_session/webrtc_session_bloc.dart';
@@ -98,6 +99,7 @@ class RemoteSessionPanel extends StatelessWidget {
     final detail = _detail(connected: connected, established: established);
     final connectedSince = _connectedSince(connected: connected);
     final screen = _screenLine(screenCapture, connected: connected);
+    final authorization = _authorization(screenCapture);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -131,9 +133,10 @@ class RemoteSessionPanel extends StatelessWidget {
             ),
           ),
         ],
-        // Hidden on the same terms as the screen line: while reconnecting this
-        // is not what the user needs to read or act on.
-        if (connected) const RemoteControlStatus(),
+        // Shown while reconnecting too: "suspended" is exactly what the user
+        // needs to know then. Never "habilitado" unless the session is ACTIVE
+        // and confirmed with the backend.
+        RemoteControlStatus(authorization: authorization),
         if (technician != null) ...[
           const SizedBox(height: 8),
           Text(
@@ -182,6 +185,9 @@ class RemoteSessionPanel extends StatelessWidget {
   /// is. Saying "connecting to the technician" then would be false.
   String _headline({required bool connected, required bool established}) {
     if (!connected) return 'Reconectando...';
+    // Back, but the backend has not yet confirmed the session is still
+    // authorised. Nothing runs until it does.
+    if (state.isSuspended) return 'Verificando la asistencia...';
 
     return switch (state) {
       RemoteSessionActive() => 'Asistencia en curso',
@@ -201,6 +207,7 @@ class RemoteSessionPanel extends StatelessWidget {
   /// case is protected from by [_headline] having returned first.
   String? _detail({required bool connected, required bool established}) {
     if (!connected) return null;
+    if (state.isSuspended) return null;
     if (state is! RemoteSessionActive) return null;
 
     return established ? 'Conexión remota establecida' : null;
@@ -217,6 +224,11 @@ class RemoteSessionPanel extends StatelessWidget {
   /// already saying the connection is the problem, and a capture that is still
   /// running locally is not what the user needs to read at that moment.
   String? _screenLine(ScreenCaptureStatus status, {required bool connected}) {
+    // Android taking the screen away is said whatever the connection: it is
+    // the reason control is gone, and it does not depend on the socket.
+    if (status == ScreenCaptureStatus.stoppedBySystem) {
+      return 'Pantalla: Android detuvo la captura';
+    }
     if (!connected) return null;
 
     return switch (status) {
@@ -225,6 +237,20 @@ class RemoteSessionPanel extends StatelessWidget {
       ScreenCaptureStatus.active => 'Pantalla: compartiendo',
       ScreenCaptureStatus.denied => 'Pantalla: permiso rechazado',
       ScreenCaptureStatus.failed => 'Pantalla: error al compartir',
+      ScreenCaptureStatus.stoppedBySystem => null,
+    };
+  }
+
+  /// What the remote-control line may claim. Built from the session and the
+  /// screen, never from the accessibility service.
+  RemoteControlAuthorization _authorization(ScreenCaptureStatus screen) {
+    if (screen == ScreenCaptureStatus.stoppedBySystem) {
+      return RemoteControlAuthorization.revoked;
+    }
+    if (state.isSuspended) return RemoteControlAuthorization.suspended;
+    return switch (state) {
+      RemoteSessionActive() => RemoteControlAuthorization.authorized,
+      RemoteSessionConnecting() => RemoteControlAuthorization.pending,
     };
   }
 
@@ -235,7 +261,7 @@ class RemoteSessionPanel extends StatelessWidget {
   /// here: nothing measures elapsed time, and nothing is filled in when the
   /// field is absent.
   String? _connectedSince({required bool connected}) {
-    if (!connected) return null;
+    if (!connected || state.isSuspended) return null;
     if (state is! RemoteSessionActive) return null;
 
     final connectedAt = state.session.connectedAt?.toLocal();
@@ -292,12 +318,20 @@ class RemoteSessionEndedPanel extends StatelessWidget {
       'La asistencia terminó en esta tablet, pero no se pudo confirmar el '
       'cierre con el servidor.';
 
+  /// The sentence shown when the tablet ended the assistance itself because it
+  /// could not confirm it with the server in time.
+  static const String authorityLostMessage =
+      'Se perdió la conexión con el servidor y la asistencia se detuvo por '
+      'seguridad.';
+
   final RemoteSessionEndedLocally state;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final unconfirmed = !state.confirming && state.lastFailure != null;
+    final lostAuthority =
+        state.reason == RemoteSessionLocalEndReason.authorityLost;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -305,11 +339,17 @@ class RemoteSessionEndedPanel extends StatelessWidget {
         Text('Asistencia remota', style: theme.textTheme.titleMedium),
         const SizedBox(height: 8),
         Text(
-          state.confirming
+          lostAuthority
+              ? 'Asistencia interrumpida'
+              : state.confirming
               ? 'Finalizando la asistencia...'
               : 'Asistencia finalizada',
           style: theme.textTheme.headlineSmall,
         ),
+        if (lostAuthority) ...[
+          const SizedBox(height: 8),
+          Text(authorityLostMessage, style: theme.textTheme.bodyMedium),
+        ],
         const SizedBox(height: 8),
         Text(
           'El técnico ya no puede controlar esta tablet ni ver su pantalla.',
@@ -337,6 +377,78 @@ class RemoteSessionEndedPanel extends StatelessWidget {
           ),
         ],
       ],
+    );
+  }
+}
+
+/// What the screen shows the moment the backend says it closed the session —
+/// the technician did, or the backend did on its own — while the tablet checks
+/// what comes next.
+///
+/// Like [RemoteSessionEndedPanel], it says first that the technician can no
+/// longer act on the tablet or see it: control, the peer connection and the
+/// capture were let go when the notice arrived, not when this was drawn.
+class RemoteSessionClosedRemotelyPanel extends StatelessWidget {
+  const RemoteSessionClosedRemotelyPanel({required this.state, super.key});
+
+  final RemoteSessionClosedRemotely state;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final failure = state.lastFailure;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text('Asistencia remota', style: theme.textTheme.titleMedium),
+        const SizedBox(height: 8),
+        Text('Asistencia finalizada', style: theme.textTheme.headlineSmall),
+        const SizedBox(height: 8),
+        Text(
+          RemoteSessionClosureNote.messageFor(state.endedBy),
+          style: theme.textTheme.bodyMedium,
+        ),
+        const SizedBox(height: 4),
+        Text(
+          'El técnico ya no puede controlar esta tablet ni ver su pantalla.',
+          style: theme.textTheme.bodyMedium,
+        ),
+        if (failure != null) _Note(FailureMessages.forRemoteSession(failure)),
+      ],
+    );
+  }
+}
+
+/// One line above the support request saying who closed the last assistance,
+/// when it was not the user here.
+class RemoteSessionClosureNote extends StatelessWidget {
+  const RemoteSessionClosureNote({required this.endedBy, super.key});
+
+  static const Key noteKey = Key('remote-session-closure-note');
+
+  final RemoteSessionEndedBy endedBy;
+
+  static String messageFor(RemoteSessionEndedBy endedBy) => switch (endedBy) {
+    RemoteSessionEndedBy.technician => 'El técnico finalizó la asistencia.',
+    RemoteSessionEndedBy.system =>
+      'El servidor cerró la asistencia porque se perdió la conexión.',
+    RemoteSessionEndedBy.device || RemoteSessionEndedBy.unknown =>
+      'La asistencia fue cerrada por el servidor.',
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Text(
+        messageFor(endedBy),
+        key: noteKey,
+        style: theme.textTheme.bodyMedium?.copyWith(
+          color: theme.colorScheme.outline,
+        ),
+      ),
     );
   }
 }

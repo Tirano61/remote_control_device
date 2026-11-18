@@ -58,19 +58,24 @@ class ScreenCaptureSession private constructor(
          * The grant is used here once and not kept: Android 14 refuses a second projection
          * from the same consent, and this application would not ask it to.
          */
-        fun start(context: Context, grant: Intent): ScreenCaptureSession {
+        fun start(
+            context: Context,
+            grant: Intent,
+            onStoppedByPlatform: (trackId: String) -> Unit,
+        ): ScreenCaptureSession {
             val factory = FlutterWebRtcLocalTracks.peerConnectionFactory()
 
             Log.i(TAG, "capture starting")
             val helper = SurfaceTextureHelper.create(TEXTURE_THREAD, EglUtils.getRootEglBaseContext())
                 ?: throw IllegalStateException("no texture thread")
             val source = factory.createVideoSource(/* isScreencast = */ true)
-            val capturer = ScreenCapturer(grant)
+            // Chosen before the capturer exists, so the platform-stop callback can name it.
+            val trackId = UUID.randomUUID().toString()
+            val capturer = ScreenCapturer(grant) { onStoppedByPlatform(trackId) }
             try {
                 capturer.initialize(helper, context, source.capturerObserver)
                 capturer.startCapture(0, 0, 0)
 
-                val trackId = UUID.randomUUID().toString()
                 val track = factory.createVideoTrack(trackId, source)
                 try {
                     FlutterWebRtcLocalTracks.register(trackId, track)

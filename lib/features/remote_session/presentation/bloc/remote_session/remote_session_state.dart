@@ -33,15 +33,39 @@ final class RemoteSessionLoading extends RemoteSessionState {
 /// a session is expected, not an error. A `CLOSED` session lands here too —
 /// `/current` stops returning it the moment it ends.
 final class RemoteSessionIdle extends RemoteSessionState {
-  const RemoteSessionIdle({this.lastFailure});
+  const RemoteSessionIdle({this.lastFailure, this.lastClosure});
 
   /// Why the previous attempt did not go through, when there was one. Shown as
   /// a short note; nothing is blocked by it.
   final Failure? lastFailure;
 
+  /// Who closed the assistance this tablet was last taking part in, when it
+  /// was closed from the other side (by the technician, or by the backend on
+  /// its own) rather than with FINALIZAR here. [RemoteSessionEndedBy.unknown]
+  /// when the tablet only found out because `/current` stopped returning it.
+  /// Shown as a short note above the support request; it decides nothing.
+  final RemoteSessionEndedBy? lastClosure;
+
   @override
-  List<Object?> get props => [lastFailure];
+  List<Object?> get props => [lastFailure, lastClosure];
 }
+
+/// Whether the tablet can currently *confirm* that a live session is still
+/// authorised.
+///
+/// ```text
+/// confirmed   the realtime channel (the only way the backend can tell this
+///             tablet that a session was closed) is up, and a `/current` read
+///             that started after it last came up returned this session live.
+///             Commands may run, if the session is ACTIVE.
+///
+/// suspended   anything else: the channel is down, or it came back and the
+///             backend has not been asked again yet, or the read that would
+///             have confirmed it failed or started too early. No command runs.
+///             The peer connection and the screen are kept for a bounded grace
+///             period and then taken down: see RemoteSessionBloc.
+/// ```
+enum RemoteSessionAuthority { confirmed, suspended }
 
 /// Shared shape of the two live statuses.
 ///
@@ -50,26 +74,41 @@ final class RemoteSessionIdle extends RemoteSessionState {
 /// [RemoteSessionEndedLocally], and nothing — a failed close, a late read, a
 /// realtime event, a restart — brings that same session back into it.
 sealed class RemoteSessionLive extends RemoteSessionState {
-  const RemoteSessionLive(this.session, {this.lastFailure});
+  const RemoteSessionLive(
+    this.session, {
+    required this.authority,
+    this.lastFailure,
+  });
 
   /// As the backend last returned it. The `id` used by
   /// `POST /device/remote-sessions/:id/close` comes from here, so it is always
   /// a value received over an authenticated call.
   final RemoteSession session;
 
+  /// Whether the tablet can confirm right now that the backend still holds
+  /// this session live. Only a [RemoteSessionAuthority.confirmed]
+  /// [RemoteSessionActive] lets a remote command run.
+  final RemoteSessionAuthority authority;
+
   /// Why the last read did not go through. The session itself is unchanged: a
   /// tablet that lost the network is not told the assistance ended.
   final Failure? lastFailure;
 
+  bool get isSuspended => authority == RemoteSessionAuthority.suspended;
+
   @override
-  List<Object?> get props => [session, lastFailure];
+  List<Object?> get props => [session, authority, lastFailure];
 }
 
 /// `CONNECTING` — the session exists and both ends may start connecting. Every
 /// session is born here and stays until the technician reports that the remote
 /// connection came up.
 final class RemoteSessionConnecting extends RemoteSessionLive {
-  const RemoteSessionConnecting(super.session, {super.lastFailure});
+  const RemoteSessionConnecting(
+    super.session, {
+    required super.authority,
+    super.lastFailure,
+  });
 }
 
 /// `ACTIVE` — the backend recorded that the remote connection is established,
@@ -85,7 +124,11 @@ final class RemoteSessionConnecting extends RemoteSessionLive {
 /// two are the same fact from different ends, and neither is derived from the
 /// other.
 final class RemoteSessionActive extends RemoteSessionLive {
-  const RemoteSessionActive(super.session, {super.lastFailure});
+  const RemoteSessionActive(
+    super.session, {
+    required super.authority,
+    super.lastFailure,
+  });
 }
 
 /// The user of this tablet pressed `FINALIZAR ASISTENCIA` for
@@ -117,6 +160,7 @@ final class RemoteSessionEndedLocally extends RemoteSessionState {
     this.remoteSessionId, {
     this.confirming = false,
     this.lastFailure,
+    this.reason = RemoteSessionLocalEndReason.userRequest,
   });
 
   /// The session that was ended, as the backend last returned it. Never taken
@@ -129,8 +173,51 @@ final class RemoteSessionEndedLocally extends RemoteSessionState {
   /// Why the backend could not confirm the close the last time it was asked.
   final Failure? lastFailure;
 
+  /// Why the tablet ended it. Only changes what the user is told.
+  final RemoteSessionLocalEndReason reason;
+
   @override
-  List<Object?> get props => [remoteSessionId, confirming, lastFailure];
+  List<Object?> get props => [remoteSessionId, confirming, lastFailure, reason];
+}
+
+/// Why an assistance was ended on this tablet.
+enum RemoteSessionLocalEndReason {
+  /// The user pressed FINALIZAR ASISTENCIA.
+  userRequest,
+
+  /// The tablet could not confirm with the backend, within the grace period,
+  /// that the session was still authorised, and ended it by itself.
+  authorityLost,
+}
+
+/// The backend closed [remoteSessionId] (the technician did, or the backend
+/// did on its own with `SYSTEM`) and said so over `remote-session:closed`.
+///
+/// Entered the moment the event names the session held, before anything is
+/// read. Like [RemoteSessionEndedLocally] it is not a live state, so control,
+/// the peer connection, the signaling room and the screen capture are all let
+/// go at once. `/current` is read straight afterwards; an empty answer moves
+/// the state on to [RemoteSessionIdle], and no answer (late, stale or wrong)
+/// ever makes this same session live again. A *different* session can only
+/// begin the normal way, with a new request the user accepts.
+final class RemoteSessionClosedRemotely extends RemoteSessionState {
+  const RemoteSessionClosedRemotely(
+    this.remoteSessionId, {
+    this.endedBy = RemoteSessionEndedBy.unknown,
+    this.lastFailure,
+  });
+
+  /// The session that was held, as the backend last returned it. The event's
+  /// id only ever *matches* it; it is never adopted from the payload.
+  final String remoteSessionId;
+
+  final RemoteSessionEndedBy endedBy;
+
+  /// Why the read that follows the event did not go through.
+  final Failure? lastFailure;
+
+  @override
+  List<Object?> get props => [remoteSessionId, endedBy, lastFailure];
 }
 
 /// The backend could not be asked, and nothing is known. Deliberately distinct

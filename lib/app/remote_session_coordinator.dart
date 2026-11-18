@@ -4,6 +4,7 @@ import 'package:remote_control_device/features/device/domain/realtime/device_rea
 import 'package:remote_control_device/features/device/domain/realtime/device_realtime_signal.dart';
 import 'package:remote_control_device/features/device/presentation/bloc/realtime/device_realtime_bloc.dart';
 import 'package:remote_control_device/features/device/presentation/bloc/session/device_session_bloc.dart';
+import 'package:remote_control_device/features/remote_session/domain/entities/remote_session_ended_by.dart';
 import 'package:remote_control_device/features/remote_session/presentation/bloc/remote_session/remote_session_bloc.dart';
 import 'package:remote_control_device/features/support/presentation/bloc/support/support_bloc.dart';
 
@@ -11,10 +12,13 @@ import 'package:remote_control_device/features/support/presentation/bloc/support
 /// thing that establishes it — a read of `GET /device/remote-sessions/current`.
 ///
 /// ```text
-/// realtime channel came up (or came back) ──> sync
+/// realtime channel came up (or came back) ──> authority channel up, then sync
+/// realtime channel went down              ──> authority channel down
+///                                             (control suspended at once)
 /// remote-session:created arrived          ──> sync
 /// remote-session:active arrived           ──> sync, if it is the session held
-/// remote-session:closed arrived           ──> sync
+/// remote-session:closed arrived           ──> closure (withdrawn at once if it
+///                                             is the session held), then sync
 /// the support request reached ACCEPTED    ──> sync
 /// the device identity was dropped         ──> reset
 ///
@@ -109,8 +113,15 @@ class RemoteSessionCoordinator {
         _remoteSessionBloc.add(
           RemoteSessionActivationAnnounced(remoteSessionId),
         );
-      case RealtimeRemoteSessionClosed(:final remoteSessionId):
-        _remoteSessionBloc.add(RemoteSessionClosureAnnounced(remoteSessionId));
+      case RealtimeRemoteSessionClosed(:final remoteSessionId, :final endedBy):
+        // The one notice the bloc acts on before reading, and only to withdraw:
+        // see RemoteSessionClosureAnnounced. Who closed it is for the user.
+        _remoteSessionBloc.add(
+          RemoteSessionClosureAnnounced(
+            remoteSessionId,
+            endedBy: RemoteSessionEndedBy.fromWire(endedBy),
+          ),
+        );
       default:
         return;
     }
@@ -118,12 +129,22 @@ class RemoteSessionCoordinator {
 
   void _onRealtimeState(DeviceRealtimeState state) {
     final connected = state is DeviceRealtimeConnected;
+    final changed = connected != _connected;
     final reconnected = connected && !_connected;
     _connected = connected;
 
-    // A dropped connection deliberately triggers nothing. The backend does not
-    // end a session because a socket went away, so the last known state stays
-    // on screen — the panel says "reconnecting", not "the assistance ended".
+    // The socket is the only way the backend can tell this tablet a session
+    // was closed, so it is what the session's authority hangs on. A dropped
+    // connection does not end the session — the backend gives it a grace
+    // period, and WebRTC may well still be up — but it does suspend control
+    // at once, and the bloc bounds how long it may stay suspended. The
+    // channel's return is announced *before* the read it causes, so that read
+    // is the first one allowed to confirm the session again.
+    if (changed) {
+      _remoteSessionBloc.add(
+        RemoteSessionAuthorityChannelChanged(available: connected),
+      );
+    }
     if (reconnected) {
       _remoteSessionBloc.add(const RemoteSessionSyncRequested());
     }

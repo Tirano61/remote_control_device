@@ -32,4 +32,10 @@ enum ScreenCaptureStatus {
   /// foreground service was refused, the capture failed, or the offer
   /// carried no video section to answer on.
   failed,
+
+  /// Android stopped the capture by itself (the user pressed *Stop sharing*
+  /// in the system controls, or another projection took over). Remote control
+  /// is withdrawn for that assistance and the screen is never restarted
+  /// without a new Android dialog in a new assistance.
+  stoppedBySystem,
 }
