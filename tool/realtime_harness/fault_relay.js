@@ -24,6 +24,9 @@
  *                        401 DEVICE_CREDENTIAL_REJECTED body, without reaching
  *                        the backend (nothing in the database changes)
  *   cutMs ms             drops every relayed connection and refuses new ones
+ *   closeDevices         closes every open /devices WebSocket gracefully; behind
+ *                        a dev tunnel the client notices at once, while a cut
+ *                        only shows after the Engine.IO ping timeout
  *
  * Privacy: request and response bodies are never logged. A Device JWT is only
  * ever recorded as `tok#n`, the order in which this relay first saw it; the
@@ -244,6 +247,19 @@ http
           faults.cutUntil = Date.now() + cmd.cutMs;
           for (const s of liveSockets) s.destroy();
           for (const p of deviceSockets) p.client.terminate();
+        }
+        if (cmd.closeDevices) {
+          // A graceful WebSocket close, which the dev tunnel forwards: the
+          // tablet sees a lost transport at once, instead of after the ~45 s
+          // ping timeout that a TCP cut behind the tunnel costs.
+          let n = 0;
+          for (const p of [...deviceSockets]) {
+            if (p.client.readyState === 1) {
+              p.client.close(1001);
+              n++;
+            }
+          }
+          cmd.closed = n;
         }
         if (cmd.serverDisconnect) {
           let n = 0;
