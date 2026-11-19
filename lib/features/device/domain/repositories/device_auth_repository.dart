@@ -9,8 +9,9 @@ abstract interface class DeviceAuthRepository {
   /// token as the current session token.
   ///
   /// Every rejection reason (unknown device, inactive device, revoked
-  /// credential, wrong secret) answers the same `401` and surfaces as an
-  /// `AuthFailure`.
+  /// credential, wrong secret) answers the same `401 DEVICE_CREDENTIAL_REJECTED`
+  /// and surfaces as a `CredentialRejectedFailure`. Any other `401` is an
+  /// `AuthFailure`, which confirms nothing about the credential.
   Future<Result<DeviceSession>> login(DeviceCredentials credentials);
 
   /// Validates the current Device JWT and returns the authenticated device.

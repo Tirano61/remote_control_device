@@ -21,6 +21,13 @@ class ApiClient {
       responseType: ResponseType.json,
       // Non-2xx statuses are handled explicitly by `ApiClient.guard`.
       validateStatus: (status) => status != null && status >= 200 && status < 300,
+      // The backend never redirects. A 3xx comes from something in between,
+      // and following it would send the request — and, on an authenticated
+      // call, the Device JWT — somewhere that is not the backend, then report
+      // whatever that place answers (a sign-in page, a 401) as if the backend
+      // had said it. See `UnexpectedRedirectApiException`.
+      followRedirects: false,
+      maxRedirects: 0,
     );
     this.dio.interceptors
       ..add(DeviceAuthInterceptor(tokenStore))
@@ -65,6 +72,8 @@ class ApiClient {
   }
 
   static ApiException _mapStatusCode(int? statusCode) => switch (statusCode) {
+    final int status when status >= 300 && status < 400 =>
+      UnexpectedRedirectApiException(debugDetail: '$status'),
     400 => const BadRequestApiException(debugDetail: '400'),
     401 => const UnauthorizedApiException(debugDetail: '401'),
     404 => const NotFoundApiException(debugDetail: '404'),

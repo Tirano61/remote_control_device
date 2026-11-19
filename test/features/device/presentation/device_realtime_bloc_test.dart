@@ -4,6 +4,7 @@ import 'package:remote_control_device/core/error/failures.dart';
 import 'package:remote_control_device/core/result/result.dart';
 import 'package:remote_control_device/core/session/device_token_store.dart';
 import 'package:remote_control_device/features/device/domain/entities/device_realtime_confirmation.dart';
+import 'package:remote_control_device/features/device/domain/entities/device_session.dart';
 import 'package:remote_control_device/features/device/domain/realtime/device_realtime_signal.dart';
 import 'package:remote_control_device/features/device/domain/usecases/authenticate_device.dart';
 import 'package:remote_control_device/features/device/domain/usecases/load_device_credentials.dart';
@@ -257,10 +258,10 @@ void main() {
   });
 
   group('permanent credential revoked', () {
-    setUp(() => authRepository.loginResult = loginUnauthorized);
+    setUp(() => authRepository.loginResult = loginRejected);
 
     blocTest<DeviceRealtimeBloc, DeviceRealtimeState>(
-      'a 401 on login releases the socket and reports the credential is gone',
+      'a DEVICE_CREDENTIAL_REJECTED login releases the socket and reports it',
       build: buildBloc,
       act: (bloc) async {
         bloc.add(const DeviceRealtimeStartRequested());
@@ -282,8 +283,7 @@ void main() {
         // The socket is released and nothing tries again.
         expect(client.connectedWithTokens, [testDeviceJwt]);
         expect(client.disconnectCount, greaterThanOrEqualTo(1));
-        // Wiping the credential belongs to the session bloc, which the
-        // coordinator hands this over to; the realtime layer only reports it.
+        // The realtime layer only reports it; nothing anywhere wipes it.
         expect(storage.clearCount, 0);
       },
     );
@@ -306,6 +306,38 @@ void main() {
       ],
       verify: (_) => expect(authRepository.loginCount, 0),
     );
+  });
+
+  group('13. a refused handshake whose renewal confirms nothing', () {
+    for (final (name, renewal) in [
+      ('a code-less 401 (private tunnel)', loginUnauthorized),
+      ('a server error', const Err<DeviceSession>(ServerFailure())),
+    ]) {
+      blocTest<DeviceRealtimeBloc, DeviceRealtimeState>(
+        '$name is not a revocation: credential kept, retried later',
+        build: buildBloc,
+        act: (bloc) async {
+          authRepository.loginResult = renewal;
+          bloc.add(const DeviceRealtimeStartRequested());
+          await FakeDeviceRealtimeClient.pump();
+          await client.emit(const RealtimeConnected());
+          await client.emit(const RealtimeHandshakeRejected());
+          await FakeDeviceRealtimeClient.pump();
+        },
+        expect: () => const [
+          DeviceRealtimeConnecting(),
+          DeviceRealtimeConnected(),
+          DeviceRealtimeReconnecting(),
+          DeviceRealtimeConnectionError(),
+        ],
+        verify: (bloc) {
+          expect(bloc.state, isNot(isA<DeviceRealtimeDisconnected>()));
+          expect(storage.credentials, testCredentials);
+          expect(storage.clearCount, 0);
+          expect(authRepository.loginCount, 1);
+        },
+      );
+    }
   });
 
   group('network failure while renewing', () {

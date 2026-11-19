@@ -99,6 +99,13 @@ The permanent `deviceId` + `deviceSecret` live in Android-Keystore-backed secure
 storage; the Device JWT is kept in memory only and is re-obtained from the
 permanent credential whenever the app restarts.
 
+No HTTP answer deletes that credential. Only `POST /device-auth/login`
+answering `401` with `code: DEVICE_CREDENTIAL_REJECTED` is a refusal, and even
+then the credential is kept and only authorisation is withdrawn; any other
+`401`, a redirect (never followed), a 5xx or a timeout leaves the device
+enrolled and retrying. See
+[docs/device_auth/AUTH_ERRORS.md](docs/device_auth/AUTH_ERRORS.md).
+
 Support requests, remote sessions, signaling and WebRTC are in place too. During
 an assistance the technician sees the remote screen (MediaProjection) and can send
 `tap`, `swipe`, `back`, `home`, `recents` and `set_text` (AccessibilityService).

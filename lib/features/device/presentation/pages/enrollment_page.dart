@@ -11,10 +11,14 @@ import 'package:remote_control_device/features/device/presentation/widgets/publi
 /// The widget only collects input and dispatches an event; the HTTP call, the
 /// secure write and the error mapping all happen below the presentation layer.
 class EnrollmentPage extends StatefulWidget {
-  const EnrollmentPage({this.reEnrollmentRequired = false, super.key});
+  const EnrollmentPage({this.onCancel, super.key});
 
-  /// `true` when a previously working credential was rejected by the backend.
-  final bool reEnrollmentRequired;
+  /// Given when this device already holds an enrollment the backend refused:
+  /// the form then warns that activating replaces it, and offers a way back.
+  /// The stored credential is replaced only if the new activation succeeds.
+  final VoidCallback? onCancel;
+
+  bool get replacesStoredEnrollment => onCancel != null;
 
   @override
   State<EnrollmentPage> createState() => _EnrollmentPageState();
@@ -89,13 +93,22 @@ class _EnrollmentPageState extends State<EnrollmentPage> {
                         ),
                         const SizedBox(height: 8),
                         Text(
-                          widget.reEnrollmentRequired
-                              ? 'Este dispositivo debe volver a activarse. '
-                                    'Pedile al técnico un código de activación nuevo.'
+                          widget.replacesStoredEnrollment
+                              ? 'Activar de nuevo reemplaza la activación '
+                                    'guardada en este dispositivo. Hacelo solo '
+                                    'si el técnico te dio un código nuevo.'
                               : 'Ingresá el identificador del dispositivo y el '
                                     'código de 6 dígitos que te indique el técnico.',
                           style: theme.textTheme.bodyMedium,
                         ),
+                        if (widget.replacesStoredEnrollment) ...[
+                          const SizedBox(height: 8),
+                          Text(
+                            'La activación actual se conserva hasta que la '
+                            'nueva se complete.',
+                            style: theme.textTheme.bodySmall,
+                          ),
+                        ],
                         const SizedBox(height: 32),
                         TextFormField(
                           controller: _publicIdController,
@@ -144,6 +157,13 @@ class _EnrollmentPageState extends State<EnrollmentPage> {
                                 )
                               : const Text('Activar'),
                         ),
+                        if (widget.onCancel case final onCancel?) ...[
+                          const SizedBox(height: 12),
+                          TextButton(
+                            onPressed: isSubmitting ? null : onCancel,
+                            child: const Text('Cancelar'),
+                          ),
+                        ],
                       ],
                     ),
                   ),

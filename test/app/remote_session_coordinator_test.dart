@@ -10,7 +10,7 @@ import 'package:remote_control_device/features/device/domain/entities/device_rea
 import 'package:remote_control_device/features/device/domain/realtime/device_realtime_signal.dart';
 import 'package:remote_control_device/features/device/domain/usecases/authenticate_device.dart';
 import 'package:remote_control_device/features/device/domain/usecases/check_device_status.dart';
-import 'package:remote_control_device/features/device/domain/usecases/clear_device_credentials.dart';
+import 'package:remote_control_device/features/device/domain/usecases/suspend_device_authorization.dart';
 import 'package:remote_control_device/features/device/domain/usecases/load_device_credentials.dart';
 import 'package:remote_control_device/features/device/domain/usecases/renew_device_token.dart';
 import 'package:remote_control_device/features/device/presentation/bloc/realtime/device_realtime_bloc.dart';
@@ -71,10 +71,7 @@ void main() {
       loadDeviceCredentials: loadDeviceCredentials,
       authenticateDevice: authenticateDevice,
       checkDeviceStatus: CheckDeviceStatus(authRepository),
-      clearDeviceCredentials: ClearDeviceCredentials(
-        credentialsStorage: storage,
-        authRepository: authRepository,
-      ),
+      suspendDeviceAuthorization: SuspendDeviceAuthorization(authRepository),
     );
     realtimeBloc = DeviceRealtimeBloc(
       client: client,
@@ -427,7 +424,7 @@ void main() {
     sessionBloc.add(const DeviceSessionCredentialRejected());
     await settle();
 
-    expect(sessionBloc.state, const DeviceSessionReEnrollmentRequired());
+    expect(sessionBloc.state, const DeviceSessionCredentialRefused());
     // A remote assistance session must never outlive the credential that
     // authorised it.
     expect(remoteSessionBloc.state, const RemoteSessionInitial());
@@ -460,13 +457,15 @@ void main() {
     expect(supportBloc.state, isA<SupportAccepted>());
 
     // What `AuthenticatedDeviceRequest` reports when the renewal login itself
-    // answers 401: the permanent credential is gone, whichever call found out.
+    // answers 401 DEVICE_CREDENTIAL_REJECTED, whichever call found out.
     credentialRevocation.report();
     await settle();
 
-    expect(sessionBloc.state, const DeviceSessionReEnrollmentRequired());
-    expect(storage.clearCount, 1);
-    // Nothing local survives an identity this installation no longer has.
+    expect(sessionBloc.state, const DeviceSessionCredentialRefused());
+    // The credential is kept; the authorisation is what goes.
+    expect(storage.clearCount, 0);
+    expect(storage.credentials, testCredentials);
+    // Nothing local survives an authorisation this installation no longer has.
     expect(remoteSessionBloc.state, const RemoteSessionInitial());
     expect(supportBloc.state, const SupportInitial());
     // And the socket is released rather than left reconnecting with a token

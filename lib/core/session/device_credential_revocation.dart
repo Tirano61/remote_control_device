@@ -1,20 +1,23 @@
 import 'dart:async';
 
 /// Single channel through which any authenticated exchange can report that the
-/// *permanent* credential — not merely the temporary Device JWT — is no longer
-/// accepted by the backend.
+/// *permanent* credential — not merely the temporary Device JWT — was refused
+/// by the backend: a renewal login answered `401 DEVICE_CREDENTIAL_REJECTED`.
 ///
 /// It exists so that the two places able to discover the fact reach the same
 /// consequence without either of them implementing it:
 ///
 /// ```text
-/// Socket.IO handshake refused ──> renew ──> 401 ─┐
-///                                               ├──> report() ──> the session
-/// authenticated REST call 401 ──> renew ──> 401 ─┘               wipes the
-///                                                                credential and
-///                                                                requires
-///                                                                re-enrollment
+/// Socket.IO handshake refused ──> renew ──> 401 + code ─┐
+///                                                      ├─> report() ──> the
+/// authenticated REST call 401 ──> renew ──> 401 + code ─┘   session withdraws
+///                                                           authorisation and
+///                                                           shows the rejection;
+///                                                           the credential stays
+///                                                           in secure storage
 /// ```
+///
+/// A `401` without the code, from any route, never reaches this channel.
 ///
 /// Nothing is carried on the wire: the fact itself is the whole message, and it
 /// deliberately does not say which call discovered it.
