@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:equatable/equatable.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:remote_control_device/core/async/timer_factory.dart';
 import 'package:remote_control_device/core/session/device_token_store.dart';
 import 'package:remote_control_device/features/device/domain/entities/device_realtime_confirmation.dart';
 import 'package:remote_control_device/features/device/domain/realtime/device_realtime_client.dart';
@@ -18,28 +20,62 @@ part 'device_realtime_state.dart';
 /// realtime channel is up right now. The application layer coordinates them;
 /// neither reaches into the other.
 ///
-/// The interesting part is what happens when a handshake is refused. The
-/// backend answers a single generic `Unauthorized` whether the Device JWT
-/// merely expired — which it will, after 24h, on a tablet left running — or the
-/// permanent credential was revoked. The two cannot be told apart from the
-/// socket, so the client asks the question that *can* be answered:
+/// ## When the transport cannot recover by itself
+///
+/// A lost transport is the package's to retry, with the same socket and the
+/// same token. Three things destroy the socket instead, and then only this bloc
+/// can open another one:
 ///
 /// ```text
-/// handshake refused
-///        ↓
-/// stop reconnecting with the refused token
-///        ↓
-/// POST /device-auth/login with deviceId + deviceSecret
-///        ├── 200 ──> new Device JWT ──> new socket ──> connected
-///        ├── 401 DEVICE_CREDENTIAL_REJECTED ──> the credential itself is
-///        │          refused ──> the session withdraws authorisation
-///        └── anything else (offline, 5xx, a 401 without the code)
-///                   ──> credential preserved ──> retry later
+/// handshake refused (Unauthorized)    expired JWT, deactivated device, revoked
+///                                     credential — or a backend that failed to
+///                                     check (a database error reads the same)
+/// io server disconnect                the backend withdrew the authorisation
+///                                     of an open socket
+/// other namespace refusal             anything else that destroyed the socket
 /// ```
 ///
-/// Exactly one such recovery is attempted per connection. If a *freshly issued*
-/// token is refused as well, re-authenticating again would only repeat the same
-/// exchange, so the client stops instead of spinning through logins.
+/// None of them proves anything about the permanent credential, so each one is
+/// answered the same way — ask the question that *can* be answered:
+///
+/// ```text
+/// release the socket
+///        ↓
+/// POST /device-auth/login with deviceId + deviceSecret
+///        ├── 200 ──> new Device JWT ──> new socket
+///        ├── 401 DEVICE_CREDENTIAL_REJECTED ──> stop; the session withdraws
+///        │          authorisation (the credential is kept, nothing retried)
+///        └── anything else ──> nothing learnt; retried after
+///                   [reauthRetryDelay]
+/// ```
+///
+/// ## Bounded, never terminal
+///
+/// The first recovery since the last stable connection runs at once — a JWT
+/// that merely expired after a day of uptime is renewed without delay. Every
+/// further one waits on [recoveryBackoff] (15 s, 30 s, 60 s, then 60 s for as
+/// long as it takes). The count only resets when a connection that had stayed
+/// up for at least [stableConnectionPeriod] is lost, so a backend that accepts
+/// and immediately drops the socket costs one login a minute, not one per drop.
+/// No timer runs while connected: stability is read off the clock when the
+/// connection ends.
+///
+/// It never gives up on its own: a freshly minted JWT refused twice in a row is
+/// what a database blip looks like from here, and it heals. The only thing that
+/// stops the channel is the session — a confirmed refusal, an explicit stop, a
+/// lost identity — or closing the bloc.
+///
+/// ## Generations
+///
+/// Every start, stop and close begins a new generation. Every asynchronous
+/// continuation — a login answer, a due timer — carries the generation that
+/// began it and does nothing if it is no longer the current one: it installs
+/// no socket, adopts no token, emits nothing and schedules nothing. Signals of
+/// a released socket never arrive at all (the client drops them), and anything
+/// arriving while no channel is wanted is ignored.
+///
+/// Logins are also serialised, across generations: a renewal never starts
+/// while another one is still waiting for its answer.
 class DeviceRealtimeBloc
     extends Bloc<DeviceRealtimeEvent, DeviceRealtimeState> {
   DeviceRealtimeBloc({
@@ -47,29 +83,57 @@ class DeviceRealtimeBloc
     required DeviceTokenStore tokenStore,
     required RenewDeviceToken renewDeviceToken,
     Duration reauthRetryDelay = const Duration(seconds: 15),
-  }) : _client = client,
+    List<Duration> recoveryBackoff = defaultRecoveryBackoff,
+    Duration stableConnectionPeriod = defaultStableConnectionPeriod,
+    TimerFactory timerFactory = systemTimerFactory,
+    DateTime Function() clock = DateTime.now,
+  }) : assert(recoveryBackoff.isNotEmpty, 'the backoff needs a step'),
+       _client = client,
        _tokenStore = tokenStore,
        _renewDeviceToken = renewDeviceToken,
        _reauthRetryDelay = reauthRetryDelay,
+       _recoveryBackoff = recoveryBackoff,
+       _stableConnectionPeriod = stableConnectionPeriod,
+       _timerFactory = timerFactory,
+       _clock = clock,
        super(const DeviceRealtimeDisconnected()) {
     on<DeviceRealtimeStartRequested>(_onStartRequested);
     on<DeviceRealtimeStopRequested>(_onStopRequested);
     on<_SignalReceived>(_onSignalReceived);
-    on<_ReauthRetryDue>(_onReauthRetryDue);
+    on<_RetryDue>(_onRetryDue);
 
     _signals = _client.signals.listen((signal) => add(_SignalReceived(signal)));
   }
+
+  /// Delays before the second, third, fourth... recovery since the last stable
+  /// connection. The last one repeats.
+  static const List<Duration> defaultRecoveryBackoff = [
+    Duration(seconds: 15),
+    Duration(seconds: 30),
+    Duration(seconds: 60),
+  ];
+
+  /// How long a connection must stay up before the next recovery runs at once
+  /// again.
+  static const Duration defaultStableConnectionPeriod = Duration(seconds: 30);
 
   final DeviceRealtimeClient _client;
   final DeviceTokenStore _tokenStore;
   final RenewDeviceToken _renewDeviceToken;
   final Duration _reauthRetryDelay;
+  final List<Duration> _recoveryBackoff;
+  final Duration _stableConnectionPeriod;
+  final TimerFactory _timerFactory;
+  final DateTime Function() _clock;
 
   late final StreamSubscription<DeviceRealtimeSignal> _signals;
 
+  /// See the class documentation. Never decreases.
+  int _generation = 0;
+
   /// Token the current socket was built with. `null` means no channel is
-  /// wanted, which is also what makes late signals from a released socket safe
-  /// to ignore. Never leaves this object.
+  /// wanted, which is also what makes late signals safe to ignore. Never
+  /// leaves this object.
   String? _activeToken;
 
   /// Whether a connection succeeded since the channel was last started. It is
@@ -77,16 +141,23 @@ class DeviceRealtimeBloc
   /// connection", which is the only thing the user actually needs told apart.
   bool _hasConnected = false;
 
-  /// Guards against concurrent logins when several handshake rejections arrive
-  /// close together.
+  /// A renewal of the current generation is waiting for its answer.
   bool _renewing = false;
 
-  /// Whether the token in use came from a renewal. Reset on every successful
-  /// connection, so the single-recovery budget is per connection, not per app
-  /// run.
-  bool _renewedSinceLastConnection = false;
+  /// Recoveries since the last stable connection; picks the next delay.
+  int _recoveries = 0;
 
-  Timer? _reauthRetry;
+  /// The one deferred retry, if any. Never more than one.
+  Timer? _retryTimer;
+
+  /// When the current connection came up; `null` while not connected. Read
+  /// when it is lost, to decide whether it counted as stable.
+  DateTime? _connectedSince;
+
+  /// Tail of the login queue: the next renewal starts only after it.
+  Future<void> _loginTail = Future<void>.value();
+
+  // ------------------------------------------------------------ lifecycle
 
   Future<void> _onStartRequested(
     DeviceRealtimeStartRequested event,
@@ -103,10 +174,10 @@ class DeviceRealtimeBloc
     // because the request was repeated.
     if (token == _activeToken && state is! DeviceRealtimeDisconnected) return;
 
-    _cancelReauthRetry();
+    _beginGeneration();
     _activeToken = token;
     _hasConnected = false;
-    _renewedSinceLastConnection = false;
+    _recoveries = 0;
     emit(const DeviceRealtimeConnecting());
     _client.connect(token);
   }
@@ -119,19 +190,21 @@ class DeviceRealtimeBloc
     _stop(emit, const DeviceRealtimeDisconnected());
   }
 
+  // -------------------------------------------------------------- signals
+
   Future<void> _onSignalReceived(
     _SignalReceived event,
     Emitter<DeviceRealtimeState> emit,
   ) async {
-    // Anything arriving after the channel was released belongs to a socket the
-    // app has already walked away from.
+    // Nothing is wanted: whatever this is, it belongs to a socket the app has
+    // already walked away from.
     if (_activeToken == null) return;
 
     switch (event.signal) {
       case RealtimeConnected():
         _hasConnected = true;
-        _renewedSinceLastConnection = false;
-        _cancelReauthRetry();
+        _cancelRetry();
+        _connectedSince = _clock();
         emit(const DeviceRealtimeConnected());
 
       case RealtimeIdentityConfirmed(:final confirmation):
@@ -149,63 +222,81 @@ class DeviceRealtimeBloc
         return;
 
       case RealtimeDisconnected():
-      case RealtimeConnectFailed():
+      case RealtimeConnectFailed(transportRetrying: true):
+        // The package retries this one itself, with the same socket.
+        _noteConnectionLost();
         emit(_failureState());
 
       case RealtimeReconnectAttempt():
         emit(_attemptState());
 
       case RealtimeHandshakeRejected():
-        await _recoverFromRejectedHandshake(emit);
+      case RealtimeServerDisconnected():
+      case RealtimeConnectFailed(transportRetrying: false):
+        // The socket is gone and nothing will open another one but this bloc.
+        _noteConnectionLost();
+        await _recover(emit);
     }
   }
 
-  Future<void> _onReauthRetryDue(
-    _ReauthRetryDue event,
-    Emitter<DeviceRealtimeState> emit,
-  ) async {
-    if (_activeToken == null) return;
-    await _renewAndReconnect(emit);
-  }
+  // ------------------------------------------------------------- recovery
 
-  Future<void> _recoverFromRejectedHandshake(
-    Emitter<DeviceRealtimeState> emit,
-  ) async {
-    if (_renewing) return;
+  /// Releases the dead socket and either renews at once or schedules the
+  /// renewal on the backoff. One recovery at a time: a login in flight or a
+  /// retry already scheduled will open the next socket.
+  Future<void> _recover(Emitter<DeviceRealtimeState> emit) async {
+    if (_renewing || _retryTimer != null) return;
 
-    if (_renewedSinceLastConnection) {
-      // The token this socket presented was minted moments ago and was refused
-      // anyway. Another login would return an equally fresh token and be
-      // refused in turn, so stop rather than loop.
-      _stop(emit, const DeviceRealtimeConnectionError(retrying: false));
+    // Stop presenting the refused token before asking for a new one, and never
+    // reuse a destroyed socket: the next one is built from scratch.
+    _client.disconnect();
+
+    final attempt = _recoveries++;
+    if (attempt == 0) {
+      await _renewAndReconnect(emit);
       return;
     }
+    final step = math.min(attempt - 1, _recoveryBackoff.length - 1);
+    _scheduleRetry(_recoveryBackoff[step]);
+    emit(_failureState());
+  }
 
+  Future<void> _onRetryDue(
+    _RetryDue event,
+    Emitter<DeviceRealtimeState> emit,
+  ) async {
+    // A timer of an earlier generation: stopped, restarted or closed since.
+    if (event.generation != _generation || _activeToken == null) return;
+    _retryTimer = null;
     await _renewAndReconnect(emit);
   }
 
   Future<void> _renewAndReconnect(Emitter<DeviceRealtimeState> emit) async {
+    final generation = _generation;
     _renewing = true;
-    _cancelReauthRetry();
-    // Stop presenting the refused token before asking for a new one: Socket.IO
-    // resends `auth` on every attempt and would keep failing on the old value.
-    _client.disconnect();
+    _cancelRetry();
     emit(_attemptState());
 
     try {
-      final renewal = await _renewDeviceToken();
-      if (_activeToken == null) return;
+      final renewal = await _renewSerially();
+      // Stopped, restarted or closed while the login was in flight: its answer
+      // installs nothing here. (A token it obtained was already written to the
+      // store by the repository; it is as valid as any other for the same
+      // credential, and the session decides what the store holds next.)
+      if (generation != _generation) return;
 
       switch (renewal) {
         case DeviceTokenRenewed(:final token):
           // The renewal already installed the token in the store; holding it
-          // here is only how the next signal is matched to this socket.
+          // here is only how a repeated start is told apart from a new one.
           _activeToken = token;
-          _renewedSinceLastConnection = true;
-          emit(_attemptState());
           _client.connect(token);
 
         case DeviceTokenRejected():
+          // Confirmed: the backend refused the permanent credential. Reported
+          // through the state; the coordinator hands it to the session, which
+          // withdraws authorisation and keeps the credential. Nothing here
+          // retries it.
           _stop(
             emit,
             const DeviceRealtimeDisconnected(
@@ -216,19 +307,38 @@ class DeviceRealtimeBloc
         case DeviceTokenRenewalUnavailable():
           // Nothing was learnt about the credential, so it stays where it is
           // and the attempt is repeated on a slow timer.
-          _scheduleReauthRetry();
+          _scheduleRetry(_reauthRetryDelay);
           emit(const DeviceRealtimeConnectionError());
       }
     } finally {
-      _renewing = false;
+      if (generation == _generation) _renewing = false;
     }
   }
 
+  Future<DeviceTokenRenewal> _renewSerially() {
+    final renewal = _loginTail.then((_) => _renewDeviceToken());
+    _loginTail = renewal.then<void>(
+      (_) {},
+      onError: (Object error, StackTrace stackTrace) {},
+    );
+    return renewal;
+  }
+
+  // ---------------------------------------------------------------- plumbing
+
+  /// Invalidates everything still pending from the previous generation.
+  void _beginGeneration() {
+    _generation++;
+    _renewing = false;
+    _cancelRetry();
+    _connectedSince = null;
+  }
+
   void _stop(Emitter<DeviceRealtimeState> emit, DeviceRealtimeState next) {
-    _cancelReauthRetry();
+    _beginGeneration();
     _activeToken = null;
     _hasConnected = false;
-    _renewedSinceLastConnection = false;
+    _recoveries = 0;
     _client.disconnect();
     emit(next);
   }
@@ -243,19 +353,33 @@ class DeviceRealtimeBloc
       ? const DeviceRealtimeReconnecting()
       : const DeviceRealtimeConnectionError();
 
-  void _scheduleReauthRetry() {
-    _reauthRetry?.cancel();
-    _reauthRetry = Timer(_reauthRetryDelay, () => add(const _ReauthRetryDue()));
+  void _scheduleRetry(Duration delay) {
+    _retryTimer?.cancel();
+    final generation = _generation;
+    _retryTimer = _timerFactory(delay, () {
+      if (!isClosed) add(_RetryDue(generation));
+    });
   }
 
-  void _cancelReauthRetry() {
-    _reauthRetry?.cancel();
-    _reauthRetry = null;
+  void _cancelRetry() {
+    _retryTimer?.cancel();
+    _retryTimer = null;
+  }
+
+  /// A connection that had stayed up for [_stableConnectionPeriod] earns the
+  /// next recovery an immediate start again.
+  void _noteConnectionLost() {
+    final since = _connectedSince;
+    _connectedSince = null;
+    if (since != null &&
+        _clock().difference(since) >= _stableConnectionPeriod) {
+      _recoveries = 0;
+    }
   }
 
   @override
   Future<void> close() async {
-    _cancelReauthRetry();
+    _beginGeneration();
     await _signals.cancel();
     await _client.dispose();
     return super.close();

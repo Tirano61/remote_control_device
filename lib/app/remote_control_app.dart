@@ -60,6 +60,9 @@ class _RemoteControlAppState extends State<RemoteControlApp> {
       tokenStore: dependencies.tokenStore,
       renewDeviceToken: dependencies.renewDeviceToken,
       reauthRetryDelay: dependencies.config.realtimeReauthRetryDelay,
+      recoveryBackoff: dependencies.config.realtimeRecoveryBackoff,
+      stableConnectionPeriod:
+          dependencies.config.realtimeStableConnectionPeriod,
     );
     _supportBloc = SupportBloc(
       requestSupport: dependencies.requestSupport,

@@ -22,6 +22,12 @@ class AppConfig {
     this.realtimeReconnectionDelay = const Duration(seconds: 2),
     this.realtimeReconnectionDelayMax = const Duration(seconds: 20),
     this.realtimeReauthRetryDelay = const Duration(seconds: 15),
+    this.realtimeRecoveryBackoff = const [
+      Duration(seconds: 15),
+      Duration(seconds: 30),
+      Duration(seconds: 60),
+    ],
+    this.realtimeStableConnectionPeriod = const Duration(seconds: 30),
     this.signalingAckTimeout = const Duration(seconds: 10),
   });
 
@@ -91,6 +97,18 @@ class AppConfig {
   /// Delay before retrying a Device JWT renewal that could not be completed
   /// because the backend was unreachable.
   final Duration realtimeReauthRetryDelay;
+
+  /// Delays before each further attempt to re-open a socket the transport
+  /// cannot recover by itself (a refused handshake, a server-initiated
+  /// disconnection), after the first one, which runs at once. The last step
+  /// repeats for as long as it takes; only a confirmed refusal of the
+  /// credential stops the attempts.
+  final List<Duration> realtimeRecoveryBackoff;
+
+  /// How long a connection must stay up before the next recovery is allowed
+  /// to run at once again. Bounds a backend that keeps accepting and dropping
+  /// the socket to one login per backoff step.
+  final Duration realtimeStableConnectionPeriod;
 
   /// How long to wait for a signaling ACK before treating it as unanswered.
   ///
