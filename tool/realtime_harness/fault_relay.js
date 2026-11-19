@@ -1,5 +1,5 @@
 /*
- * Fault relay for physical tests of the /devices recovery (Prompt 35).
+ * Fault relay for physical tests of the /devices recovery (Prompts 35–36).
  *
  * Sits between a tablet and a real backend it never modifies:
  *
@@ -9,8 +9,14 @@
  * port. The faults reproduce, byte for byte, what the backend itself would send:
  *
  *   rejectHandshakes n   the next n Socket.IO CONNECTs to /devices are answered
- *                        `44/devices,{"message":"Unauthorized"}` — the
- *                        namespace middleware's refusal — and not forwarded
+ *                        with the backend's DEVICE_AUTH_UNAUTHORIZED frame
+ *                        (REALTIME.md, "Wire format") and not forwarded
+ *   unavailableHandshakes n
+ *                        the same, with the DEVICE_AUTH_UNAVAILABLE frame the
+ *                        backend sends when its database fails
+ *   legacyRejectHandshakes n
+ *                        the same, with the bare `{"message":"Unauthorized"}`
+ *                        of a backend older than the codes
  *   serverDisconnect     every open /devices socket receives `41/devices,`
  *                        (the namespace DISCONNECT that DevicePresenceService
  *                        .disconnectDevice produces) and is closed
@@ -46,7 +52,20 @@ const REJECTION_BODY = JSON.stringify({
   error: 'Unauthorized',
 });
 
-const faults = { rejectHandshakes: 0, loginReject: false, cutUntil: 0 };
+// The exact CONNECT_ERROR frames of remote_control_backend (Prompt 33).
+const REFUSALS = {
+  rejectHandshakes: '44/devices,{"message":"Unauthorized","data":{"code":"DEVICE_AUTH_UNAUTHORIZED"}}',
+  unavailableHandshakes: '44/devices,{"message":"Service unavailable","data":{"code":"DEVICE_AUTH_UNAVAILABLE"}}',
+  legacyRejectHandshakes: '44/devices,{"message":"Unauthorized"}',
+};
+
+const faults = {
+  rejectHandshakes: 0,
+  unavailableHandshakes: 0,
+  legacyRejectHandshakes: 0,
+  loginReject: false,
+  cutUntil: 0,
+};
 const events = [];
 const t0 = Date.now();
 const log = (e) => {
@@ -182,10 +201,11 @@ function relayWebSocket(req, client) {
         /* no auth object */
       }
       pair.token = label(token);
-      if (faults.rejectHandshakes > 0) {
-        faults.rejectHandshakes--;
-        client.send('44/devices,{"message":"Unauthorized"}');
-        log({ ev: 'handshake', token: pair.token, result: 'refused by relay (Unauthorized)', left: faults.rejectHandshakes });
+      const fault = Object.keys(REFUSALS).find((k) => faults[k] > 0);
+      if (fault) {
+        faults[fault]--;
+        client.send(REFUSALS[fault]);
+        log({ ev: 'handshake', token: pair.token, result: `refused by relay (${fault})`, left: faults[fault] });
         return; // never reaches the backend
       }
     }
@@ -218,7 +238,7 @@ http
         const cmd = body ? JSON.parse(body) : {};
         if (req.url === '/log') return reply(200, { events, faults, openDeviceSockets: deviceSockets.size });
         if (req.url !== '/ctl') return reply(404, {});
-        if (typeof cmd.rejectHandshakes === 'number') faults.rejectHandshakes = cmd.rejectHandshakes;
+        for (const k of Object.keys(REFUSALS)) if (typeof cmd[k] === 'number') faults[k] = cmd[k];
         if (typeof cmd.loginReject === 'boolean') faults.loginReject = cmd.loginReject;
         if (typeof cmd.cutMs === 'number') {
           faults.cutUntil = Date.now() + cmd.cutMs;

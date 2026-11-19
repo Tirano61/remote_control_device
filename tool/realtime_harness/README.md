@@ -19,7 +19,17 @@ token itself.
 ## Run
 
 It needs the sibling checkout `../remote_control_backend` with its
-`node_modules` installed. Set `BACKEND_SRC` to use another location.
+`node_modules` installed. Set `BACKEND_SRC` to use another location. When
+that checkout is being served by `nest start --watch`, prefer an exported
+copy, which nothing watches:
+
+```bash
+git -C ../remote_control_backend archive main src tsconfig.json | tar -x -C /tmp/be
+BACKEND_SRC=/tmp/be/src TS_NODE_PROJECT=/tmp/be/tsconfig.json ...
+```
+
+Each `handshake` entry of `/log` carries `code`: the `data.code` the
+backend's own `classifyHandshakeFailure` gives that failure.
 
 ```bash
 BE=../remote_control_backend
@@ -40,9 +50,9 @@ Without `REALTIME_HARNESS=1` the integration test is skipped, so a plain
 
 | Field | Effect |
 |---|---|
-| `rejectHandshakes: n` | the next *n* handshakes are refused by the auth step (`connect_error: Unauthorized`) |
-| `dbFailHandshakes: n` | the next *n* handshakes hit a simulated PostgreSQL error inside the real `authorizePayload` |
-| `dbDown: bool` | every repository call fails, so login answers `500` and the handshake answers `Unauthorized` |
+| `rejectHandshakes: n` | the next *n* handshakes are refused by the auth step with an `UnauthorizedException`, so the gateway answers `DEVICE_AUTH_UNAUTHORIZED` |
+| `dbFailHandshakes: n` | the next *n* handshakes hit a simulated PostgreSQL error inside the real `authorizePayload`, so the gateway answers `DEVICE_AUTH_UNAVAILABLE` |
+| `dbDown: bool` | every repository call fails, so login answers `500` and the handshake answers `DEVICE_AUTH_UNAVAILABLE` (an expired token is still `DEVICE_AUTH_UNAUTHORIZED`: expiry is checked first) |
 | `tokenTtlSeconds: s \| null` | expiry of the tokens issued from now on |
 | `cutMs: ms` | drops every relayed connection and refuses new ones for *ms* |
 | `setActive: bool` | `DevicesService.update(isActive)`, the real admin path; deactivating closes the sockets (`io server disconnect`) |
@@ -63,7 +73,9 @@ backend itself sends:
 
 | Field | Effect |
 |---|---|
-| `rejectHandshakes: n` | the next *n* `/devices` CONNECTs get `44/devices,{"message":"Unauthorized"}` and are not forwarded |
+| `rejectHandshakes: n` | the next *n* `/devices` CONNECTs get the `DEVICE_AUTH_UNAUTHORIZED` frame and are not forwarded |
+| `unavailableHandshakes: n` | the same with the `DEVICE_AUTH_UNAVAILABLE` frame |
+| `legacyRejectHandshakes: n` | the same with the bare `{"message":"Unauthorized"}` of a backend older than the codes |
 | `serverDisconnect: true` | every open `/devices` socket gets `41/devices,` (namespace DISCONNECT) and is closed |
 | `loginReject: bool` | `POST /device-auth/login` gets the exact `401 DEVICE_CREDENTIAL_REJECTED` body without reaching the backend, so nothing in the database changes |
 | `cutMs: ms` | drops every relayed connection and refuses new ones |
