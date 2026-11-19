@@ -1,5 +1,5 @@
 /*
- * Isolated backend for the /devices reconnection tests (Prompts 34–35).
+ * Isolated backend for the /devices reconnection tests (Prompts 34–36).
  * See tool/realtime_harness/README.md for how to run it.
  *
  * Real remote_control_backend code (DevicesGateway + its namespace middleware,
@@ -11,7 +11,7 @@
  *   127.0.0.1:3101  Nest app (HTTP + Socket.IO)
  *   127.0.0.1:3102  control API (POST /ctl, GET /log, POST /reset)
  */
-import { ValidationPipe, INestApplication, Logger } from '@nestjs/common';
+import { ValidationPipe, INestApplication, Logger, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtModule, JwtService } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
@@ -35,6 +35,7 @@ const { DevicesService } = require(`${B}/devices/devices.service`);
 const { DevicePresenceService } = require(`${B}/devices/presence/device-presence.service`);
 const { DeviceRealtimeService } = require(`${B}/devices/realtime/device-realtime.service`);
 const { DevicesGateway } = require(`${B}/devices/gateway/devices.gateway`);
+const { classifyHandshakeFailure } = require(`${B}/devices/gateway/device-handshake-error`);
 const { SignalingService } = require(`${B}/signaling/signaling.service`);
 const { SessionParticipationService } = require(`${B}/signaling/participation/session-participation.service`);
 const { SignalingRealtimeService } = require(`${B}/signaling/realtime/signaling-realtime.service`);
@@ -65,9 +66,9 @@ class SimulatedDbError extends Error {
 }
 
 interface Faults {
-  rejectHandshakes: number; // next N handshakes refused by the auth step
-  dbFailHandshakes: number; // next N handshakes hit a DB error inside authorizePayload
-  dbDown: boolean; // every repository call fails (login -> 500, handshake -> Unauthorized)
+  rejectHandshakes: number; // next N handshakes refused by the auth step (UnauthorizedException -> DEVICE_AUTH_UNAUTHORIZED)
+  dbFailHandshakes: number; // next N handshakes hit a DB error inside authorizePayload (-> DEVICE_AUTH_UNAVAILABLE)
+  dbDown: boolean; // every repository call fails (login -> 500, handshake -> DEVICE_AUTH_UNAVAILABLE)
   tokenTtlSeconds: number | null; // expiry of the next issued tokens
   cutUntil: number; // relay refuses / drops connections until this epoch ms
 }
@@ -223,8 +224,12 @@ async function main() {
     const label = tokenLabel(token);
     if (faults.rejectHandshakes > 0) {
       faults.rejectHandshakes--;
-      log({ ev: 'handshake', token: label, result: 'rejected (injected)' });
-      throw new Error('injected rejection');
+      // An authentic refusal, the way DeviceAuthService raises one, so the
+      // gateway answers DEVICE_AUTH_UNAUTHORIZED. Anything else would be
+      // classified DEVICE_AUTH_UNAVAILABLE by the backend (Prompt 33).
+      const refusal = new UnauthorizedException();
+      log({ ev: 'handshake', token: label, result: 'rejected (injected)', code: classifyHandshakeFailure(refusal).code });
+      throw refusal;
     }
     const dbFail = faults.dbFailHandshakes > 0;
     if (dbFail) faults.dbFailHandshakes--;
@@ -234,7 +239,14 @@ async function main() {
       log({ ev: 'handshake', token: label, result: 'accepted' });
       return r;
     } catch (e: any) {
-      log({ ev: 'handshake', token: label, result: `rejected (${e?.name ?? 'Error'}: ${e?.message})` });
+      // `code` is what the gateway's own classifier turns this into, i.e. the
+      // data.code of the connect_error the client receives.
+      log({
+        ev: 'handshake',
+        token: label,
+        result: `rejected (${e?.name ?? 'Error'}: ${e?.message})`,
+        code: classifyHandshakeFailure(e).code,
+      });
       throw e;
     } finally {
       handshakeFaultScope = false;

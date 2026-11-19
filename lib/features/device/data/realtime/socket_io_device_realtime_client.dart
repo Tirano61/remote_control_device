@@ -242,17 +242,26 @@ class SocketIoDeviceRealtimeClient implements DeviceRealtimeChannel {
         if (stale()) return;
         // Only the classification is logged. The raw error may carry the
         // handshake it failed on, and with it the Authorization payload.
-        if (isUnauthorizedHandshakeError(error)) {
-          _log('handshake rejected by the namespace');
-          _emit(const RealtimeHandshakeRejected());
-        } else if (socket.active) {
-          _log('connection attempt failed; the transport will retry');
-          _emit(const RealtimeConnectFailed());
-        } else {
-          // A namespace-level refusal with some other message: the package
-          // destroyed the socket, exactly as it does for `Unauthorized`.
-          _log('connection refused; the transport will not retry');
-          _emit(const RealtimeConnectFailed(transportRetrying: false));
+        switch (classifyHandshakeError(error)) {
+          case HandshakeErrorKind.unauthorized:
+            _log('handshake rejected by the namespace (unauthorized)');
+            _emit(const RealtimeHandshakeRejected());
+          case HandshakeErrorKind.legacyUnauthorized:
+            _log('handshake rejected by the namespace (no code)');
+            _emit(const RealtimeHandshakeRejected());
+          case HandshakeErrorKind.unavailable:
+            _log('handshake refused: the backend could not check the token');
+            _emit(const RealtimeHandshakeUnavailable());
+          case HandshakeErrorKind.unrecognized when socket.active:
+            _log('connection attempt failed; the transport will retry');
+            _emit(const RealtimeConnectFailed());
+          case HandshakeErrorKind.unrecognized:
+            // A namespace-level refusal this client cannot read: an unknown
+            // code, a malformed body, another message. The package destroyed
+            // the socket, exactly as it does for the documented refusals.
+            _log('connection refused (unrecognised); the transport will not '
+                'retry');
+            _emit(const RealtimeConnectFailed(transportRetrying: false));
         }
       }),
       socket.onReconnectAttempt((_) {

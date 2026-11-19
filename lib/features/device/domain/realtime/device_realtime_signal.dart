@@ -155,9 +155,10 @@ final class RealtimeReconnectAttempt extends DeviceRealtimeSignal {
   const RealtimeReconnectAttempt();
 }
 
-/// A connection attempt failed for a reason other than the documented
-/// `Unauthorized`: no network, DNS, timeout, backend down — or a namespace
-/// refusal with some other message. The credential is not implicated.
+/// A connection attempt failed for a reason that is not one of the documented
+/// refusals: no network, DNS, timeout, backend down — or a namespace refusal
+/// with an unknown code, a malformed body or some other message. The credential
+/// is not implicated.
 final class RealtimeConnectFailed extends DeviceRealtimeSignal {
   const RealtimeConnectFailed({this.transportRetrying = true});
 
@@ -170,17 +171,33 @@ final class RealtimeConnectFailed extends DeviceRealtimeSignal {
   List<Object?> get props => [transportRetrying];
 }
 
-/// The namespace middleware refused the handshake.
+/// The namespace middleware checked the token and refused it
+/// (`DEVICE_AUTH_UNAUTHORIZED`, or the bare `Unauthorized` of a backend older
+/// than the codes).
 ///
 /// REALTIME.md makes every rejection reason indistinguishable — expired token,
-/// deactivated device and revoked credential all answer the same generic
-/// `Unauthorized` — so this signal only means "the token presented was not
-/// accepted". Whether the credential itself is refused can only be established
-/// by asking `POST /device-auth/login` with it, and only a `401` carrying
+/// deactivated device and revoked credential all answer the same — so this
+/// signal only means "the token presented was not accepted". Whether the
+/// credential itself is refused can only be established by asking
+/// `POST /device-auth/login` with it, and only a `401` carrying
 /// `DEVICE_CREDENTIAL_REJECTED` there says so.
 ///
 /// The transport does **not** retry by itself after this: a namespace
 /// rejection destroys the socket.
 final class RealtimeHandshakeRejected extends DeviceRealtimeSignal {
   const RealtimeHandshakeRejected();
+}
+
+/// The namespace middleware could not check the token
+/// (`DEVICE_AUTH_UNAVAILABLE`): the backend's database failed.
+///
+/// It says nothing about the token. It is not accepted — the handshake was
+/// refused and no socket exists — and it is not refused either: the same token
+/// may be accepted once the backend recovers, while a renewal would only reach
+/// the same broken database. So the token is kept and presented again later.
+/// It authorises nothing in the meantime.
+///
+/// Like [RealtimeHandshakeRejected], it destroys the socket.
+final class RealtimeHandshakeUnavailable extends DeviceRealtimeSignal {
+  const RealtimeHandshakeUnavailable();
 }

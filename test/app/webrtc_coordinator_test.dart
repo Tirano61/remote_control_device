@@ -6,6 +6,7 @@ import 'package:remote_control_device/app/remote_session_coordinator.dart';
 import 'package:remote_control_device/app/signaling_coordinator.dart';
 import 'package:remote_control_device/app/support_coordinator.dart';
 import 'package:remote_control_device/app/webrtc_coordinator.dart';
+import 'package:remote_control_device/core/result/result.dart';
 import 'package:remote_control_device/core/session/device_credential_revocation.dart';
 import 'package:remote_control_device/core/session/device_token_store.dart';
 import 'package:remote_control_device/features/device/domain/realtime/device_realtime_signal.dart';
@@ -18,6 +19,7 @@ import 'package:remote_control_device/features/device/presentation/bloc/realtime
 import 'package:remote_control_device/features/device/presentation/bloc/session/device_session_bloc.dart';
 import 'package:remote_control_device/features/remote_control/domain/entities/remote_control_ack.dart';
 import 'package:remote_control_device/features/remote_control/domain/entities/remote_control_error.dart';
+import 'package:remote_control_device/features/remote_session/domain/entities/remote_session.dart';
 import 'package:remote_control_device/features/remote_session/domain/usecases/close_remote_session.dart';
 import 'package:remote_control_device/features/remote_session/domain/usecases/load_current_remote_session.dart';
 import 'package:remote_control_device/features/remote_session/presentation/bloc/remote_session/remote_session_bloc.dart';
@@ -839,6 +841,82 @@ void main() {
       await settle();
       // The gesture sent while suspended stays dropped; the new one runs.
       expect(accessibility.taps, [(0.5, 0.5)]);
+    });
+
+    test('P36 20: DEVICE_AUTH_UNAVAILABLE suspends control at once, costs no '
+        'login and leaves the session READY', () async {
+      final (peer, channel) = await reachActive();
+      final loginsBefore = authRepository.loginCount;
+
+      await client.emit(const RealtimeHandshakeUnavailable());
+      await settle();
+
+      expect(sessionBloc.state, const DeviceSessionReady(testIdentity));
+      expect(realtimeBloc.state, isNot(isA<DeviceRealtimeConnected>()));
+      final suspended = remoteSessionBloc.state;
+      expect(suspended, isA<RemoteSessionActive>());
+      expect((suspended as RemoteSessionActive).isSuspended, isTrue);
+      channel.pushTap('t-suspended');
+      await settle();
+      expect(accessibility.taps, isEmpty);
+      // The token is kept, not renewed, and nothing about the identity moved.
+      expect(authRepository.loginCount, loginsBefore);
+      expect(tokenStore.token, testDeviceJwt);
+      expect(storage.clearCount, 0);
+      expect(peer.isClosed, isFalse, reason: 'the grace period decides');
+    });
+
+    test('P36 18: after UNAVAILABLE, control comes back only once the read '
+        'after the reconnection confirms ACTIVE', () async {
+      final (_, channel) = await reachActive();
+
+      await client.emit(const RealtimeHandshakeUnavailable());
+      await settle();
+      final readsBefore = remoteSessionRepository.currentCount;
+
+      // The new socket with the same JWT is accepted; the read is on the wire.
+      remoteSessionRepository.currentResult = activatedRemoteSession;
+      remoteSessionRepository.currentGate = Completer<void>();
+      await client.emit(const RealtimeConnected());
+      await settle();
+      expect(remoteSessionRepository.currentCount, greaterThan(readsBefore));
+      expect(
+        (remoteSessionBloc.state as RemoteSessionActive).isSuspended,
+        isTrue,
+        reason: 'a handshake alone authorises nothing',
+      );
+      channel.pushTap('t-before-read');
+      await settle();
+      expect(accessibility.taps, isEmpty);
+
+      remoteSessionRepository.currentGate!.complete();
+      await settle();
+      final live = remoteSessionBloc.state;
+      expect(live, isA<RemoteSessionActive>());
+      expect((live as RemoteSessionActive).isSuspended, isFalse);
+      channel.pushTap('t-confirmed');
+      await settle();
+      expect(accessibility.taps, [(0.5, 0.5)]);
+    });
+
+    test('P36 19: after UNAVAILABLE, a session the backend CLOSED meanwhile is '
+        'not recovered', () async {
+      final (peer, channel) = await reachActive();
+
+      await client.emit(const RealtimeHandshakeUnavailable());
+      await settle();
+      remoteSessionRepository.currentResult = const Ok<RemoteSession?>(
+        closedSession,
+      );
+      await client.emit(const RealtimeConnected());
+      await settle();
+
+      expect(remoteSessionBloc.state, isNot(isA<RemoteSessionLive>()));
+      expect(peer.isClosed, isTrue);
+      expect(screenCapture.isActive, isFalse);
+      channel.pushTap('t-after');
+      await settle();
+      expect(accessibility.taps, isEmpty);
     });
   });
 }

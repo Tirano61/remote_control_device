@@ -1,5 +1,5 @@
 // The /devices recovery end to end, against the isolated harness in
-// tool/realtime_harness (Prompts 34–35).
+// tool/realtime_harness (Prompts 34–36).
 //
 // Real HTTP client, real SocketIoDeviceRealtimeClient (socket_io_client), real
 // DeviceSessionBloc + DeviceRealtimeBloc + DeviceRealtimeCoordinator, against
@@ -57,6 +57,12 @@ Future<bool> _online() async => (await _ctl('/log'))['online'] as bool;
 List<String> _handshakes(List<Map<String, dynamic>> e) => [
   for (final x in e)
     if (x['ev'] == 'handshake') '${x['token']}:${x['result']}',
+];
+
+/// The data.code each refused handshake was answered with, in order.
+List<String> _refusalCodes(List<Map<String, dynamic>> e) => [
+  for (final x in e)
+    if (x['ev'] == 'handshake' && x['code'] != null) '${x['code']}',
 ];
 
 List<String> _logins(List<Map<String, dynamic>> e) => [
@@ -283,35 +289,123 @@ void main() {
       expect(rig.session.state, isA<DeviceSessionReady>());
     }, timeout: const Timeout(Duration(seconds: 60)));
 
-    test('E1. a PostgreSQL error in two handshakes reads as Unauthorized; '
-        'recovered when it passes', () async {
+    test('E1. a PostgreSQL error in two handshakes is DEVICE_AUTH_UNAVAILABLE: '
+        'no login, the same JWT is presented again and accepted', () async {
       rig.start();
       await rig.waitConnections(1, 'first connection');
       await _ctl('/ctl', {'dbFailHandshakes': 2, 'cutMs': 100});
       await rig.waitConnections(2, 'recovered');
-      final hs = _handshakes(await _events());
-      expect(hs[1], startsWith('tok#1:rejected (QueryFailedError'));
-      expect(hs[2], startsWith('tok#2:rejected (QueryFailedError'));
-      expect(hs.last, endsWith(':accepted'));
+      final e = await _events();
+      expect(_handshakes(e), [
+        'tok#1:accepted',
+        startsWith('tok#1:rejected (QueryFailedError'),
+        startsWith('tok#1:rejected (QueryFailedError'),
+        'tok#1:accepted',
+      ]);
+      expect(_refusalCodes(e), [
+        'DEVICE_AUTH_UNAVAILABLE',
+        'DEVICE_AUTH_UNAVAILABLE',
+      ]);
+      expect(_logins(e), ['200'], reason: 'no renewal for an unavailable check');
       expect(rig.session.state, isA<DeviceSessionReady>());
+      expect(rig.tokenStore.token, isNotNull);
       expect(rig.storage.clearCount, 0);
       expect(await _online(), isTrue);
     }, timeout: const Timeout(Duration(seconds: 60)));
 
-    test('E2. PostgreSQL down for a while: login 500, retried, recovered',
-        () async {
+    test('E2. PostgreSQL down for a while: never Connected, no login, and the '
+        'same JWT reconnects once it is back', () async {
       rig.start();
       await rig.waitConnections(1, 'first connection');
       await _ctl('/ctl', {'dbDown': true, 'cutMs': 100});
       await _sleep(4000);
       expect(rig.realtime.state, isNot(isA<DeviceRealtimeConnected>()));
+      expect(await _online(), isFalse);
       expect(rig.session.state, isA<DeviceSessionReady>());
       await _ctl('/ctl', {'dbDown': false});
       await rig.waitConnections(2, 'recovered');
       final e = await _events();
-      expect(_logins(e).where((l) => l == '500'), isNotEmpty);
+      expect(_logins(e), ['200']);
+      expect(_refusalCodes(e), isNotEmpty);
+      expect(_refusalCodes(e).toSet(), {'DEVICE_AUTH_UNAVAILABLE'});
+      expect(_handshakes(e).every((h) => h.startsWith('tok#1:')), isTrue);
       expect(rig.storage.clearCount, 0);
       expect(await _online(), isTrue);
+    }, timeout: const Timeout(Duration(seconds: 60)));
+
+    test('E3. UNAVAILABLE on the very first handshakes: the JWT of the startup '
+        'login is kept and accepted later', () async {
+      await _ctl('/ctl', {'dbFailHandshakes': 2});
+      rig.start();
+      await rig.waitConnections(1, 'connected');
+      final e = await _events();
+      expect(_logins(e), ['200']);
+      expect(_refusalCodes(e), [
+        'DEVICE_AUTH_UNAVAILABLE',
+        'DEVICE_AUTH_UNAVAILABLE',
+      ]);
+      expect(_handshakes(e).last, 'tok#1:accepted');
+      // Spaced by the backoff (1 s, then 2 s), never at once.
+      final times = [
+        for (final x in e)
+          if (x['ev'] == 'handshake') x['t'] as int,
+      ];
+      expect(times[1] - times[0], greaterThanOrEqualTo(900));
+      expect(times[2] - times[1], greaterThanOrEqualTo(1900));
+    }, timeout: const Timeout(Duration(seconds: 60)));
+
+    test('E4. the JWT expires while the database is down: the attempt after '
+        'expiry is DEVICE_AUTH_UNAUTHORIZED, renewed once the login works',
+        () async {
+      await _ctl('/ctl', {'tokenTtlSeconds': 3});
+      rig.start();
+      await rig.waitConnections(1, 'first connection');
+      await _ctl('/ctl', {'tokenTtlSeconds': null, 'dbDown': true, 'cutMs': 100});
+      await _sleep(6000); // tok#1 expires during the backoff
+      var e = await _events();
+      expect(_refusalCodes(e), contains('DEVICE_AUTH_UNAUTHORIZED'));
+      expect(_logins(e), contains('500'), reason: 'renewal tried, db down');
+      expect(rig.realtime.state, isNot(isA<DeviceRealtimeConnected>()));
+      await _ctl('/ctl', {'dbDown': false});
+      await rig.waitConnections(2, 'recovered');
+      e = await _events();
+      expect(_logins(e).last, '200');
+      expect(_handshakes(e).last, 'tok#2:accepted');
+      // Not trapped on the expired token: once refused it is never presented
+      // again.
+      final hs = _handshakes(e);
+      final firstRefusal = hs.indexWhere(
+        (h) => h.startsWith('tok#1:rejected (UnauthorizedException'),
+      );
+      expect(firstRefusal, isNonNegative);
+      expect(
+        hs.skip(firstRefusal + 1).where((h) => h.startsWith('tok#1:')),
+        isEmpty,
+      );
+      expect(rig.storage.clearCount, 0);
+      expect(await _online(), isTrue);
+    }, timeout: const Timeout(Duration(seconds: 60)));
+
+    test('E5. UNAVAILABLE then UNAUTHORIZED: one renewal, then connected',
+        () async {
+      rig.start();
+      await rig.waitConnections(1, 'first connection');
+      await _ctl('/ctl', {'dbFailHandshakes': 1, 'cutMs': 100});
+      // The UNAVAILABLE retry waits 1 s; arm the refusal for that attempt.
+      final deadline = DateTime.now().add(const Duration(seconds: 10));
+      while (!_refusalCodes(await _events()).contains('DEVICE_AUTH_UNAVAILABLE')) {
+        if (DateTime.now().isAfter(deadline)) fail('no UNAVAILABLE refusal');
+        await _sleep(50);
+      }
+      await _ctl('/ctl', {'rejectHandshakes': 1});
+      await rig.waitConnections(2, 'recovered');
+      final e = await _events();
+      expect(_refusalCodes(e), [
+        'DEVICE_AUTH_UNAVAILABLE',
+        'DEVICE_AUTH_UNAUTHORIZED',
+      ]);
+      expect(_logins(e), ['200', '200']);
+      expect(_handshakes(e).last, 'tok#2:accepted');
     }, timeout: const Timeout(Duration(seconds: 60)));
 
     test('F1. deactivation (admin PATCH, io server disconnect): '

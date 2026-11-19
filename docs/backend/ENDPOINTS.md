@@ -123,6 +123,10 @@ DEVICE_CREDENTIAL_REJECTED   401     POST /device-auth/login
 This is the only application error code the REST API emits today. Every other
 error response has no `code` field.
 
+The `/devices` Socket.IO handshake has its own codes (`DEVICE_AUTH_UNAUTHORIZED`,
+`DEVICE_AUTH_UNAVAILABLE`), carried in `connect_error`, not in an HTTP body. They
+are documented in [REALTIME.md](REALTIME.md#handshake-errors).
+
 `DEVICE_CREDENTIAL_REJECTED` means the backend looked up the presented device
 credential and refused it. See [POST /device-auth/login](#post-device-authlogin)
 for exactly when it is sent and when it is not.
@@ -467,6 +471,11 @@ Presence is held in memory by the backend instance that serves the request, so
 with more than one instance a device connected elsewhere would read as
 `isOnline: false`. Single-instance deployment is the current assumption.
 
+Every change of a device's `isOnline` is announced on `/technicians` with
+`device:presence-updated` (payload `{ deviceId }` only), so a console that shows
+this list re-reads it on that event — see [REALTIME.md](REALTIME.md). The event
+is only a trigger: this response is the source of truth.
+
 ## GET /devices/:id
 
 ```text
@@ -549,7 +558,9 @@ Errors:
 Notes:
 Setting `isActive: false` immediately **force-closes every open Socket.IO
 connection** of that device, so it also becomes `isOnline: false`. Authorization
-is not left to expire with the Device JWT.
+is not left to expire with the Device JWT. If the device was online, the
+technicians receive one `device:presence-updated` — see
+[REALTIME.md](REALTIME.md).
 
 A deactivated device also stops passing `@DeviceAuth()`, so all its REST calls
 start failing with `401`.
@@ -904,6 +915,11 @@ A device may have only one support request in an active state (`WAITING`,
 in PostgreSQL, not by a prior read, so two simultaneous requests cannot both
 succeed.
 
+After the request is stored, every technician and admin connected to
+`/technicians` receives `support-request:queue-updated` over Socket.IO — see
+[REALTIME.md](REALTIME.md). A `409` emits nothing. Delivery is best-effort and
+never alters this response.
+
 ## GET /support-requests/current
 
 ```text
@@ -1002,6 +1018,10 @@ Notes:
 `ACCEPTED` only means the user authorized that technician. It does **not** create
 a remote session; the technician still has to call `POST /remote-sessions`.
 
+After the change is committed, the assigned technician receives
+`support-request:updated` over Socket.IO — see [REALTIME.md](REALTIME.md).
+Delivery is best-effort and never alters this response.
+
 ## POST /support-requests/:id/reject
 
 ```text
@@ -1035,6 +1055,11 @@ Errors:
 404 — The request does not exist, or belongs to another device.
 409 — The request is not in ASSIGNED.
 ```
+
+Notes:
+After the change is committed, the assigned technician receives
+`support-request:updated` over Socket.IO — see [REALTIME.md](REALTIME.md).
+Delivery is best-effort and never alters this response.
 
 ## POST /support-requests/:id/cancel
 
@@ -1079,6 +1104,13 @@ the status code, so the client should re-read state
 (`GET /support-requests/current`, `GET /device/remote-sessions/current`) rather
 than parse the message.
 
+When the request already had an assigned technician (`ASSIGNED` or `ACCEPTED`),
+that technician receives `support-request:updated` over Socket.IO after the
+commit — see [REALTIME.md](REALTIME.md). Cancelling a `WAITING` request has no
+owner to notify; instead every technician and admin connected to `/technicians`
+receives `support-request:queue-updated`, because the waiting queue changed.
+Delivery is best-effort and never alters this response.
+
 ---
 
 # Support requests — Web
@@ -1097,7 +1129,9 @@ User JWT — roles: `admin`, `tecnico`.
 
 Description:
 Support request queue, oldest first (`createdAt ASC`), so the longest-waiting
-request is on top. Each row carries the device and its realtime `isOnline`.
+request is on top. Each row carries the device and its realtime `isOnline`;
+when it changes, `device:presence-updated` is emitted on `/technicians` — see
+[REALTIME.md](REALTIME.md).
 
 Query params:
 
@@ -1225,6 +1259,12 @@ On success the backend emits `support:assigned` to the device over Socket.IO.
 Delivery is best-effort: if the tablet dropped in between, the assignment is
 still valid and the tablet picks it up with `GET /support-requests/current`.
 
+On success the backend also emits `support-request:queue-updated` to every
+technician and admin connected to `/technicians`, including the caller, so other
+consoles drop the request from their waiting list — see
+[REALTIME.md](REALTIME.md). A failed assignment (`404`, `409`) emits neither
+event. Delivery is best-effort and never alters this response.
+
 ---
 
 # Remote sessions — Device
@@ -1291,6 +1331,14 @@ Notes:
 "Live" means `status` is `CONNECTING` or `ACTIVE`. A `CLOSED` session is never
 returned here.
 
+The backend may close a session on its own (`endedBy: "SYSTEM"`) — when a side
+stays away from it longer than the grace period, or when it never becomes
+`ACTIVE` — see the automatic close in [REALTIME.md](REALTIME.md). The
+`remote-session:closed` event for such a close is lost if the tablet was
+disconnected, so this endpoint is how it finds out: read it after every
+reconnection, and when it answers `remoteSession: null` for a session the
+tablet believed live, stop the capture and the peer connection.
+
 A session is born `CONNECTING` with `connectedAt: null` and becomes `ACTIVE`
 with `connectedAt` set when the technician reports the remote connection through
 `POST /remote-sessions/:id/activate`. Signaling does not change the session
@@ -1330,7 +1378,8 @@ Errors:
 400 — id is not a valid UUID.
 401 — Not authenticated as a device.
 404 — The session does not exist, or belongs to another device.
-409 — The session is already closed, or its support request is not in a state
+409 — The session is already closed (by the technician, by the device or
+      automatically by the backend), or its support request is not in a state
       that can be completed.
 ```
 
@@ -1338,9 +1387,10 @@ Notes:
 Closing the session also closes the support request. The two updates are
 committed together: a `CLOSED` session with an `ACCEPTED` request cannot remain.
 
-If the technician and the device close at the same instant, only one wins; the
-other receives `409`, and the recorded `endedBy` / `endedAt` are those of the
-first.
+If the technician, the device and the backend's automatic close happen at the
+same instant, only one wins; the others receive `409` (or, for the backend, do
+nothing), and the recorded `endedBy` / `endedAt` are those of the first. For the
+tablet a `409` here means "already over": the local session must end anyway.
 
 The device does **not** receive `remote-session:closed` for its own close — the
 closing side already has the closed session in this HTTP response.
@@ -1451,6 +1501,12 @@ On success the backend emits `remote-session:created` to the device over
 Socket.IO, after the transaction commits. Delivery is best-effort; the tablet can
 always recover with `GET /device/remote-sessions/current`.
 
+The new session has a deadline: if it is not `ACTIVE` within
+`REMOTE_SESSION_CONNECTING_TTL_MS` (120 s by default) of `createdAt`, the backend
+closes it with `endedBy: "SYSTEM"` and the support request becomes `COMPLETED`.
+Signaling does not extend it. See the automatic close in
+[REALTIME.md](REALTIME.md).
+
 ## GET /remote-sessions/current
 
 ```text
@@ -1516,6 +1572,14 @@ Having no live session is normal, not an error: it answers `200` with
 
 "Live" means `status` is `CONNECTING` or `ACTIVE`. A `CLOSED` session is never
 returned here; read a closed one by id with `GET /remote-sessions/:id`.
+
+A session can stop being live without anyone pressing "end": the backend closes
+it with `endedBy: "SYSTEM"` when the technician or the device stays away from it
+longer than the grace period, or when it never becomes `ACTIVE` (see the
+automatic close in [REALTIME.md](REALTIME.md)). If the web app was disconnected
+at that moment it missed `remote-session:closed`; reading this endpoint after
+every reconnection is how it notices. An automatic close also frees the
+technician for a new session immediately.
 
 Ownership is part of the query, not a filter applied afterwards: only sessions
 whose `technicianId` is the authenticated user are considered. A live session
@@ -1613,7 +1677,9 @@ Errors:
 401 — Not authenticated.
 403 — Authenticated without role admin/tecnico.
 404 — The session does not exist, or belongs to another technician.
-409 — The session is CLOSED. A closed session never reopens.
+409 — The session is CLOSED. A closed session never reopens. This includes a
+      CONNECTING session the backend already closed because its TTL expired
+      (endedBy SYSTEM).
 ```
 
 Notes:
@@ -1642,6 +1708,12 @@ The transition runs inside a transaction that locks the session row, so an
 close first     -> the session is CLOSED and activate answers 409
 activate first  -> the session is ACTIVE and the close then does ACTIVE -> CLOSED
 ```
+
+The automatic `CONNECTING` TTL close takes the same lock: if `activate` wins, the
+TTL no longer applies and the session stays `ACTIVE`; if the TTL wins, `activate`
+answers `409`. Once `ACTIVE`, the session stays open only while both sides keep a
+socket joined to it (with a grace period for reconnections) — see the automatic
+close in [REALTIME.md](REALTIME.md).
 
 On a real transition the backend emits `remote-session:active` to the device and
 to the technician, after the transaction commits — see [REALTIME.md](REALTIME.md).
@@ -1688,8 +1760,9 @@ Errors:
 401 — Not authenticated.
 403 — Authenticated without role admin/tecnico.
 404 — The session does not exist, or belongs to another technician.
-409 — The session is already closed, or its support request is not in a state
-      that can be completed.
+409 — The session is already closed (by the device or automatically by the
+      backend), or its support request is not in a state that can be
+      completed.
 ```
 
 Notes:
@@ -1745,7 +1818,10 @@ Live statuses (only one at a time per device): `CONNECTING`, `ACTIVE`.
 ```text
 TECHNICIAN  Closed through POST /remote-sessions/:id/close
 DEVICE      Closed through POST /device/remote-sessions/:id/close
-SYSTEM      Reserved. No code path writes it today.
+SYSTEM      Closed automatically by the backend: a CONNECTING session reached
+            its TTL, an ACTIVE session lost a side for longer than the grace
+            period, or nobody recovered it after a backend restart. No client
+            can request it. See the automatic close in REALTIME.md.
 ```
 
 ### ValidRoles
@@ -1784,6 +1860,10 @@ user
           -> validates the token; does NOT renew it
 
 6. Socket.IO connect to /devices with auth.token = Device JWT
+          -> connect_error data.code DEVICE_AUTH_UNAUTHORIZED: token refused,
+             renew it with step 4
+          -> connect_error data.code DEVICE_AUTH_UNAVAILABLE: token not
+             checked, retry with the same token (see REALTIME.md)
 ```
 
 Re-enrollment repeats steps 2–4: it revokes the previous credential, invalidates
@@ -1794,19 +1874,29 @@ the Device JWTs issued from it, and force-closes the device sockets.
 ```text
 1. POST   /support-requests                  (Device JWT)
           -> WAITING
+          -> emits support-request:queue-updated to every technician/admin
 
 2. GET    /support-requests?status=WAITING   (User JWT, admin|tecnico)
           -> the queue, oldest first, with device.isOnline
+          -> re-read on every support-request:queue-updated
+             and on every device:presence-updated
 
 3. POST   /support-requests/:id/assign       (User JWT, admin|tecnico)
           -> ASSIGNED; requires the device to be ONLINE
           -> emits support:assigned to the device
+          -> emits support-request:queue-updated to every technician/admin
 
 4a. POST  /support-requests/:id/accept       (Device JWT)  -> ACCEPTED
 4b. POST  /support-requests/:id/reject       (Device JWT)  -> REJECTED (terminal)
 4c. POST  /support-requests/:id/cancel       (Device JWT)  -> CANCELLED (terminal)
+          -> 4a/4b emit support-request:updated to the assigned technician
+          -> 4c from ASSIGNED/ACCEPTED emits support-request:updated to the
+             assigned technician
+          -> 4c from WAITING (before step 3) has no owner and emits
+             support-request:queue-updated to every technician/admin
 
-At any point the tablet reads GET /support-requests/current to recover state.
+At any point the tablet reads GET /support-requests/current to recover state,
+and the web app reads GET /support-requests.
 ```
 
 ### Remote session
@@ -1839,8 +1929,12 @@ At any point the tablet reads GET /support-requests/current to recover state.
 4b. POST  /device/remote-sessions/:id/close   (Device JWT) endedBy DEVICE
                                                            -> emits remote-session:closed
                                                               to the technician
+4c. (no request) automatic close by the backend            endedBy SYSTEM
+          - CONNECTING not ACTIVE within the TTL (120 s)   -> emits remote-session:closed
+          - ACTIVE with a side away > grace (60 s)            to BOTH ends
+          - not recovered after a backend restart
 
-5. In both cases the SupportRequest becomes COMPLETED in the same transaction.
+5. In every case the SupportRequest becomes COMPLETED in the same transaction.
    A session closed after step 3 keeps its connectedAt.
 ```
 
@@ -1849,3 +1943,9 @@ Once the session exists, WebRTC negotiation happens over Socket.IO — see
 Socket.IO message changes the status of a session: `ACTIVE` is written only by
 `POST /remote-sessions/:id/activate`, which is the technician reporting what
 WebRTC did. Step 3 is not a precondition for signaling or for closing.
+
+The only status change no client requests is 4c. It depends on Socket.IO
+participation (`remote-session:join`), so a session driven only through REST —
+for example from Postman, with no Socket.IO client joined — is closed by the
+backend about one grace period after `/activate`, or at the CONNECTING TTL if
+it is never activated.

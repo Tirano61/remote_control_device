@@ -23,20 +23,23 @@ part 'device_realtime_state.dart';
 /// ## When the transport cannot recover by itself
 ///
 /// A lost transport is the package's to retry, with the same socket and the
-/// same token. Three things destroy the socket instead, and then only this bloc
+/// same token. Four things destroy the socket instead, and then only this bloc
 /// can open another one:
 ///
 /// ```text
-/// handshake refused (Unauthorized)    expired JWT, deactivated device, revoked
-///                                     credential — or a backend that failed to
-///                                     check (a database error reads the same)
+/// DEVICE_AUTH_UNAUTHORIZED            expired JWT, deactivated device, revoked
+///   (or a bare Unauthorized from a    credential (an old backend also sent it
+///   backend older than the codes)     when its own check failed)
 /// io server disconnect                the backend withdrew the authorisation
 ///                                     of an open socket
-/// other namespace refusal             anything else that destroyed the socket
+/// unrecognised namespace refusal      an unknown code, a malformed body,
+///                                     another message
+/// DEVICE_AUTH_UNAVAILABLE             the backend could not check the token
 /// ```
 ///
-/// None of them proves anything about the permanent credential, so each one is
-/// answered the same way — ask the question that *can* be answered:
+/// None of them proves anything about the permanent credential. The first
+/// three say, or may say, something about the *token*, so they are answered by
+/// asking the question that can be answered:
 ///
 /// ```text
 /// release the socket
@@ -49,16 +52,35 @@ part 'device_realtime_state.dart';
 ///                   [reauthRetryDelay]
 /// ```
 ///
+/// `DEVICE_AUTH_UNAVAILABLE` says nothing about the token, and a login would
+/// hit the same failing database, so it costs no login:
+///
+/// ```text
+/// release the socket ──> backoff ──> new socket with the current Device JWT
+/// ```
+///
+/// "Current" is whatever the token store holds when the retry comes due: the
+/// same token, or a newer one if REST renewed it in the meantime — never an
+/// older one. If that token has expired by then, the backend answers
+/// `DEVICE_AUTH_UNAUTHORIZED` (expiry is checked before the database), and that
+/// is renewed like any other refusal. Keeping the token is not trusting it: the
+/// state is never `Connected` until a handshake is accepted.
+///
+/// Before any renewal, the store is read too: when it already holds a token
+/// newer than the refused one, that token is presented instead of logging in.
+///
 /// ## Bounded, never terminal
 ///
-/// The first recovery since the last stable connection runs at once — a JWT
+/// The first renewal since the last stable connection runs at once — a JWT
 /// that merely expired after a day of uptime is renewed without delay. Every
 /// further one waits on [recoveryBackoff] (15 s, 30 s, 60 s, then 60 s for as
-/// long as it takes). The count only resets when a connection that had stayed
-/// up for at least [stableConnectionPeriod] is lost, so a backend that accepts
-/// and immediately drops the socket costs one login a minute, not one per drop.
-/// No timer runs while connected: stability is read off the clock when the
-/// connection ends.
+/// long as it takes). An unavailable backend is never retried at once: its
+/// first retry already waits the first step. Both kinds share one count, which
+/// only resets when a connection that had stayed up for at least
+/// [stableConnectionPeriod] is lost, so a backend that accepts and immediately
+/// drops the socket costs one attempt a minute, not one per drop. No timer
+/// runs while connected: stability is read off the clock when the connection
+/// ends.
 ///
 /// It never gives up on its own: a freshly minted JWT refused twice in a row is
 /// what a database blip looks like from here, and it heals. The only thing that
@@ -235,31 +257,45 @@ class DeviceRealtimeBloc
       case RealtimeConnectFailed(transportRetrying: false):
         // The socket is gone and nothing will open another one but this bloc.
         _noteConnectionLost();
-        await _recover(emit);
+        await _recover(emit, renew: true);
+
+      case RealtimeHandshakeUnavailable():
+        // Gone too, but the token was not judged: keep it, renew nothing.
+        _noteConnectionLost();
+        await _recover(emit, renew: false);
     }
   }
 
   // ------------------------------------------------------------- recovery
 
-  /// Releases the dead socket and either renews at once or schedules the
-  /// renewal on the backoff. One recovery at a time: a login in flight or a
+  /// Releases the dead socket and opens the next one — renewing the token
+  /// first when [renew], presenting the current one again otherwise — either
+  /// at once or on the backoff. One recovery at a time: a login in flight or a
   /// retry already scheduled will open the next socket.
-  Future<void> _recover(Emitter<DeviceRealtimeState> emit) async {
+  Future<void> _recover(
+    Emitter<DeviceRealtimeState> emit, {
+    required bool renew,
+  }) async {
     if (_renewing || _retryTimer != null) return;
 
-    // Stop presenting the refused token before asking for a new one, and never
-    // reuse a destroyed socket: the next one is built from scratch.
+    // Stop presenting the token before anything else, and never reuse a
+    // destroyed socket: the next one is built from scratch.
     _client.disconnect();
 
     final attempt = _recoveries++;
-    if (attempt == 0) {
+    if (renew && attempt == 0) {
       await _renewAndReconnect(emit);
       return;
     }
-    final step = math.min(attempt - 1, _recoveryBackoff.length - 1);
-    _scheduleRetry(_recoveryBackoff[step]);
+    // A renewal that cannot run at once waits from the first step; so does an
+    // unavailable backend, which is never retried at once — it has just said
+    // it cannot answer.
+    final step = math.min(renew ? attempt - 1 : attempt, _lastStep);
+    _scheduleRetry(_recoveryBackoff[step], renew: renew);
     emit(_failureState());
   }
+
+  int get _lastStep => _recoveryBackoff.length - 1;
 
   Future<void> _onRetryDue(
     _RetryDue event,
@@ -268,10 +304,42 @@ class DeviceRealtimeBloc
     // A timer of an earlier generation: stopped, restarted or closed since.
     if (event.generation != _generation || _activeToken == null) return;
     _retryTimer = null;
-    await _renewAndReconnect(emit);
+    if (event.renew) {
+      await _renewAndReconnect(emit);
+    } else {
+      _reconnectWithCurrentToken(emit);
+    }
+  }
+
+  /// The retry after `DEVICE_AUTH_UNAVAILABLE`: a new socket, no login.
+  void _reconnectWithCurrentToken(Emitter<DeviceRealtimeState> emit) {
+    // Read now, not when the refusal arrived: REST may have renewed it since,
+    // and the newest token is the one worth presenting.
+    final token = _tokenStore.token;
+    if (token == null) {
+      // Authorisation was withdrawn while waiting; the session is about to
+      // stop the channel. Nothing is presented, nothing is scheduled.
+      emit(_failureState());
+      return;
+    }
+    _activeToken = token;
+    emit(_attemptState());
+    _client.connect(token);
   }
 
   Future<void> _renewAndReconnect(Emitter<DeviceRealtimeState> emit) async {
+    // A token newer than the refused one is already installed — REST renewed
+    // it while this recovery waited. Present it; a login would only mint
+    // another one. If it is refused too, that refusal renews.
+    final installed = _tokenStore.token;
+    if (installed != null && installed != _activeToken) {
+      _cancelRetry();
+      _activeToken = installed;
+      emit(_attemptState());
+      _client.connect(installed);
+      return;
+    }
+
     final generation = _generation;
     _renewing = true;
     _cancelRetry();
@@ -287,6 +355,13 @@ class DeviceRealtimeBloc
 
       switch (renewal) {
         case DeviceTokenRenewed(:final token):
+          if (!_tokenStore.hasToken) {
+            // Authorisation was withdrawn while the login was on the wire, so
+            // the repository did not install the token. The session is about
+            // to stop the channel; this token opens nothing.
+            emit(_failureState());
+            return;
+          }
           // The renewal already installed the token in the store; holding it
           // here is only how a repeated start is told apart from a new one.
           _activeToken = token;
@@ -353,11 +428,11 @@ class DeviceRealtimeBloc
       ? const DeviceRealtimeReconnecting()
       : const DeviceRealtimeConnectionError();
 
-  void _scheduleRetry(Duration delay) {
+  void _scheduleRetry(Duration delay, {bool renew = true}) {
     _retryTimer?.cancel();
     final generation = _generation;
     _retryTimer = _timerFactory(delay, () {
-      if (!isClosed) add(_RetryDue(generation));
+      if (!isClosed) add(_RetryDue(generation, renew: renew));
     });
   }
 
