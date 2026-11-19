@@ -23,9 +23,26 @@ final class NetworkFailure extends Failure {
   const NetworkFailure({super.debugDetail});
 }
 
-/// HTTP 401. The credential presented was rejected by the backend.
+/// HTTP 401 that does not confirm anything about the permanent credential:
+/// a refused Device JWT, or a `401` produced by something in front of the
+/// backend. The stored credential is kept; the device is simply not
+/// authenticated right now.
+///
+/// On `POST /device-enrollment/activate` it is the activation being refused
+/// (wrong `publicId` or code), which involves no stored credential at all.
 final class AuthFailure extends Failure {
   const AuthFailure({super.debugDetail});
+}
+
+/// `POST /device-auth/login` answered `401 DEVICE_CREDENTIAL_REJECTED`: the
+/// backend refused the stored credential.
+///
+/// The contract does not say why, so this cannot tell a deactivated device
+/// (the same credential works again once reactivated) from a replaced one
+/// (re-enrollment needed). The credential is therefore kept; only authorisation
+/// is withdrawn.
+final class CredentialRejectedFailure extends Failure {
+  const CredentialRejectedFailure({super.debugDetail});
 }
 
 /// HTTP 400. The request did not pass backend validation.

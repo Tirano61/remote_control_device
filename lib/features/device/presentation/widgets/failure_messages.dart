@@ -7,7 +7,9 @@ abstract final class FailureMessages {
   /// Same failure type means different things in different flows, so the
   /// enrollment form and the startup sequence get their own wording.
   static String forEnrollment(Failure failure) => switch (failure) {
-    AuthFailure() =>
+    // The activation endpoint answers a plain 401 for a wrong id or code; the
+    // credential code belongs to the login and never reaches this form.
+    AuthFailure() || CredentialRejectedFailure() =>
       'El identificador o el código no son válidos, o el código ya expiró. '
           'Solicitá un código nuevo al técnico.',
     ValidationFailure() =>
@@ -32,7 +34,11 @@ abstract final class FailureMessages {
       'No se pudieron leer los datos de activación de este dispositivo.',
     ServerFailure() => 'El servidor respondió con un error. Intentá de nuevo.',
     ValidationFailure() => 'El servidor rechazó la solicitud. Intentá de nuevo.',
-    AuthFailure() => 'El dispositivo debe volver a activarse.',
+    AuthFailure() =>
+      'El servidor no confirmó la autenticación. El dispositivo sigue '
+          'activado; se puede reintentar.',
+    CredentialRejectedFailure() =>
+      'El servidor rechazó la credencial de este dispositivo.',
     NotFoundFailure() || ConflictFailure() =>
       'El servidor respondió de forma inesperada. Intentá de nuevo.',
   };
@@ -45,7 +51,10 @@ abstract final class FailureMessages {
       'Se perdió la conexión con el servidor. Reintentando...',
     ConflictFailure() || NotFoundFailure() =>
       'La asistencia cambió de estado. Se actualizó la información.',
-    AuthFailure() => 'El dispositivo debe volver a activarse.',
+    AuthFailure() =>
+      'No se pudo confirmar la autenticación con el servidor. Reintentando...',
+    CredentialRejectedFailure() =>
+      'El servidor rechazó la credencial de este dispositivo.',
     ValidationFailure() => 'El servidor rechazó la solicitud.',
     StorageFailure() =>
       'No se pudieron leer los datos de activación de este dispositivo.',
@@ -60,7 +69,10 @@ abstract final class FailureMessages {
       'No se pudo contactar al servidor. Verificá la conexión e intentá de nuevo.',
     ConflictFailure() || NotFoundFailure() =>
       'La solicitud cambió de estado. Se actualizó la información.',
-    AuthFailure() => 'El dispositivo debe volver a activarse.',
+    AuthFailure() =>
+      'No se pudo confirmar la autenticación con el servidor. Intentá de nuevo.',
+    CredentialRejectedFailure() =>
+      'El servidor rechazó la credencial de este dispositivo.',
     ValidationFailure() => 'El servidor rechazó la solicitud.',
     StorageFailure() =>
       'No se pudieron leer los datos de activación de este dispositivo.',

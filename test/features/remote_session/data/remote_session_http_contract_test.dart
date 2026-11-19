@@ -346,18 +346,42 @@ void main() {
   });
 
   group('a revoked permanent credential', () {
-    test('is reported once, and the failure stays an auth failure', () async {
+    test('is reported once, and surfaces as the confirmed rejection', () async {
       build([const _Reply(401, {'message': 'Unauthorized'})]);
-      authRepository.loginResult = loginUnauthorized;
+      authRepository.loginResult = loginRejected;
 
       final reported = expectLater(revocation.revocations, emits(isNull));
       final result = await repository.close(testRemoteSessionId);
 
-      expect(result.failureOrNull, isA<AuthFailure>());
+      expect(result.failureOrNull, isA<CredentialRejectedFailure>());
       await reported;
-      // Wiping the credential belongs to the session, not here: this layer only
-      // establishes the fact.
+      // Nothing is wiped, here or anywhere: this layer only establishes the
+      // fact, and the session withdraws authorisation while keeping the
+      // credential.
       expect(storage.clearCount, 0);
+      expect(storage.credentials, testCredentials);
+      // The refused request is not repeated.
+      expect(adapter.requests, hasLength(1));
+    });
+
+    test('a renewal answered 401 without the code is not a rejection', () async {
+      build([const _Reply(401, {'message': 'Unauthorized'})]);
+      // What a private dev tunnel answers the renewal login.
+      authRepository.loginResult = loginUnauthorized;
+
+      var reports = 0;
+      final subscription = revocation.revocations.listen((_) => reports++);
+      final result = await repository.close(testRemoteSessionId);
+
+      expect(result.failureOrNull, isA<AuthFailure>());
+      await Future<void>.delayed(Duration.zero);
+      expect(reports, 0);
+      await subscription.cancel();
+      // Nothing is wiped, here or anywhere: this layer only establishes the
+      // fact, and the session withdraws authorisation while keeping the
+      // credential.
+      expect(storage.clearCount, 0);
+      expect(storage.credentials, testCredentials);
       // The refused request is not repeated.
       expect(adapter.requests, hasLength(1));
     });

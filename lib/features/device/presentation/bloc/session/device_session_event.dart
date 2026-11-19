@@ -12,7 +12,9 @@ final class DeviceSessionStarted extends DeviceSessionEvent {
   const DeviceSessionStarted();
 }
 
-/// User asked to try again after a connectivity/backend error.
+/// The user asked to try again — after authentication was unavailable, or
+/// after the backend refused the credential (an admin may have reactivated the
+/// device since).
 final class DeviceSessionRetryRequested extends DeviceSessionEvent {
   const DeviceSessionRetryRequested();
 }
@@ -22,8 +24,24 @@ final class DeviceSessionEnrollmentCompleted extends DeviceSessionEvent {
   const DeviceSessionEnrollmentCompleted();
 }
 
-/// The realtime layer established that the permanent credential is no longer
-/// accepted by the backend. Same consequence as a rejected login at startup.
+/// Something running — the realtime channel or an authenticated REST call —
+/// had its renewal login answered `401 DEVICE_CREDENTIAL_REJECTED`. Same
+/// consequence as that answer at startup.
 final class DeviceSessionCredentialRejected extends DeviceSessionEvent {
   const DeviceSessionCredentialRejected();
+}
+
+/// From a refusal, the user chose to activate the device again.
+final class DeviceSessionReEnrollmentRequested extends DeviceSessionEvent {
+  const DeviceSessionReEnrollmentRequested();
+}
+
+/// The user left the re-enrollment form without enrolling.
+final class DeviceSessionReEnrollmentCancelled extends DeviceSessionEvent {
+  const DeviceSessionReEnrollmentCancelled();
+}
+
+/// The backoff after an unavailable authentication ran out.
+final class _AutomaticRetryDue extends DeviceSessionEvent {
+  const _AutomaticRetryDue();
 }

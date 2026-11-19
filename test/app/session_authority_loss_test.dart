@@ -12,7 +12,7 @@ import 'package:remote_control_device/core/session/device_token_store.dart';
 import 'package:remote_control_device/features/device/domain/realtime/device_realtime_signal.dart';
 import 'package:remote_control_device/features/device/domain/usecases/authenticate_device.dart';
 import 'package:remote_control_device/features/device/domain/usecases/check_device_status.dart';
-import 'package:remote_control_device/features/device/domain/usecases/clear_device_credentials.dart';
+import 'package:remote_control_device/features/device/domain/usecases/suspend_device_authorization.dart';
 import 'package:remote_control_device/features/device/domain/usecases/load_device_credentials.dart';
 import 'package:remote_control_device/features/device/domain/usecases/renew_device_token.dart';
 import 'package:remote_control_device/features/device/presentation/bloc/realtime/device_realtime_bloc.dart';
@@ -100,10 +100,7 @@ void main() {
       loadDeviceCredentials: loadDeviceCredentials,
       authenticateDevice: authenticateDevice,
       checkDeviceStatus: CheckDeviceStatus(authRepository),
-      clearDeviceCredentials: ClearDeviceCredentials(
-        credentialsStorage: storage,
-        authRepository: authRepository,
-      ),
+      suspendDeviceAuthorization: SuspendDeviceAuthorization(authRepository),
     );
     realtimeBloc = DeviceRealtimeBloc(
       client: client,

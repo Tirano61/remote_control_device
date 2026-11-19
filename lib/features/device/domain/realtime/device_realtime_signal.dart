@@ -151,8 +151,9 @@ final class RealtimeConnectFailed extends DeviceRealtimeSignal {
 /// REALTIME.md makes every rejection reason indistinguishable — expired token,
 /// deactivated device and revoked credential all answer the same generic
 /// `Unauthorized` — so this signal only means "the token presented was not
-/// accepted". Which of the two it is can only be established by asking
-/// `POST /device-auth/login` with the permanent credential.
+/// accepted". Whether the credential itself is refused can only be established
+/// by asking `POST /device-auth/login` with it, and only a `401` carrying
+/// `DEVICE_CREDENTIAL_REJECTED` there says so.
 ///
 /// The transport does **not** retry by itself after this: a namespace
 /// rejection destroys the socket.

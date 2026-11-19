@@ -18,10 +18,10 @@ import 'package:remote_control_device/features/device/domain/services/device_inf
 import 'package:remote_control_device/features/device/domain/storage/device_credentials_storage.dart';
 import 'package:remote_control_device/features/device/domain/usecases/authenticate_device.dart';
 import 'package:remote_control_device/features/device/domain/usecases/check_device_status.dart';
-import 'package:remote_control_device/features/device/domain/usecases/clear_device_credentials.dart';
 import 'package:remote_control_device/features/device/domain/usecases/enroll_device.dart';
 import 'package:remote_control_device/features/device/domain/usecases/load_device_credentials.dart';
 import 'package:remote_control_device/features/device/domain/usecases/renew_device_token.dart';
+import 'package:remote_control_device/features/device/domain/usecases/suspend_device_authorization.dart';
 import 'package:remote_control_device/features/remote_control/data/method_channel_remote_control_accessibility_client.dart';
 import 'package:remote_control_device/features/remote_control/domain/remote_control_accessibility_client.dart';
 import 'package:remote_control_device/features/remote_session/data/datasources/remote_session_remote_data_source.dart';
@@ -58,7 +58,7 @@ class AppDependencies {
     required this.credentialRevocation,
     required this.enrollDevice,
     required this.loadDeviceCredentials,
-    required this.clearDeviceCredentials,
+    required this.suspendDeviceAuthorization,
     required this.authenticateDevice,
     required this.checkDeviceStatus,
     required this.renewDeviceToken,
@@ -141,10 +141,7 @@ class AppDependencies {
         deviceInfoProvider: infoProvider,
       ),
       loadDeviceCredentials: loadDeviceCredentials,
-      clearDeviceCredentials: ClearDeviceCredentials(
-        credentialsStorage: storage,
-        authRepository: authRepository,
-      ),
+      suspendDeviceAuthorization: SuspendDeviceAuthorization(authRepository),
       authenticateDevice: authenticateDevice,
       checkDeviceStatus: CheckDeviceStatus(authRepository),
       renewDeviceToken: renewDeviceToken,
@@ -193,13 +190,13 @@ class AppDependencies {
   final DeviceTokenStore tokenStore;
   final DeviceCredentialsStorage credentialsStorage;
 
-  /// Where a revoked permanent credential is reported, from wherever it was
-  /// discovered. Owned here; closed with the application.
+  /// Where a confirmed rejection of the permanent credential is reported, from
+  /// wherever it was discovered. Owned here; closed with the application.
   final DeviceCredentialRevocation credentialRevocation;
 
   final EnrollDevice enrollDevice;
   final LoadDeviceCredentials loadDeviceCredentials;
-  final ClearDeviceCredentials clearDeviceCredentials;
+  final SuspendDeviceAuthorization suspendDeviceAuthorization;
   final AuthenticateDevice authenticateDevice;
   final CheckDeviceStatus checkDeviceStatus;
   final RenewDeviceToken renewDeviceToken;

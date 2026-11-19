@@ -129,6 +129,16 @@ class FakeDeviceAuthRepository implements DeviceAuthRepository {
   Result<DeviceSession> loginResult;
   Result<DeviceIdentity> checkStatusResult;
 
+  /// Answers consumed one per call, before falling back to [loginResult] /
+  /// [checkStatusResult]. For flows whose second call must differ from the
+  /// first, such as a check-status 401 followed by a renewal.
+  final List<Result<DeviceSession>> loginQueue = [];
+  final List<Result<DeviceIdentity>> checkStatusQueue = [];
+
+  /// Whether the session token was present when each check-status was made:
+  /// proves check-status never runs on a token that was suspended.
+  final List<bool> checkStatusHadToken = [];
+
   /// Mirrors `DeviceAuthRepositoryImpl`, which installs the issued token as the
   /// current session token. Tests that care about *which* JWT the next call
   /// uses need that side effect.
@@ -143,16 +153,20 @@ class FakeDeviceAuthRepository implements DeviceAuthRepository {
   Future<Result<DeviceSession>> login(DeviceCredentials credentials) async {
     loginCount++;
     lastLoginCredentials = credentials;
-    if (loginResult case Ok<DeviceSession>(:final value)) {
+    final result = loginQueue.isEmpty ? loginResult : loginQueue.removeAt(0);
+    if (result case Ok<DeviceSession>(:final value)) {
       tokenStore?.save(value.token);
     }
-    return loginResult;
+    return result;
   }
 
   @override
   Future<Result<DeviceIdentity>> checkStatus() async {
     checkStatusCount++;
-    return checkStatusResult;
+    checkStatusHadToken.add(tokenStore?.hasToken ?? true);
+    return checkStatusQueue.isEmpty
+        ? checkStatusResult
+        : checkStatusQueue.removeAt(0);
   }
 
   @override
@@ -163,6 +177,13 @@ class FakeDeviceAuthRepository implements DeviceAuthRepository {
 }
 
 /// Shorthands for the failure values the backend contract can produce.
+///
+/// [loginRejected] is the confirmed refusal (`401 DEVICE_CREDENTIAL_REJECTED`).
+/// [loginUnauthorized] is a `401` *without* that code — what a private tunnel
+/// or a proxy answers — and confirms nothing.
+const Err<DeviceSession> loginRejected = Err<DeviceSession>(
+  CredentialRejectedFailure(),
+);
 const Err<DeviceSession> loginUnauthorized = Err<DeviceSession>(AuthFailure());
 const Err<DeviceSession> loginUnreachable = Err<DeviceSession>(NetworkFailure());
 const Err<DeviceIdentity> statusUnauthorized = Err<DeviceIdentity>(AuthFailure());

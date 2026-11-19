@@ -483,6 +483,28 @@ void main() {
       expect(isUnauthorizedHandshakeError('Unauthorized'), isTrue);
     });
 
+    test('only the exact documented message counts', () {
+      // A proxy page or an error text that merely mentions the word is not the
+      // namespace speaking, and none of these may start a renewal.
+      for (final message in [
+        'unauthorized',
+        'UNAUTHORIZED',
+        'Unauthorized ',
+        '401 Unauthorized',
+        'Unauthorized: tunnel sign-in required',
+        '<html><title>401 Unauthorized</title></html>',
+      ]) {
+        expect(isUnauthorizedHandshakeError(message), isFalse, reason: message);
+        expect(
+          isUnauthorizedHandshakeError({'message': message}),
+          isFalse,
+          reason: message,
+        );
+      }
+      expect(isUnauthorizedHandshakeError({'error': 'Unauthorized'}), isFalse);
+      expect(isUnauthorizedHandshakeError({'message': 401}), isFalse);
+    });
+
     test('transport failures are not mistaken for an auth problem', () {
       // Assuming otherwise would make a bad network trigger login attempts.
       expect(isUnauthorizedHandshakeError('timeout'), isFalse);

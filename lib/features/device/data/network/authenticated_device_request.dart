@@ -13,11 +13,17 @@ import 'package:remote_control_device/features/device/domain/usecases/renew_devi
 /// ```text
 /// request ──401──> POST /device-auth/login with deviceId + deviceSecret
 ///                    ├── 200 ──> retry the request once, with the new JWT
-///                    ├── 401 ──> the permanent credential is revoked:
-///                    │           report it; the session requires enrollment
-///                    └── offline/5xx ──> nothing learnt: credential preserved,
-///                                        the call fails as retryable
+///                    ├── 401 DEVICE_CREDENTIAL_REJECTED ──> confirmed
+///                    │           rejection: report it; the session withdraws
+///                    │           authorisation (the credential is kept)
+///                    └── anything else (offline, 5xx, redirect, a 401 without
+///                        the code) ──> nothing learnt: credential preserved,
+///                                      the call fails as retryable
 /// ```
+///
+/// The `401` that starts this is never itself taken as a rejection: the
+/// contract says a `401` on a `@DeviceAuth()` route only means the Device JWT
+/// was not accepted, and a `401` from an intermediary looks the same.
 ///
 /// The renewal itself is [RenewDeviceToken], the same use case the Socket.IO
 /// layer uses, so there is one implementation of "re-authenticate the device"
@@ -55,7 +61,9 @@ class AuthenticatedDeviceRequest {
           return await request();
         case DeviceTokenRejected():
           _revocation.report();
-          rethrow;
+          throw const DeviceCredentialRejectedApiException(
+            debugDetail: 'renewal rejected',
+          );
         case DeviceTokenRenewalUnavailable(:final failure):
           throw TokenRenewalApiException(failure);
       }

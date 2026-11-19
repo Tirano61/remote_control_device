@@ -6,7 +6,7 @@ import 'package:remote_control_device/core/session/device_token_store.dart';
 import 'package:remote_control_device/features/device/domain/realtime/device_realtime_signal.dart';
 import 'package:remote_control_device/features/device/domain/usecases/authenticate_device.dart';
 import 'package:remote_control_device/features/device/domain/usecases/check_device_status.dart';
-import 'package:remote_control_device/features/device/domain/usecases/clear_device_credentials.dart';
+import 'package:remote_control_device/features/device/domain/usecases/suspend_device_authorization.dart';
 import 'package:remote_control_device/features/device/domain/usecases/load_device_credentials.dart';
 import 'package:remote_control_device/features/device/domain/usecases/renew_device_token.dart';
 import 'package:remote_control_device/features/device/presentation/bloc/realtime/device_realtime_bloc.dart';
@@ -41,10 +41,7 @@ void main() {
       loadDeviceCredentials: loadDeviceCredentials,
       authenticateDevice: authenticateDevice,
       checkDeviceStatus: CheckDeviceStatus(authRepository),
-      clearDeviceCredentials: ClearDeviceCredentials(
-        credentialsStorage: storage,
-        authRepository: authRepository,
-      ),
+      suspendDeviceAuthorization: SuspendDeviceAuthorization(authRepository),
     );
     realtimeBloc = DeviceRealtimeBloc(
       client: client,
@@ -98,7 +95,7 @@ void main() {
     authRepository.loginResult = loginUnreachable;
     await reachReady();
 
-    expect(sessionBloc.state, isA<DeviceSessionNetworkError>());
+    expect(sessionBloc.state, isA<DeviceSessionAuthenticationUnavailable>());
     expect(client.connectedWithTokens, isEmpty);
     expect(storage.credentials, testCredentials);
   });
@@ -118,20 +115,21 @@ void main() {
     expect(client.disconnectCount, greaterThanOrEqualTo(1));
   });
 
-  test('a revoked deviceSecret wipes the credential and requires '
-      're-enrollment', () async {
+  test('a refused deviceSecret withdraws authorisation and keeps the '
+      'credential', () async {
     await reachReady();
     await client.emit(const RealtimeConnected());
 
     // From here on the backend refuses both the socket and the credential.
-    authRepository.loginResult = loginUnauthorized;
+    authRepository.loginResult = loginRejected;
     await client.emit(const RealtimeHandshakeRejected());
     await FakeDeviceRealtimeClient.pump();
     await FakeDeviceRealtimeClient.pump();
 
-    expect(sessionBloc.state, const DeviceSessionReEnrollmentRequired());
-    expect(storage.credentials, isNull);
-    expect(storage.clearCount, 1);
+    expect(sessionBloc.state, const DeviceSessionCredentialRefused());
+    // Deactivated or replaced cannot be told apart, so nothing is wiped.
+    expect(storage.credentials, testCredentials);
+    expect(storage.clearCount, 0);
     expect(tokenStore.hasToken, isFalse);
     // One handshake attempt, one login, and then nothing further.
     expect(client.connectedWithTokens, [testDeviceJwt]);
@@ -170,8 +168,8 @@ void main() {
     await FakeDeviceRealtimeClient.pump();
     await FakeDeviceRealtimeClient.pump();
 
-    expect(sessionBloc.state, const DeviceSessionReEnrollmentRequired());
-    expect(storage.credentials, isNull);
+    expect(sessionBloc.state, const DeviceSessionCredentialRefused());
+    expect(storage.credentials, testCredentials);
     expect(tokenStore.hasToken, isFalse);
     expect(realtimeBloc.state, const DeviceRealtimeDisconnected());
     // No second login was attempted: the REST side had already established it.

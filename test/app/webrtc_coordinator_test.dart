@@ -11,7 +11,7 @@ import 'package:remote_control_device/core/session/device_token_store.dart';
 import 'package:remote_control_device/features/device/domain/realtime/device_realtime_signal.dart';
 import 'package:remote_control_device/features/device/domain/usecases/authenticate_device.dart';
 import 'package:remote_control_device/features/device/domain/usecases/check_device_status.dart';
-import 'package:remote_control_device/features/device/domain/usecases/clear_device_credentials.dart';
+import 'package:remote_control_device/features/device/domain/usecases/suspend_device_authorization.dart';
 import 'package:remote_control_device/features/device/domain/usecases/load_device_credentials.dart';
 import 'package:remote_control_device/features/device/domain/usecases/renew_device_token.dart';
 import 'package:remote_control_device/features/device/presentation/bloc/realtime/device_realtime_bloc.dart';
@@ -95,10 +95,7 @@ void main() {
       loadDeviceCredentials: loadDeviceCredentials,
       authenticateDevice: authenticateDevice,
       checkDeviceStatus: CheckDeviceStatus(authRepository),
-      clearDeviceCredentials: ClearDeviceCredentials(
-        credentialsStorage: storage,
-        authRepository: authRepository,
-      ),
+      suspendDeviceAuthorization: SuspendDeviceAuthorization(authRepository),
     );
     realtimeBloc = DeviceRealtimeBloc(
       client: client,
@@ -718,6 +715,73 @@ void main() {
           screenCapture: ScreenCaptureStatus.active,
         ),
       );
+    });
+  });
+  group('19. authentication during a live assistance', () {
+    Future<(FakeWebRtcPeerConnection, FakeWebRtcDataChannel)>
+    reachActive() async {
+      await reachJoined();
+      await client.deliver(offerReceived());
+      await settle();
+      final peer = peerFactory.last;
+      peer.pushConnectionState(WebRtcConnectionState.connected);
+      final channel = peer.pushDataChannel();
+      await settle();
+      channel.pushState(WebRtcDataChannelState.open);
+      await settle();
+      remoteSessionRepository.currentResult = activatedRemoteSession;
+      await client.emit(
+        const RealtimeRemoteSessionActivated(testRemoteSessionId),
+      );
+      await settle();
+      expect(remoteSessionBloc.state, isA<RemoteSessionActive>());
+      expect(screenCapture.isActive, isTrue);
+      return (peer, channel);
+    }
+
+    test('a confirmed rejection ends the screen, the peer and remote control, '
+        'and keeps the credential', () async {
+      final (peer, channel) = await reachActive();
+
+      // A renewal login somewhere answered 401 DEVICE_CREDENTIAL_REJECTED.
+      credentialRevocation.report();
+      await settle();
+
+      expect(sessionBloc.state, const DeviceSessionCredentialRefused());
+      expect(tokenStore.hasToken, isFalse);
+      expect(realtimeBloc.state, isA<DeviceRealtimeDisconnected>());
+      expect(remoteSessionBloc.state, const RemoteSessionInitial());
+      expect(webRtcBloc.state, const WebRtcIdle());
+      expect(peer.isClosed, isTrue);
+      expect(channel.isClosed, isTrue);
+      expect(screenCapture.isActive, isFalse);
+      expect(screenCapture.stopCount, 1);
+      // The credential survives the refusal; the authorisation does not.
+      expect(storage.credentials, testCredentials);
+      expect(storage.clearCount, 0);
+
+      // A command that still makes it across runs nothing.
+      channel.pushTap('t-late');
+      await settle();
+      expect(accessibility.taps, isEmpty);
+    });
+
+    test('a refused handshake whose renewal confirms nothing is not a '
+        'rejection', () async {
+      final (peer, _) = await reachActive();
+
+      // The socket is refused and the renewal login gets a private tunnel's
+      // 401: nothing is known about the credential.
+      authRepository.loginResult = loginUnauthorized;
+      await client.emit(const RealtimeHandshakeRejected());
+      await settle();
+
+      expect(sessionBloc.state, const DeviceSessionReady(testIdentity));
+      expect(storage.credentials, testCredentials);
+      // The channel is down, which the remote-session lifecycle already
+      // handles as a lost connection — not as a lost credential.
+      expect(realtimeBloc.state, const DeviceRealtimeConnectionError());
+      expect(peer.isClosed, isFalse);
     });
   });
 }
