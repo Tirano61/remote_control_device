@@ -65,8 +65,15 @@ final class DeviceTokenRenewalUnavailable extends DeviceTokenRenewal {
 /// Used when the temporary Device JWT is no longer accepted — most visibly when
 /// a Socket.IO handshake is refused after the app has been running longer than
 /// the 24h token lifetime.
+///
+/// **One login at a time, application-wide.** The REST side and the Socket.IO
+/// side share this instance, and both can discover an expired token at the same
+/// moment. A call made while a login is on the wire gets that login's answer
+/// instead of starting another: one request reaches the backend, and no two
+/// answers race to install their token, so an earlier login can never land
+/// after — and replace — a later one.
 class RenewDeviceToken {
-  const RenewDeviceToken({
+  RenewDeviceToken({
     required LoadDeviceCredentials loadDeviceCredentials,
     required AuthenticateDevice authenticateDevice,
   }) : _loadDeviceCredentials = loadDeviceCredentials,
@@ -75,7 +82,12 @@ class RenewDeviceToken {
   final LoadDeviceCredentials _loadDeviceCredentials;
   final AuthenticateDevice _authenticateDevice;
 
-  Future<DeviceTokenRenewal> call() async {
+  Future<DeviceTokenRenewal>? _inFlight;
+
+  Future<DeviceTokenRenewal> call() =>
+      _inFlight ??= _renew().whenComplete(() => _inFlight = null);
+
+  Future<DeviceTokenRenewal> _renew() async {
     final credentialsResult = await _loadDeviceCredentials();
     switch (credentialsResult) {
       case Err<DeviceCredentials?>(:final failure):

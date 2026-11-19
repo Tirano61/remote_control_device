@@ -844,6 +844,428 @@ void main() {
     });
   });
 
+  group('P36 — handshake error codes', () {
+    Future<void> start(DeviceRealtimeBloc bloc) async {
+      bloc.add(const DeviceRealtimeStartRequested());
+      await FakeDeviceRealtimeClient.pump();
+    }
+
+    Future<void> connected(DeviceRealtimeBloc bloc) async {
+      await start(bloc);
+      await client.emit(const RealtimeConnected());
+    }
+
+    Future<void> unavailable() async {
+      await client.emit(const RealtimeHandshakeUnavailable());
+      await FakeDeviceRealtimeClient.pump();
+    }
+
+    Future<void> unauthorized() async {
+      await client.emit(const RealtimeHandshakeRejected());
+      await FakeDeviceRealtimeClient.pump();
+    }
+
+    Duration nextDelay() => timers.pending.single.dueAt - timers.now;
+
+    Future<void> elapseNext() async {
+      timers.elapse(nextDelay());
+      await FakeDeviceRealtimeClient.pump();
+    }
+
+    blocTest<DeviceRealtimeBloc, DeviceRealtimeState>(
+      '1. a successful handshake is the only way to Connected',
+      build: buildBloc,
+      act: (bloc) async {
+        await start(bloc);
+        await unavailable();
+        await elapseNext();
+        await client.emit(const RealtimeConnected());
+      },
+      expect: () => const [
+        DeviceRealtimeConnecting(),
+        DeviceRealtimeConnectionError(),
+        DeviceRealtimeConnecting(),
+        DeviceRealtimeConnected(),
+      ],
+    );
+
+    blocTest<DeviceRealtimeBloc, DeviceRealtimeState>(
+      '2/11. DEVICE_AUTH_UNAUTHORIZED renews at once and connects with the '
+      'new JWT',
+      build: buildBloc,
+      act: (bloc) async {
+        await connected(bloc);
+        await unauthorized();
+        await client.emit(const RealtimeConnected());
+      },
+      expect: () => const [
+        DeviceRealtimeConnecting(),
+        DeviceRealtimeConnected(),
+        DeviceRealtimeReconnecting(),
+        DeviceRealtimeConnected(),
+      ],
+      verify: (_) {
+        expect(authRepository.loginCount, 1);
+        expect(client.disconnectCount, 1, reason: 'the dead socket released');
+        expect(client.connectedWithTokens, [testDeviceJwt, testRenewedDeviceJwt]);
+      },
+    );
+
+    blocTest<DeviceRealtimeBloc, DeviceRealtimeState>(
+      '3/20. DEVICE_AUTH_UNAVAILABLE: no login, the JWT is kept, the socket is '
+      'released and the channel is not Connected',
+      build: buildBloc,
+      act: (bloc) async {
+        await connected(bloc);
+        await unavailable();
+        expect(bloc.state, const DeviceRealtimeReconnecting());
+        expect(nextDelay(), const Duration(seconds: 15),
+            reason: 'never retried at once');
+      },
+      expect: () => const [
+        DeviceRealtimeConnecting(),
+        DeviceRealtimeConnected(),
+        DeviceRealtimeReconnecting(),
+      ],
+      verify: (_) {
+        expect(authRepository.loginCount, 0);
+        expect(tokenStore.token, testDeviceJwt);
+        expect(storage.credentials, testCredentials);
+        expect(storage.clearCount, 0);
+        expect(client.disconnectCount, 1);
+        expect(client.connectedWithTokens, [testDeviceJwt]);
+      },
+    );
+
+    blocTest<DeviceRealtimeBloc, DeviceRealtimeState>(
+      '8/9. two UNAVAILABLE in a row: 15 s then 30 s, then the same JWT is '
+      'accepted on a new socket — still no login',
+      build: buildBloc,
+      act: (bloc) async {
+        await connected(bloc);
+        final delays = <Duration>[];
+        await unavailable();
+        delays.add(nextDelay());
+        await elapseNext();
+        await unavailable();
+        delays.add(nextDelay());
+        await elapseNext();
+        await client.emit(const RealtimeConnected());
+        expect(delays, const [Duration(seconds: 15), Duration(seconds: 30)]);
+      },
+      expect: () => const [
+        DeviceRealtimeConnecting(),
+        DeviceRealtimeConnected(),
+        DeviceRealtimeReconnecting(),
+        DeviceRealtimeConnected(),
+      ],
+      verify: (_) {
+        expect(authRepository.loginCount, 0);
+        // Three sockets, one JWT.
+        expect(client.connectedWithTokens, [
+          testDeviceJwt,
+          testDeviceJwt,
+          testDeviceJwt,
+        ]);
+        expect(client.disconnectCount, 2);
+        expect(timers.pending, isEmpty);
+      },
+    );
+
+    blocTest<DeviceRealtimeBloc, DeviceRealtimeState>(
+      'a long outage is bounded: 15, 30, 60, 60 s, one socket per step',
+      build: buildBloc,
+      act: (bloc) async {
+        await start(bloc);
+        final delays = <Duration>[];
+        for (var i = 0; i < 5; i++) {
+          await unavailable();
+          delays.add(nextDelay());
+          await elapseNext();
+        }
+        expect(delays, const [
+          Duration(seconds: 15),
+          Duration(seconds: 30),
+          Duration(seconds: 60),
+          Duration(seconds: 60),
+          Duration(seconds: 60),
+        ]);
+      },
+      verify: (_) {
+        expect(authRepository.loginCount, 0);
+        expect(client.connectedWithTokens.length, 6);
+        expect(timers.pending, isEmpty);
+      },
+    );
+
+    blocTest<DeviceRealtimeBloc, DeviceRealtimeState>(
+      '10. the JWT expires during the backoff: the next attempt is refused '
+      'and renewed on the backoff, then connects',
+      build: buildBloc,
+      act: (bloc) async {
+        await connected(bloc);
+        await unavailable();
+        await elapseNext(); // same JWT again, 15 s later
+        await unauthorized(); // ...now expired
+        expect(authRepository.loginCount, 0, reason: 'the backoff holds');
+        expect(nextDelay(), const Duration(seconds: 15));
+        await elapseNext();
+        await client.emit(const RealtimeConnected());
+      },
+      expect: () => const [
+        DeviceRealtimeConnecting(),
+        DeviceRealtimeConnected(),
+        DeviceRealtimeReconnecting(),
+        DeviceRealtimeConnected(),
+      ],
+      verify: (_) {
+        expect(authRepository.loginCount, 1);
+        expect(client.connectedWithTokens, [
+          testDeviceJwt,
+          testDeviceJwt,
+          testRenewedDeviceJwt,
+        ]);
+      },
+    );
+
+    blocTest<DeviceRealtimeBloc, DeviceRealtimeState>(
+      'never stuck on an expired JWT: after one refusal, the old token is not '
+      'presented again',
+      build: buildBloc,
+      act: (bloc) async {
+        await connected(bloc);
+        await unavailable();
+        await elapseNext();
+        await unauthorized(); // expired; renewal scheduled
+        await elapseNext(); // renewed to testRenewedDeviceJwt
+        await unavailable(); // database still down
+        await elapseNext();
+      },
+      verify: (_) {
+        expect(authRepository.loginCount, 1);
+        expect(client.connectedWithTokens, [
+          testDeviceJwt,
+          testDeviceJwt,
+          testRenewedDeviceJwt,
+          testRenewedDeviceJwt,
+        ]);
+      },
+    );
+
+    blocTest<DeviceRealtimeBloc, DeviceRealtimeState>(
+      '12. a confirmed refusal at the login stops everything and keeps the '
+      'enrollment',
+      build: buildBloc,
+      act: (bloc) async {
+        await connected(bloc);
+        await unavailable();
+        await elapseNext();
+        authRepository.loginResult = loginRejected;
+        await unauthorized();
+        await elapseNext();
+        timers.elapse(const Duration(minutes: 10));
+        await FakeDeviceRealtimeClient.pump();
+      },
+      expect: () => const [
+        DeviceRealtimeConnecting(),
+        DeviceRealtimeConnected(),
+        DeviceRealtimeReconnecting(),
+        DeviceRealtimeDisconnected(
+          cause: DeviceRealtimeStopCause.credentialRejected,
+        ),
+      ],
+      verify: (_) {
+        expect(authRepository.loginCount, 1, reason: 'no automatic loop');
+        expect(timers.pending, isEmpty);
+        expect(storage.credentials, testCredentials);
+        expect(storage.clearCount, 0);
+      },
+    );
+
+    blocTest<DeviceRealtimeBloc, DeviceRealtimeState>(
+      '13. REST renewed the JWT while UNAVAILABLE was backing off: the newer '
+      'token is presented, never the older one',
+      build: buildBloc,
+      act: (bloc) async {
+        await connected(bloc);
+        await unavailable();
+        tokenStore.save(testRenewedDeviceJwt); // REST's login, meanwhile
+        await elapseNext();
+        await client.emit(const RealtimeConnected());
+      },
+      verify: (_) {
+        expect(authRepository.loginCount, 0);
+        expect(client.connectedWithTokens, [testDeviceJwt, testRenewedDeviceJwt]);
+      },
+    );
+
+    blocTest<DeviceRealtimeBloc, DeviceRealtimeState>(
+      '13. REST renewed the JWT while a refusal was backing off: the newer '
+      'token is presented without another login',
+      build: buildBloc,
+      act: (bloc) async {
+        await connected(bloc);
+        await unavailable();
+        await elapseNext();
+        await unauthorized(); // renewal on the 15 s step
+        tokenStore.save('header.rest-payload.signature'); // REST, meanwhile
+        await elapseNext();
+      },
+      verify: (_) {
+        expect(authRepository.loginCount, 0);
+        expect(client.connectedWithTokens.last, 'header.rest-payload.signature');
+      },
+    );
+
+    blocTest<DeviceRealtimeBloc, DeviceRealtimeState>(
+      'authorisation withdrawn during the backoff: nothing is presented',
+      build: buildBloc,
+      act: (bloc) async {
+        await connected(bloc);
+        await unavailable();
+        tokenStore.clear(); // the session is withdrawing it
+        await elapseNext();
+      },
+      verify: (_) {
+        expect(client.connectedWithTokens, [testDeviceJwt]);
+        expect(authRepository.loginCount, 0);
+        expect(timers.pending, isEmpty);
+      },
+    );
+
+    blocTest<DeviceRealtimeBloc, DeviceRealtimeState>(
+      'authorisation withdrawn while the renewal was on the wire: its token '
+      'opens no socket',
+      build: buildBloc,
+      act: (bloc) async {
+        await connected(bloc);
+        authRepository.loginGate = Completer<void>();
+        await client.emit(const RealtimeHandshakeRejected());
+        tokenStore.clear(); // a confirmed refusal elsewhere, say
+        authRepository.loginGate!.complete();
+        await FakeDeviceRealtimeClient.pump();
+        await FakeDeviceRealtimeClient.pump();
+      },
+      verify: (_) {
+        expect(authRepository.loginCount, 1);
+        expect(tokenStore.token, isNull, reason: 'not installed (epoch)');
+        expect(client.connectedWithTokens, [testDeviceJwt]);
+      },
+    );
+
+    blocTest<DeviceRealtimeBloc, DeviceRealtimeState>(
+      '14. stop and start during the backoff: the old timer is gone and the '
+      'new start connects at once',
+      build: buildBloc,
+      act: (bloc) async {
+        await connected(bloc);
+        await unavailable();
+        bloc.add(const DeviceRealtimeStopRequested());
+        await FakeDeviceRealtimeClient.pump();
+        expect(timers.pending, isEmpty, reason: 'the stop cancels it');
+        await start(bloc);
+        timers.elapse(const Duration(minutes: 5));
+        await FakeDeviceRealtimeClient.pump();
+      },
+      expect: () => const [
+        DeviceRealtimeConnecting(),
+        DeviceRealtimeConnected(),
+        DeviceRealtimeReconnecting(),
+        DeviceRealtimeDisconnected(),
+        DeviceRealtimeConnecting(),
+      ],
+      verify: (_) {
+        expect(client.connectedWithTokens, [testDeviceJwt, testDeviceJwt]);
+        expect(authRepository.loginCount, 0);
+      },
+    );
+
+    blocTest<DeviceRealtimeBloc, DeviceRealtimeState>(
+      '15. an UNAVAILABLE arriving after a stop is ignored',
+      build: buildBloc,
+      act: (bloc) async {
+        await connected(bloc);
+        bloc.add(const DeviceRealtimeStopRequested());
+        await FakeDeviceRealtimeClient.pump();
+        await unavailable();
+        timers.elapse(const Duration(minutes: 5));
+        await FakeDeviceRealtimeClient.pump();
+      },
+      expect: () => const [
+        DeviceRealtimeConnecting(),
+        DeviceRealtimeConnected(),
+        DeviceRealtimeDisconnected(),
+      ],
+      verify: (_) {
+        expect(timers.pending, isEmpty);
+        expect(client.connectedWithTokens, [testDeviceJwt]);
+      },
+    );
+
+    blocTest<DeviceRealtimeBloc, DeviceRealtimeState>(
+      '16. io server disconnect still renews, as in Prompt 35',
+      build: buildBloc,
+      act: (bloc) async {
+        await connected(bloc);
+        await client.emit(const RealtimeServerDisconnected());
+        await FakeDeviceRealtimeClient.pump();
+      },
+      verify: (_) {
+        expect(authRepository.loginCount, 1);
+        expect(client.connectedWithTokens, [testDeviceJwt, testRenewedDeviceJwt]);
+      },
+    );
+
+    blocTest<DeviceRealtimeBloc, DeviceRealtimeState>(
+      'an UNAVAILABLE while a renewal is in flight starts nothing else',
+      build: buildBloc,
+      act: (bloc) async {
+        await connected(bloc);
+        authRepository.loginGate = Completer<void>();
+        await client.emit(const RealtimeHandshakeRejected()); // login starts
+        await unavailable(); // a stray one; there is no socket to speak for
+        expect(timers.pending, isEmpty);
+        authRepository.loginGate!.complete();
+        await FakeDeviceRealtimeClient.pump();
+        await FakeDeviceRealtimeClient.pump();
+      },
+      verify: (_) {
+        expect(authRepository.loginCount, 1);
+        expect(client.connectedWithTokens, [testDeviceJwt, testRenewedDeviceJwt]);
+      },
+    );
+
+    blocTest<DeviceRealtimeBloc, DeviceRealtimeState>(
+      'a stable connection resets the count, for UNAVAILABLE too',
+      build: buildBloc,
+      act: (bloc) async {
+        await connected(bloc);
+        await unavailable();
+        await elapseNext();
+        await client.emit(const RealtimeConnected());
+        timers.elapse(const Duration(seconds: 31)); // stable
+        await unavailable();
+        expect(nextDelay(), const Duration(seconds: 15));
+      },
+    );
+
+    test('17. an intentional close leaves no socket and no timer behind',
+        () async {
+      final bloc = buildBloc();
+      await connected(bloc);
+      await unavailable();
+      expect(timers.pending, hasLength(1));
+
+      await bloc.close();
+      timers.elapse(const Duration(minutes: 5));
+      await FakeDeviceRealtimeClient.pump();
+
+      expect(client.disposeCount, 1);
+      expect(timers.pending, isEmpty);
+      expect(client.connectedWithTokens, [testDeviceJwt]);
+    });
+  });
+
   group('session invalidation', () {
     blocTest<DeviceRealtimeBloc, DeviceRealtimeState>(
       'stopping releases the socket and ignores anything it says afterwards',

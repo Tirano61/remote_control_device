@@ -5,7 +5,8 @@ and why none of them deletes the stored enrollment.
 
 Contract: [`docs/backend/ENDPOINTS.md`](../backend/ENDPOINTS.md) — *Application
 error codes*, `POST /device-auth/login`, `GET /device-auth/check-status` — and
-[`docs/backend/REALTIME.md`](../backend/REALTIME.md), *Authentication*.
+[`docs/backend/REALTIME.md`](../backend/REALTIME.md), *Authentication* and
+*Handshake errors*.
 
 ## Why this exists
 
@@ -121,7 +122,7 @@ renewing the JWT after a `401`:
 
 ```text
 authenticated REST call ──401──> renew ──┐
-Socket.IO handshake refused ──> renew ───┤
+DEVICE_AUTH_UNAUTHORIZED ──> renew ──────┤
 Socket.IO io server disconnect ──> renew ┼── 401 + code ──> report ──> CredentialRefused
                                          └── anything else ──> nothing reported;
                                              the call fails as retryable /
@@ -141,12 +142,14 @@ afterwards, so `CredentialRefused` could hold a JWT.
 
 ### Socket.IO
 
-A `connect_error` counts as the namespace refusing the token only if its
-message is exactly `Unauthorized` (REALTIME.md). A proxy page or an error text
-containing the word is a transport failure. Even the exact message only starts
-a renewal; it never proves anything about the credential. An upgrade refused by
-an intermediary (`401`/`302` on the WebSocket request) is a transport failure
-too, retried with the socket's own backoff.
+The `/devices` handshake answers a refusal with a stable `data.code`
+([Handshake error codes](#handshake-error-codes-prompt-36)).
+`DEVICE_AUTH_UNAUTHORIZED` starts a renewal, `DEVICE_AUTH_UNAVAILABLE` does
+not. Neither proves anything about the credential; only the renewal's
+`401 DEVICE_CREDENTIAL_REJECTED` does. A proxy page, an error text containing
+"unauthorized", or an upgrade refused by an intermediary (`401`/`302` on the
+WebSocket request) is a transport failure, retried with the socket's own
+backoff.
 
 [Socket.IO recovery](#socketio-recovery) covers the cases the socket cannot
 recover from by itself.
@@ -181,17 +184,21 @@ The tablet could stay offline until the app was restarted:
 | Signal | Cause | Who reconnects |
 |---|---|---|
 | `RealtimeDisconnected`, `RealtimeConnectFailed()` | lost transport, network, timeout | the package, same socket, same JWT |
-| `RealtimeHandshakeRejected` | `connect_error: Unauthorized`: expired JWT, deactivated device, revoked credential, **or a backend that failed to check** | the bloc |
-| `RealtimeServerDisconnected` | `io server disconnect`: the backend closed the socket (deactivation, re-enrollment elsewhere) | the bloc |
-| `RealtimeConnectFailed(transportRetrying: false)` | a namespace refusal with any other message | the bloc |
+| `RealtimeHandshakeRejected` | `DEVICE_AUTH_UNAUTHORIZED`: expired JWT, deactivated device, revoked credential. Also the bare `Unauthorized` of a backend older than the codes | the bloc, after a renewal |
+| `RealtimeHandshakeUnavailable` | `DEVICE_AUTH_UNAVAILABLE`: the backend could not check the token | the bloc, **same JWT, no login** |
+| `RealtimeServerDisconnected` | `io server disconnect`: the backend closed the socket (deactivation, re-enrollment elsewhere) | the bloc, after a renewal |
+| `RealtimeConnectFailed(transportRetrying: false)` | a namespace refusal this client cannot read: unknown code, malformed body, other message | the bloc, after a renewal |
 
 The client picks between them with `socket.active`, which is the package's own
 answer to "will I reconnect?". A close the app asked for never produces a
 signal, because listeners are detached first.
 
 When the bloc reconnects, it releases the dead socket (a destroyed socket is
-never reused), renews the JWT through `POST /device-auth/login`, and then
-handles the answer:
+never reused). After `DEVICE_AUTH_UNAVAILABLE` it opens a new socket with the
+current JWT once the backoff step has passed (see
+[Handshake error codes](#handshake-error-codes-prompt-36)). After anything else
+it renews the JWT through `POST /device-auth/login`, and then handles the
+answer:
 
 * **`200`:** opens a new socket with the new JWT.
 * **`401 DEVICE_CREDENTIAL_REJECTED`:** stops the channel. The session moves to
@@ -205,9 +212,13 @@ handles the answer:
 ### Backoff
 
 ```text
-first recovery since the last stable connection   at once
-then                                              15 s, 30 s, 60 s, 60 s, ...
+                                            renewal             DEVICE_AUTH_UNAVAILABLE
+first recovery since a stable connection    at once             15 s
+then                                        15, 30, 60, 60 s    30, 60, 60 s, ...
 ```
+
+Both kinds share one count: an UNAVAILABLE followed by an UNAUTHORIZED is the
+second step, not a fresh first one.
 
 * **It never stops by itself.** A refused fresh JWT is what a database blip
   looks like from the tablet, and blips heal.
@@ -219,6 +230,10 @@ then                                              15 s, 30 s, 60 s, 60 s, ...
 * **There is one retry at a time.** There is never more than one retry timer.
   Logins are serialised, so a renewal never starts while another one is still
   waiting for its answer, even one from an older generation.
+* **One login at a time, application-wide (Prompt 36).** `RenewDeviceToken` is
+  shared by REST and Socket.IO. A call made while a login is on the wire joins
+  it instead of starting another, so an earlier login can never land after a
+  later one and replace its token.
 * **Configuration:** `AppConfig.realtimeRecoveryBackoff` and
   `AppConfig.realtimeStableConnectionPeriod`.
 
@@ -256,25 +271,101 @@ Sockets are built, connected and disposed inside `runInSocketZone`
 * Synchronous exceptions still reach the caller.
 * No global error handler was added.
 
-### Pending on the backend
+### Handshake error codes (Prompt 36)
 
-The handshake middleware answers `Unauthorized` both when it refuses a token
-and when its own check fails:
+Prompt 33 BACKEND gave the `/devices` refusals a stable code. Until then the
+middleware answered `Unauthorized` both when it refused a token and when its
+own database check failed, so every PostgreSQL blip cost the tablet a login
+that could only fail against the same database.
+
+#### Contract
 
 ```text
-namespace.use: authenticate(socket).then(next, () => next(new Error('Unauthorized')))
-a PostgreSQL error inside authorizePayload  ->  connect_error "Unauthorized"
+44/devices,{"message":"Unauthorized","data":{"code":"DEVICE_AUTH_UNAUTHORIZED"}}
+44/devices,{"message":"Service unavailable","data":{"code":"DEVICE_AUTH_UNAVAILABLE"}}
 ```
 
-The client is safe with this: it infers nothing from a refused handshake, and
-only the login can confirm a refusal. The cost is that every database blip
-spends a login and delays recovery by one backoff step.
+`socket_io_client` 3.1.6 hands `onConnectError` the packet data unchanged: a
+`Map` with `message` and `data.code`. Both refusals destroy the socket
+(`socket.active == false`). Verified on 2026-11-19 against the shared backend on
+port 3000 and through the `…-3000` tunnel, with a malformed token that is
+refused before any database access, and with the isolated harness.
 
-Proposal for `remote_control_backend` (not implemented; the contract is
-unchanged): reject infrastructure failures with a distinct, documented
-`connect_error` — a different message, or a `data` object with a stable code
-that marks the refusal as temporary. Clients could then retry without renewing.
-Until such a field is in `REALTIME.md`, the client must not read one.
+#### Classification
+
+[`classifyHandshakeError`](../../lib/features/device/data/realtime/device_realtime_payloads.dart):
+
+| `connect_error` | Kind | Signal |
+|---|---|---|
+| `data.code == "DEVICE_AUTH_UNAUTHORIZED"` | `unauthorized` | `RealtimeHandshakeRejected` |
+| `data.code == "DEVICE_AUTH_UNAVAILABLE"` | `unavailable` | `RealtimeHandshakeUnavailable` |
+| no `data.code`, message exactly `Unauthorized` (map or string) | `legacyUnauthorized` | `RealtimeHandshakeRejected` |
+| unknown code, `code` not a string, `data` not a map, another message, `Service unavailable` without its code | `unrecognized` | `RealtimeConnectFailed(transportRetrying: false)` |
+| transport errors (`{msg, desc, type: TransportError}`, `{error: 'server error', code}`, strings, exceptions) | `unrecognized` | `RealtimeConnectFailed()`, the package retries |
+
+* **The code decides, not the message.** With the messages swapped, the code
+  still decides. The message is read for one thing only: recognising a backend
+  older than the codes by its exact `Unauthorized`.
+* **Only `data.code` counts.** The engine's `{error: 'server error', code: …}`
+  has a top-level `code`; it is a transport error.
+* **An unknown code grants nothing.** It is recovered the way every
+  unrecognised namespace refusal already was: release the socket and renew on
+  the backoff. A renewal is never less safe than waiting, and a confirmed
+  refusal still needs the login's `401 DEVICE_CREDENTIAL_REJECTED`.
+
+#### DEVICE_AUTH_UNAUTHORIZED
+
+Unchanged from Prompt 35:
+
+1. Control is suspended (the state is not `Connected`) and the socket released.
+2. The JWT is renewed through the login: at once after a stable connection,
+   otherwise on the backoff.
+3. A new socket is opened with the new JWT.
+4. A login answered `401 DEVICE_CREDENTIAL_REJECTED` stops the channel:
+   `CredentialRefused`, enrollment kept, nothing automatic.
+
+Two additions:
+
+* Before logging in, the bloc reads the token store. If it holds a token newer
+  than the refused one (REST renewed it while the socket waited), that token is
+  presented instead of minting another.
+* If the store is empty when the login answers (authorisation was withdrawn
+  meanwhile, so the epoch kept the token out), no socket is opened.
+
+#### DEVICE_AUTH_UNAVAILABLE
+
+```text
+DEVICE_AUTH_UNAVAILABLE
+        ↓
+Reconnecting / ConnectionError         (never Connected: control suspended)
+        ↓
+release the socket; keep the JWT and the enrollment; no login
+        ↓
+backoff: 15 s, 30 s, 60 s, 60 s, ...   (never at once)
+        ↓
+new socket with the JWT the store holds now
+        ├── accepted ──> Connected ──> REST re-read decides the session
+        ├── DEVICE_AUTH_UNAVAILABLE ──> next step
+        └── DEVICE_AUTH_UNAUTHORIZED (expired meanwhile) ──> renewal on the backoff
+```
+
+* **Keeping a token is not trusting it.** Nothing is `Connected`, and nothing
+  is authorised, until a handshake is accepted and the REST reads confirm the
+  session. A `CLOSED` session is never recovered.
+* **"The JWT the store holds now".** It is read when the retry comes due, not
+  when the refusal arrived. If REST renewed it in between, the newer token is
+  presented; an older one never replaces it. If the store is empty
+  (authorisation withdrawn), nothing is presented and nothing is scheduled: the
+  session is about to stop the channel.
+* **Expiry during the outage.** The backend checks signature and expiry before
+  touching the database, so an expired JWT gets `DEVICE_AUTH_UNAUTHORIZED` even
+  while the database is down. That starts a renewal, and the expired token is
+  never presented again. While the database is down the login answers `500`,
+  which confirms nothing and is retried after 15 s; the enrollment is kept.
+* **Generations.** A stop, a restart or a close cancels the pending retry, and
+  a timer of an older generation does nothing.
+* **Unchanged.** `io server disconnect` still renews. A close the app asks for
+  never reconnects. There is never a second socket or a second timer.
 
 ### Tools
 
@@ -284,8 +375,10 @@ Until such a field is in `REALTIME.md`, the client must not read one.
   `test/integration/socket_reconnect_isolated_test.dart` drives it; that test
   is skipped unless `REALTIME_HARNESS` is set.
 * **A fault relay** for physical tests. It reproduces the backend's refusals
-  and disconnections, byte for byte, in front of the real backend, without
-  modifying it.
+  (`DEVICE_AUTH_UNAUTHORIZED`, `DEVICE_AUTH_UNAVAILABLE`, the legacy bare
+  `Unauthorized`) and disconnections, byte for byte, in front of the real
+  backend, without modifying it. `closeDevices` closes the tablet's socket
+  gracefully, which a dev tunnel forwards at once.
 
 ## Why a confirmed rejection keeps the credential
 
@@ -339,6 +432,8 @@ place. Nothing in the application deletes the credential any more.
   refused at the handshake again, the realtime channel stops (as before) and
   stays disconnected until the session is re-established; it does not spin
   through logins.
+* **Socket.IO handshake codes (Prompt 36).** See
+  [Limitations (Prompt 36)](#limitations-prompt-36).
 * **Activation `401`.** `POST /device-enrollment/activate` has no application
   code; a tunnel's `401` there reads as "code not valid". No stored credential
   is affected.
@@ -401,3 +496,72 @@ Only covered by tests, not on the device:
 * a server disconnect during a live remote session (`webrtc_coordinator_test`,
   group 19). It needs Accessibility and a MediaProjection consent by hand, and
   `enabled_accessibility_services` was `null` on the T10A throughout.
+
+### Handshake error codes on the T10A (Prompt 36)
+
+Setup, 2026-11-19 (times UTC):
+
+* **Tablet:** physical T10A (`LSTT10M2026081504`), debug build of
+  `fix/device-socket-handshake-error-codes` for `…-3010`, installed with
+  `install -r` (same `firstInstallTime`, enrollment kept).
+* **Backend:** the shared one on port 3000, untouched (`nest start --watch`
+  serving `dist` built from backend `main` f7eba5a). Its codes were checked
+  first with a malformed token, which is refused before any database access.
+* **Fault injection:** `tool/realtime_harness/fault_relay.js` behind the
+  `…-3010` dev-tunnel port (Public), injecting the backend's exact
+  `CONNECT_ERROR` frames. The login refusal in E is synthesised by the relay, so
+  it never reached the database.
+* **Web console:** `remote_control_web` served locally on `:5173` against the
+  same backend.
+* **Observation:** the relay log (`tok#n` labels only; a relay restart resets
+  them), screencaps, the console, and a filtered logcat. No mobile-mcp and no
+  UiAutomation.
+
+| Test | Fault | Tablet / relay | Console |
+|---|---|---|---|
+| A normal | none | login `tok#2`, check-status 200, socket accepted, REST re-read; "Conectado" | Online |
+| B unavailable | 2 × `DEVICE_AUTH_UNAVAILABLE` | refused 13:07:19.98 and 13:07:35.69 (**+15.7 s**), **always `tok#2`, no login**; "Reconectando...", assistance disabled | Offline |
+| C recovery | relay passes | accepted 13:08:08.25 (**+32.6 s**: the 30 s step), same `tok#2`, still no login, REST re-read | Online |
+| D expired | UNAVAILABLE, then `DEVICE_AUTH_UNAUTHORIZED` armed during the backoff | UNAVAILABLE 13:08:56.70 (`tok#2`) → +16.0 s same `tok#2` refused UNAUTHORIZED → login on the 15 s step (13:09:29.9) → `tok#3` accepted; one login | Online |
+| D′ legacy | bare `{"message":"Unauthorized"}` | renewed at once (login 2.5 s later) → `tok#4` accepted | Online |
+| E refusal | UNAUTHORIZED + login `401 DEVICE_CREDENTIAL_REJECTED` | login at once, then "Autenticación rechazada"; **no request at all for 132 s**; "Reintentar" → login 200 with the same stored credential (`tok#5`), check-status 200, socket accepted | Offline → Online |
+| F active session | `DEVICE_AUTH_UNAVAILABLE` during an `ACTIVE` assistance (`closeDevices`) | baseline remote tap ran (10:18:03.675 local); after the drop the tablet showed "Control remoto: suspendido hasta confirmar con el servidor" and a tap sent then **did not run** (console: "La asistencia no está activa en el dispositivo"); same JWT accepted 17.7 s later, no login, `GET /device/remote-sessions/current`, then a new tap ran (10:18:45.674) | Online, "Toque enviado" |
+| F′ closed meanwhile | UNAVAILABLE, then "Finalizar asistencia" in the console during the backoff | same JWT accepted after the 30 s step (the previous connection had lasted 23 s, not stable), REST read: no session; "La asistencia fue cerrada por el servidor", capture indicator gone, `dumpsys media_projection` empty; nothing recovered | Online, history +1 |
+
+The app process stayed the same from A to F′. The user accepted the technician
+and granted MediaProjection by hand; Accessibility was already enabled. A
+cut behind the dev tunnel only reaches the tablet after the Engine.IO ping
+timeout (~45 s), which outlasts the backend's 60 s session grace once the 15 s
+step is added, so F used the relay's `closeDevices` (a graceful WebSocket
+close, which the tunnel forwards: the tablet re-handshook 3.2 s later).
+Afterwards a `…-3000` build of this branch was reinstalled; it connected
+through the `…-3000` tunnel, Online in the console, with Accessibility still
+enabled.
+
+In F′ the console also closed its peer connection, so the screen capture may
+have been taken down by that before the REST read; either way the read found no
+session and nothing came back.
+
+Only covered by tests, not on the device:
+
+* REST renewing the JWT during the backoff (`device_realtime_bloc_test`, P36
+  13), and a withdrawal during the backoff or during the login;
+* an unknown or malformed code (`device_realtime_contract_test`);
+* a real PostgreSQL failure and a JWT that really expires while the database is
+  down (the isolated harness: E1–E5, with the backend's own gateway).
+
+### Limitations (Prompt 36)
+
+* **A database that hangs without failing** still produces no `connect_error`
+  (backend limitation): the client sees a transport close after the server's
+  `connectTimeout` and the package retries with the same token.
+* **The client does not read the JWT's expiry.** It relies on the backend
+  checking expiry before the database, so an expired token is answered
+  `DEVICE_AUTH_UNAUTHORIZED`. A backend that answered UNAVAILABLE for an
+  expired token would keep the client on the same token, bounded by the 60 s
+  step, until the database answered.
+* **An unknown future code is renewed.** That costs one login per backoff step
+  until the client learns the code.
+* **Not a proof of origin.** As with the REST codes, anything able to forge the
+  frames can forge `data.code`. The worst a forged UNAVAILABLE can do is delay
+  the next attempt by one step; it never authorises anything.
