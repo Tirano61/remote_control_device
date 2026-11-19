@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:remote_control_device/core/error/failures.dart';
 import 'package:remote_control_device/core/result/result.dart';
 import 'package:remote_control_device/core/session/device_token_store.dart';
@@ -149,13 +151,22 @@ class FakeDeviceAuthRepository implements DeviceAuthRepository {
   int checkStatusCount = 0;
   int endSessionCount = 0;
 
+  /// When set, every login waits for it before answering — the only way to
+  /// act *while* a login is in flight (stop, restart, close the bloc).
+  /// [loginCount] counts a login as soon as it starts.
+  Completer<void>? loginGate;
+
   @override
   Future<Result<DeviceSession>> login(DeviceCredentials credentials) async {
     loginCount++;
     lastLoginCredentials = credentials;
+    final epoch = tokenStore?.epoch;
+    await loginGate?.future;
     final result = loginQueue.isEmpty ? loginResult : loginQueue.removeAt(0);
     if (result case Ok<DeviceSession>(:final value)) {
-      tokenStore?.save(value.token);
+      // Same rule as the real repository: a withdrawal while the login was
+      // in flight means its token is not installed.
+      if (tokenStore?.epoch == epoch) tokenStore?.save(value.token);
     }
     return result;
   }
