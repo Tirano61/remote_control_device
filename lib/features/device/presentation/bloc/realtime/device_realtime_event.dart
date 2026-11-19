@@ -31,14 +31,16 @@ final class _SignalReceived extends DeviceRealtimeEvent {
   List<Object?> get props => [signal];
 }
 
-/// The single deferred retry came due: renew the Device JWT and open a new
-/// socket. Tagged with the generation that scheduled it, so a timer that
-/// outlived its generation does nothing.
+/// The single deferred retry came due: open a new socket — after renewing the
+/// Device JWT when [renew], with the current one otherwise. Tagged with the
+/// generation that scheduled it, so a timer that outlived its generation does
+/// nothing.
 final class _RetryDue extends DeviceRealtimeEvent {
-  const _RetryDue(this.generation);
+  const _RetryDue(this.generation, {required this.renew});
 
   final int generation;
+  final bool renew;
 
   @override
-  List<Object?> get props => [generation];
+  List<Object?> get props => [generation, renew];
 }

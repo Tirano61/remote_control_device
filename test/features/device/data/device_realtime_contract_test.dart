@@ -477,13 +477,141 @@ void main() {
     });
   });
 
-  group('connect_error classification', () {
-    test('the generic Unauthorized is recognised in either shape', () {
-      expect(isUnauthorizedHandshakeError({'message': 'Unauthorized'}), isTrue);
-      expect(isUnauthorizedHandshakeError('Unauthorized'), isTrue);
+  group('connect_error classification (P36)', () {
+    // The exact maps socket_io_client 3.1.6 hands to onConnectError for the
+    // frames REALTIME.md documents (verified against the backend).
+    const unauthorized = {
+      'message': 'Unauthorized',
+      'data': {'code': 'DEVICE_AUTH_UNAUTHORIZED'},
+    };
+    const unavailable = {
+      'message': 'Service unavailable',
+      'data': {'code': 'DEVICE_AUTH_UNAVAILABLE'},
+    };
+
+    test('2. DEVICE_AUTH_UNAUTHORIZED is a refusal of the token', () {
+      expect(
+        classifyHandshakeError(unauthorized),
+        HandshakeErrorKind.unauthorized,
+      );
     });
 
-    test('only the exact documented message counts', () {
+    test('3. DEVICE_AUTH_UNAVAILABLE says nothing about the token', () {
+      expect(
+        classifyHandshakeError(unavailable),
+        HandshakeErrorKind.unavailable,
+      );
+    });
+
+    test('the code decides, not the message', () {
+      // Swapped messages: the code still wins either way.
+      expect(
+        classifyHandshakeError({
+          'message': 'Unauthorized',
+          'data': {'code': 'DEVICE_AUTH_UNAVAILABLE'},
+        }),
+        HandshakeErrorKind.unavailable,
+      );
+      expect(
+        classifyHandshakeError({
+          'message': 'Service unavailable',
+          'data': {'code': 'DEVICE_AUTH_UNAUTHORIZED'},
+        }),
+        HandshakeErrorKind.unauthorized,
+      );
+      // No message at all.
+      expect(
+        classifyHandshakeError({
+          'data': {'code': 'DEVICE_AUTH_UNAVAILABLE'},
+        }),
+        HandshakeErrorKind.unavailable,
+      );
+    });
+
+    test('4. a bare Unauthorized without a code is the legacy refusal, in '
+        'either shape', () {
+      expect(
+        classifyHandshakeError({'message': 'Unauthorized'}),
+        HandshakeErrorKind.legacyUnauthorized,
+      );
+      expect(
+        classifyHandshakeError('Unauthorized'),
+        HandshakeErrorKind.legacyUnauthorized,
+      );
+      // A `data` that carries no code is no code.
+      expect(
+        classifyHandshakeError({'message': 'Unauthorized', 'data': null}),
+        HandshakeErrorKind.legacyUnauthorized,
+      );
+      expect(
+        classifyHandshakeError({'message': 'Unauthorized', 'data': {}}),
+        HandshakeErrorKind.legacyUnauthorized,
+      );
+    });
+
+    test('the infrastructure text without its code is not read as anything',
+        () {
+      // Never inferred from the message: without the code it is unrecognised.
+      expect(
+        classifyHandshakeError({'message': 'Service unavailable'}),
+        HandshakeErrorKind.unrecognized,
+      );
+    });
+
+    test('5. an unknown code is neither refusal nor availability', () {
+      for (final code in [
+        'DEVICE_AUTH_SOMETHING_NEW',
+        'device_auth_unauthorized',
+        'DEVICE_AUTH_UNAUTHORIZED ',
+        'DEVICE_CREDENTIAL_REJECTED',
+        '',
+      ]) {
+        expect(
+          classifyHandshakeError({
+            'message': 'Unauthorized',
+            'data': {'code': code},
+          }),
+          HandshakeErrorKind.unrecognized,
+          reason: code,
+        );
+      }
+    });
+
+    test('6. a malformed error is never a documented refusal', () {
+      // A code that is not a string is no code: only the legacy rule applies.
+      expect(
+        classifyHandshakeError({
+          'message': 'Unauthorized',
+          'data': {'code': 401},
+        }),
+        HandshakeErrorKind.legacyUnauthorized,
+      );
+      for (final malformed in <Object?>[
+        {
+          'message': 42,
+          'data': {'code': 42},
+        },
+        {
+          'data': 'DEVICE_AUTH_UNAVAILABLE',
+        },
+        {
+          'data': ['DEVICE_AUTH_UNAUTHORIZED'],
+        },
+        {'code': 'DEVICE_AUTH_UNAUTHORIZED'},
+        {'error': 'Unauthorized'},
+        {'message': 401},
+        const ['Unauthorized'],
+        42,
+      ]) {
+        expect(
+          classifyHandshakeError(malformed),
+          HandshakeErrorKind.unrecognized,
+          reason: '$malformed',
+        );
+      }
+    });
+
+    test('only the exact legacy message counts', () {
       // A proxy page or an error text that merely mentions the word is not the
       // namespace speaking, and none of these may start a renewal.
       for (final message in [
@@ -494,26 +622,37 @@ void main() {
         'Unauthorized: tunnel sign-in required',
         '<html><title>401 Unauthorized</title></html>',
       ]) {
-        expect(isUnauthorizedHandshakeError(message), isFalse, reason: message);
         expect(
-          isUnauthorizedHandshakeError({'message': message}),
-          isFalse,
+          classifyHandshakeError(message),
+          HandshakeErrorKind.unrecognized,
+          reason: message,
+        );
+        expect(
+          classifyHandshakeError({'message': message}),
+          HandshakeErrorKind.unrecognized,
           reason: message,
         );
       }
-      expect(isUnauthorizedHandshakeError({'error': 'Unauthorized'}), isFalse);
-      expect(isUnauthorizedHandshakeError({'message': 401}), isFalse);
     });
 
-    test('transport failures are not mistaken for an auth problem', () {
-      // Assuming otherwise would make a bad network trigger login attempts.
-      expect(isUnauthorizedHandshakeError('timeout'), isFalse);
-      expect(isUnauthorizedHandshakeError(null), isFalse);
-      expect(isUnauthorizedHandshakeError(Exception('connection refused')), isFalse);
-      expect(
-        isUnauthorizedHandshakeError({'message': 'xhr poll error'}),
-        isFalse,
-      );
+    test('7. transport failures are not mistaken for an auth problem', () {
+      // The shapes the engine produces. `{error: 'server error', code: …}`
+      // has a top-level `code`, which is not `data.code`.
+      for (final transport in <Object?>[
+        'timeout',
+        'websocket error',
+        null,
+        Exception('connection refused'),
+        {'message': 'xhr poll error'},
+        {'msg': 'websocket error', 'desc': null, 'type': 'TransportError'},
+        {'error': 'server error', 'code': 'DEVICE_AUTH_UNAUTHORIZED'},
+      ]) {
+        expect(
+          classifyHandshakeError(transport),
+          HandshakeErrorKind.unrecognized,
+          reason: '$transport',
+        );
+      }
     });
   });
 }
