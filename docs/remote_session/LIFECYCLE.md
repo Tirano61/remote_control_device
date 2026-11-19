@@ -144,6 +144,11 @@ the session on its next start.
   backend checks ownership on every call made with it.
 - It is written before the POST and cleared only on a backend confirmation (200
   `CLOSED`, or a successful `/current` that no longer returns it as live).
+- Since Prompt 38 it also records whether a close is owed
+  (`remote_session.ended_pending_cause`): absent for FINALIZAR, `authorityLost`
+  for a session the tablet stopped by itself. The latter is still refused after a
+  restart, but no close is ever sent for it. A marker of an older build has no
+  cause and reads as FINALIZAR, which is what it was.
 - It survives clearing the device credentials, so a re-enrolled installation still
   refuses it.
 - A store that cannot be read or written is logged and does not block the local
@@ -208,26 +213,43 @@ on the tablet, while WebRTC, which does not go through the backend, keeps
 working. That was C2. The tablet now treats the socket as what its authority
 hangs on.
 
+Policy since Prompt 38 (see [Authority recovery](#authority-recovery-prompt-38)
+for why it changed):
+
 ```text
 socket up, and a GET /current that STARTED after it came up says ACTIVE
-                                    ──> confirmed: commands run
+                                    ──> confirmed: commands run; the signaling
+                                        room is joined only now
 socket drops                        ──> suspended at once (synchronous):
                                         commands refused with session_not_active,
                                         queued ones dropped, a touch abandoned.
                                         Peer, channel and screen kept.
-                                        Grace period starts (45 s).
-socket back                         ──> still suspended; GET /current is sent
-  GET says ACTIVE, same session     ──> confirmed again; grace cancelled.
-                                        Commands sent while suspended were
-                                        refused, not queued: none of them runs.
+                                        Grace period starts (75 s).
+                                        GET /current re-read with backoff
+                                        2, 4, 8, 8... s, socket up or down
+socket back                         ──> still suspended, NOT rejoined; GET sent;
+                                        backoff starts over at 2 s
+  GET says ACTIVE, socket up,
+    read started after it came up   ──> confirmed again; grace and re-reads
+                                        cancelled; room joined. Commands sent
+                                        while suspended were refused, not
+                                        queued: none of them runs.
+  GET says ACTIVE, socket down      ──> stays suspended (never confirms)
   GET says null / another session   ──> the session is over: everything torn
-                                        down (Idle(lastClosure: unknown))
-  GET fails, times out, 401, 5xx    ──> stays suspended; grace keeps running
-grace runs out while suspended      ──> ended here, exactly as FINALIZAR:
-                                        RemoteSessionEndedLocally(authorityLost),
-                                        marker written, POST close sent (and
-                                        re-sent on the next reconnection if the
-                                        backend still says ACTIVE)
+                                        down at once, socket up or down
+                                        (Idle(interrupted: true))
+  GET fails, times out, 401, 5xx    ──> stays suspended; next re-read scheduled;
+                                        grace keeps running
+remote-session:closed               ──> ClosedRemotely at once, as always
+FINALIZAR while suspended           ──> the user's end: EndedLocally(userRequest),
+                                        POST close (endedBy DEVICE, correct)
+credential revoked                  ──> reset: Initial, everything torn down
+grace runs out while suspended      ──> ended here, torn down exactly as
+                                        FINALIZAR: EndedLocally(authorityLost),
+                                        marker written (closeOwed: false).
+                                        NO close is sent, then or later: the
+                                        device is not in the room, so the
+                                        backend closes it itself (SYSTEM)
 ```
 
 Read epochs. Every change of the socket's state, every closure of the session
@@ -244,31 +266,35 @@ A failure never upgrades: a confirmed session stays confirmed through a failed
 read only while the socket stays up (the channel that would carry a close is
 still there); a suspended one stays suspended.
 
-### Why 45 s, and when it starts
+### Why 75 s, and when it starts
 
-`RemoteSessionBloc.defaultAuthorityGracePeriod` = 45 s, counted from the moment
-**this tablet** sees its socket leave `connected`. The backend's own grace
+`RemoteSessionBloc.defaultAuthorityGracePeriod` = 75 s =
+`backendDisconnectGrace` (60 s) + 15 s, counted from the moment **this tablet**
+sees its socket leave `connected`. The backend's own grace
 (`REMOTE_SESSION_DISCONNECT_GRACE_MS`, 60 s) starts when **the backend** notices
-the device has no joined socket. The two clocks are not assumed to agree:
+the device has no joined socket. The two clocks are never compared; no backend
+timestamp is read.
 
-* with Socket.IO defaults (`pingInterval` 25 s + `pingTimeout` 20 s) either side
-  may notice a dead connection up to ~45 s after it died, and a clean close is
-  seen at once by both; so the backend may start its 60 s earlier or later than
-  the tablet starts its 45 s;
 * control does not depend on the window at all: it is suspended from the
   tablet's first instant of doubt. The window only bounds how long the screen may
   keep flowing to a peer the tablet cannot vouch for;
-* 45 < 60, so when both notice together the tablet has stopped sharing before
-  the backend could have closed the session with `SYSTEM`;
-* it still fits several reconnection attempts (2 s doubling up to 20 s) plus the
-  `/current` read that has to follow them;
-* it is not restarted by a socket that flaps, or by a reconnection whose read
-  fails.
+* it is a backstop. While the backend can be reached it decides: the re-reads
+  see its `SYSTEM` close (60 s after it noticed) at most one backoff step (8 s)
+  plus a round trip later;
+* not shorter than 60 s: a tablet that noticed the loss together with the
+  backend must not give up on a session the backend would still let it rejoin;
+* the 15 s over it cover a backend noticing a clean close slightly later than
+  the tablet, one backoff step and the read that sees the close — so with the
+  backend reachable it is the backend's close, not this timer, that ends it;
+* it is not restarted by a socket that flaps, by a reconnection whose read
+  fails, or by a read answering ACTIVE while the socket is down.
 
-Worst case for the screen after a backend `SYSTEM` close the tablet never heard:
-the tablet's own detection delay (up to ~45 s for a half-open connection) plus
-45 s. For control: only the detection delay, during which the tablet still
-believes its socket is up. See "Residual risks".
+Worst case for the screen after a backend close the tablet cannot hear and cannot
+read (backend unreachable): the tablet's own detection delay (up to ~45 s for a
+half-open connection) plus 75 s, against 45 s before. A technician console that
+received `remote-session:closed` closes its peer anyway, which stops the capture
+20 s later (orphan window); seen in C2 below. For control: only the detection
+delay, as before.
 
 ### Peer connection FAILED or CLOSED
 
@@ -299,7 +325,8 @@ itself stays for FINALIZAR or the technician.
 | CONNECTING | Conectando con el técnico... | Control remoto: disponible cuando la asistencia esté activa |
 | socket down | Reconectando... | Control remoto: suspendido hasta confirmar con el servidor |
 | socket back, not reconciled | Verificando la asistencia... | Control remoto: suspendido hasta confirmar con el servidor |
-| grace expired | Asistencia interrumpida + "Se perdió la conexión con el servidor y la asistencia se detuvo por seguridad." | (no panel line: torn down) |
+| grace expired | Asistencia interrumpida + "Se perdió la conexión con el servidor y la asistencia se detuvo por seguridad." + "Podrás solicitar una nueva asistencia cuando el servidor registre el cierre." No REINTENTAR | (no panel line: torn down) |
+| afterwards, or a re-read made while suspended found it gone | the request panel with "La asistencia anterior terminó durante una pérdida de conexión con el servidor." | (torn down) |
 | closed by the backend | Asistencia finalizada + who closed it | (torn down) |
 | ended here | Asistencia finalizada / Finalizando la asistencia... | (torn down) |
 | screen stopped by Android | unchanged headline, "Pantalla: Android detuvo la captura" | Control remoto: deshabilitado en esta asistencia |
@@ -318,10 +345,12 @@ The accessibility service being enabled is never enough for "habilitado".
   is up, even if `/current` fails: the socket is what would carry a close. If the
   backend could close a session without emitting the event on a live socket, the
   tablet would not notice until the next reconnection.
-* **Grace expiry sends a DEVICE close.** The backend records `endedBy: DEVICE`
-  for a session the tablet ended because it could not confirm it.
-* **Backend Prompt 31 not merged.** Before it, nothing writes `SYSTEM`; the
-  device's behaviour does not depend on it, only the E2E below does.
+* **Grace expiry no longer sends a close (Prompt 38).** It relies on the
+  backend's automatic `SYSTEM` close, merged in the backend, so the device's
+  behaviour now does depend on it: against a backend without the lifecycle the
+  session would stay `ACTIVE` there until the technician closes it. See
+  [Authority recovery](#authority-recovery-prompt-38) for the backend changes
+  that would remove the dependency.
 
 ## Seen on a device
 
@@ -466,3 +495,199 @@ Seen during the runs, outside this change:
   it is the backend's to check;
 * "remote ICE candidate ignored: it names another session" is also printed when
   there is no negotiation at all: the reason is right, the wording is not.
+
+## Authority recovery (Prompt 38)
+
+M1 of the Prompt 37 audit: the tablet ended assistances by itself, recorded as
+`endedBy: DEVICE`, while the backend would still have let it recover them.
+
+### Root cause
+
+Three things together, all in `RemoteSessionBloc` (Prompt 30 design):
+
+1. **No re-read while suspended.** A suspended session was re-read only on the
+   existing cues (socket up, realtime events). One failed `GET /current` after a
+   reconnection left it suspended — socket up, room rejoined, REST working again
+   a second later — until the grace ran out.
+2. **45 s < 60 s.** The local grace was shorter than the backend's
+   `REMOTE_SESSION_DISCONNECT_GRACE_MS`, on purpose (stop sharing before the
+   backend could close). With both ends noticing a clean close at the same time,
+   the window 45–60 s was one in which the backend would accept a rejoin and the
+   tablet had already given up.
+3. **The expiry sent `POST /device/remote-sessions/:id/close`.** The backend
+   records that call as `endedBy: DEVICE`, the user's FINALIZAR. Worse, in case 1
+   the device had rejoined the room, so the backend would never have closed the
+   session itself: the tablet's close was the only thing ending it.
+
+### The instants, and what each clock counts from
+
+```text
+1 socket disconnected        tablet: "realtime disconnected" (graceful close: same
+                             instant at the backend; silent cut: up to ~45 s later
+                             on either side, by ping timeout)
+2 authority suspended        same synchronous handler as 1     -- local 75 s starts
+3 first REST failure         a re-read 2 s after 2, or the read on reconnection
+4 local timer                = 2 (never restarted)
+5 socket recovered           socket_io_client backoff (2 s doubling to 20 s, +-50 %):
+                             can lag the end of the outage by up to ~20 s
+6 REST success               the first re-read that answers
+7 ACTIVE confirmed           6 with the socket up and the read started after 5;
+                             the room is joined only now    -- backend grace stops
+8 local automatic end        2 + 75 s, if 7 never happened
+9 backend SYSTEM close       backend notices the device's last joined socket gone
+                             + 60 s                          -- backend grace
+```
+
+The backend's 60 s run from its own observation of 1 (or of the device leaving
+the room); the tablet's 75 s from 2. Neither clock reads the other.
+
+### Policy
+
+| Requirement | How |
+| --- | --- |
+| no command during a loss | suspended synchronously on 1; only `Active` + `confirmed` obeys |
+| gestures abandoned | the touch is abandoned (never released) on suspension |
+| control only after REST ACTIVE | confirmation = socket up + a read started after it + ACTIVE |
+| CLOSED never reactivated | ended / closed ids are kept; reads mapped through them |
+| FINALIZAR irreversible | unchanged; also while suspended |
+| a prolonged loss ends safely | 75 s backstop, everything torn down |
+| nothing suspended forever | the 75 s timer is never restarted |
+| SYSTEM close not prevented | the device joins the room only when confirmed, so a tablet that cannot confirm is absent to the backend and its grace runs |
+| explicit revocation ends at once | `remote-session:closed`, `/current` answering null or another session (now also with the socket down), revoked credential (reset) |
+
+Retries: 2, 4, 8, 8… s after each answer, one read at a time, restarted at 2 s
+whenever the socket changes. A read answering ACTIVE with the socket down keeps
+the session suspended; it never confirms.
+
+### Attribution
+
+```text
+FINALIZAR on the tablet                   POST close                      -> DEVICE
+tablet stopped it (75 s, authority lost)  nothing sent                    -> SYSTEM
+backend: a side away > grace              automatic                       -> SYSTEM
+technician FINALIZAR                      POST /remote-sessions/:id/close -> TECHNICIAN
+Android stopped MediaProjection           session kept for FINALIZAR / technician
+irreversible WebRTC failure               session kept; capture stops after 20 s
+```
+
+The tablet never sends a close the user did not ask for. The cost: the
+technician and the support request stay `ACTIVE`/`ACCEPTED` until the backend's
+`SYSTEM` close — at most 60 s after the device left, since a suspended tablet is
+not in the room.
+
+### Backend changes this would benefit from (separate prompt)
+
+Not required by this fix; the contract was not changed.
+
+* An optional reason on `POST /device/remote-sessions/:id/close`, e.g.
+  `{ "reason": "AUTHORITY_LOST" }`, stored as a separate `endReason` with
+  `endedBy` left as it is, would let the tablet release the session at once on
+  an automatic end without it reading as FINALIZAR.
+* Exposing the grace (or the instant the backend will close) in
+  `GET /device/remote-sessions/current` would let the tablet align its backstop
+  with the backend's real deadline instead of assuming the default 60 s. If
+  `REMOTE_SESSION_DISCONNECT_GRACE_MS` is changed, `backendDisconnectGrace` here
+  must follow by hand.
+* Separate: `createdAt` UTC vs `connectedAt`/`endedAt` local time (seen in
+  Prompt 31) is still the backend's to check; the device reads none of them for
+  timing.
+
+### Seen on a device
+
+2026-11-19, T10A (`LSTT10M2026081504`, Android 16), debug builds against the
+shared backend (PID 12688, untouched) through the Public dev tunnel port 3010 →
+`tool/realtime_harness/fault_relay.js` → 127.0.0.1:3000. Web console
+(`remote_control_web` main `bf0fee0`, release build served on `localhost:5173`)
+straight to 3000, so only the tablet was faulted. Faults: `blockDevicesMs`
+(tablet's `/devices` closed gracefully and refused, REST up), `failCurrentMs`
+(only `GET /device/remote-sessions/current` answers 503), `cutMs` (everything).
+PERMITIR and the MediaProjection dialog were accepted by hand by the user;
+SOLICITAR and FINALIZAR on the tablet with `input tap` on the app's own buttons;
+no mobile-mcp, no UiAutomation, no `am force-stop`. Dart logs from the VM
+service (device clock, ~0.1 s from the PC); `endedBy` read through
+`GET /remote-sessions/:id` with the console's technician session.
+
+```text
+M1 on main (16c74b8), session 74108de5
+  15:17:03.559  suspended (block 10 s + failCurrent 60 s)
+  15:17:22.046  socket back; room rejoined 23.464 (backend grace stopped)
+  15:17:22.500  GET /current 503 — and no other read
+  15:17:48.564  45.0 s: ended on the tablet; POST close 200
+  backend       CLOSED, endedBy DEVICE, 15:17:51.166 — nobody pressed FINALIZAR
+
+A  brief loss (fix), session ea675abb, block 15 s
+  15:21:16.471  suspended; re-reads at +2, +7, +16, +26 s: ACTIVE, not confirmed
+  15:21:50.456  socket back (client backoff: 34 s for a 15 s outage)
+  15:21:52.809  GET ACTIVE -> confirmed; join 52.811 (after the read)
+  15:22:19      remote tap completed; no close sent
+
+B  past the old limit (fix), same session, block 10 s + failCurrent 50 s
+  15:22:27.994  suspended
+  15:22:39.782  socket back — NOT rejoined; GET 503
+  15:22:41.857  technician tap rejected: session not active
+  15:22:46-23:19 six re-reads, 503
+  15:23:21.816  GET ACTIVE -> confirmed (+53.8 s); join +54.1 s (< 60 s)
+  15:23:34      remote tap completed; backend ACTIVE; no close sent
+
+D  FINALIZAR during the recovery, same session, block 60 s
+  15:24:10.381  FINALIZAR tapped while "Reconectando..."
+  15:24:10.582  ended here; capture stopped 10.747; POST close 200
+  backend       CLOSED, endedBy DEVICE (the user's, correctly)
+  15:25:01      socket back: /current empty, no join, no projection
+
+F  new assistance after a definitive close: sessions 918dbaf9, 43b9ad62,
+   49063fa9 each started with PERMITIR, a new MediaProjection and ACTIVE
+
+E  technician closes while the tablet cannot hear it, session 918dbaf9
+  15:26:26.667  suspended (block 60 s)
+  15:26:36.975  technician FINALIZAR: CLOSED, endedBy TECHNICIAN
+  15:26:43.930  re-read null, socket still down: torn down (+7.0 s);
+                capture stopped 44.065. Nothing sent.
+
+C1 prolonged loss, backend reachable, session 43b9ad62, block 120 s
+  15:30:45.057  suspended; 8 re-reads, all ACTIVE (never confirmed)
+  15:31:45.659  backend CLOSED, endedBy SYSTEM (+60.6 s)
+  15:31:48.426  re-read null: torn down (+2.8 s after the backend)
+
+C2 prolonged loss, backend unreachable, session 49063fa9, close + cut 110 s
+  15:36:29.876  suspended
+  15:37:31.618  backend CLOSED, endedBy SYSTEM
+  15:37:38.474  peer disconnected (the console closed its side)
+  15:37:44.882  75.0 s: ended on the tablet, no close sent; capture
+                stopped 45.002. Panel "Asistencia interrumpida", no REINTENTAR
+  15:38:29.975  back: /current empty, marker cleared, idle with
+                "La asistencia anterior terminó durante una pérdida de conexión
+                con el servidor."
+```
+
+Across the fixed build the relay saw no `POST …/close` except D's. After every
+end: `dumpsys media_projection` null, no foreground service,
+`TouchStatesByDisplay: <no displays touched>`, accessibility still enabled and
+bound, credentials kept.
+
+Found on the device and fixed in this branch: the idle note first read "terminó
+**por** una pérdida de conexión"; in E the technician had closed it, so it now
+says "durante".
+
+What these runs do not show:
+
+* a silent half-open cut (detection by ping timeout): every run used a graceful
+  close so both ends noticed at once;
+* a DRAG held during the drop on the device; covered by
+  `test/app/session_authority_loss_test.dart` only;
+* a credential revoked during a recovery, a restart with an `authorityLost`
+  marker, a late read after the grace and skewed backend timestamps: unit and
+  coordinator tests only.
+
+### Residual risks
+
+* **Client reconnection lag.** socket_io_client's own backoff (up to 20 s, ±50 %)
+  can leave the socket down well after the network is back (A: 34 s for a 15 s
+  outage), eating into the backend's 60 s. Not changed here.
+* **Backend detects later than the tablet by more than 15 s** (a half-open
+  connection seen only by the backend's ping timeout): the tablet may give up
+  while the backend would still accept a rejoin. It then sends nothing, so the
+  backend still records `SYSTEM`.
+* **Screen exposure while unreachable** grew from 45 s to 75 s after detection.
+* **Default grace assumed.** A backend configured with a longer grace makes the
+  tablet give up first; with a shorter one the backend simply closes first.

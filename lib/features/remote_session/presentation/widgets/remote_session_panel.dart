@@ -324,14 +324,22 @@ class RemoteSessionEndedPanel extends StatelessWidget {
       'Se perdió la conexión con el servidor y la asistencia se detuvo por '
       'seguridad.';
 
+  /// The line shown under [authorityLostMessage]. Nothing is sent for such an
+  /// end — the server closes the assistance by itself — so there is no
+  /// REINTENTAR, only what the user can expect next.
+  static const String authorityLostNextStep =
+      'Podrás solicitar una nueva asistencia cuando el servidor registre el '
+      'cierre.';
+
   final RemoteSessionEndedLocally state;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final unconfirmed = !state.confirming && state.lastFailure != null;
     final lostAuthority =
         state.reason == RemoteSessionLocalEndReason.authorityLost;
+    if (lostAuthority) return _buildAuthorityLost(theme);
+    final unconfirmed = !state.confirming && state.lastFailure != null;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -339,17 +347,11 @@ class RemoteSessionEndedPanel extends StatelessWidget {
         Text('Asistencia remota', style: theme.textTheme.titleMedium),
         const SizedBox(height: 8),
         Text(
-          lostAuthority
-              ? 'Asistencia interrumpida'
-              : state.confirming
+          state.confirming
               ? 'Finalizando la asistencia...'
               : 'Asistencia finalizada',
           style: theme.textTheme.headlineSmall,
         ),
-        if (lostAuthority) ...[
-          const SizedBox(height: 8),
-          Text(authorityLostMessage, style: theme.textTheme.bodyMedium),
-        ],
         const SizedBox(height: 8),
         Text(
           'El técnico ya no puede controlar esta tablet ni ver su pantalla.',
@@ -379,6 +381,32 @@ class RemoteSessionEndedPanel extends StatelessWidget {
       ],
     );
   }
+
+  /// The tablet stopped the assistance because it could not confirm it with
+  /// the server in time. Says it was the connection, not anybody's FINALIZAR,
+  /// and offers no action: nothing is owed to the server.
+  Widget _buildAuthorityLost(ThemeData theme) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      Text('Asistencia remota', style: theme.textTheme.titleMedium),
+      const SizedBox(height: 8),
+      Text('Asistencia interrumpida', style: theme.textTheme.headlineSmall),
+      const SizedBox(height: 8),
+      Text(authorityLostMessage, style: theme.textTheme.bodyMedium),
+      const SizedBox(height: 8),
+      Text(
+        'El técnico ya no puede controlar esta tablet ni ver su pantalla.',
+        style: theme.textTheme.bodyMedium,
+      ),
+      const SizedBox(height: 4),
+      Text(
+        authorityLostNextStep,
+        style: theme.textTheme.bodySmall?.copyWith(
+          color: theme.colorScheme.outline,
+        ),
+      ),
+    ],
+  );
 }
 
 /// What the screen shows the moment the backend says it closed the session —
@@ -421,13 +449,31 @@ class RemoteSessionClosedRemotelyPanel extends StatelessWidget {
 }
 
 /// One line above the support request saying who closed the last assistance,
-/// when it was not the user here.
+/// when it was not the user here — or, with [RemoteSessionClosureNote.interrupted],
+/// that it ended during a loss of connection.
 class RemoteSessionClosureNote extends StatelessWidget {
-  const RemoteSessionClosureNote({required this.endedBy, super.key});
+  const RemoteSessionClosureNote({
+    required RemoteSessionEndedBy this.endedBy,
+    super.key,
+  });
+
+  const RemoteSessionClosureNote.interrupted({super.key}) : endedBy = null;
 
   static const Key noteKey = Key('remote-session-closure-note');
 
-  final RemoteSessionEndedBy endedBy;
+  /// `null` for an interrupted assistance.
+  final RemoteSessionEndedBy? endedBy;
+
+  /// Shown instead when the last assistance ended during a loss of connection
+  /// and nobody said who closed it ([RemoteSessionIdle.interrupted]).
+  ///
+  /// "durante", not "por": a session found gone by a read made while the
+  /// tablet was suspended may have been closed by the technician (seen on the
+  /// T10A, Prompt 38) as much as by the backend's SYSTEM close. The sentence
+  /// is true either way, and never suggests a FINALIZAR on this tablet.
+  static const String interruptedMessage =
+      'La asistencia anterior terminó durante una pérdida de conexión con el '
+      'servidor.';
 
   static String messageFor(RemoteSessionEndedBy endedBy) => switch (endedBy) {
     RemoteSessionEndedBy.technician => 'El técnico finalizó la asistencia.',
@@ -443,7 +489,10 @@ class RemoteSessionClosureNote extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
       child: Text(
-        messageFor(endedBy),
+        switch (endedBy) {
+          final endedBy? => messageFor(endedBy),
+          null => interruptedMessage,
+        },
         key: noteKey,
         style: theme.textTheme.bodyMedium?.copyWith(
           color: theme.colorScheme.outline,

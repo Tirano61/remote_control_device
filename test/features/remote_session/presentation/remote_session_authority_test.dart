@@ -201,9 +201,10 @@ void main() {
       },
     );
 
-    test('running out ends it here, through the irreversible path', () async {
+    test('running out ends it here, irreversibly, without sending the close '
+        'the user did not ask for', () async {
       await reachConfirmedActive();
-      repository.closeResult = closeUnreachable;
+      repository.currentResult = remoteSessionUnreachable;
       await channel(up: false);
 
       timers.elapse(grace - const Duration(milliseconds: 1));
@@ -222,11 +223,12 @@ void main() {
               'reason',
               RemoteSessionLocalEndReason.authorityLost,
             )
-            // The close could not reach the backend: pending, still ended.
-            .having((s) => s.lastFailure, 'lastFailure', isNotNull),
+            // Nothing is being sent: the backend closes it as SYSTEM.
+            .having((s) => s.confirming, 'confirming', isFalse),
       );
       expect(endedSessionStore.value, testRemoteSessionId);
-      expect(repository.closedIds, [testRemoteSessionId]);
+      expect(endedSessionStore.closeOwed, isFalse);
+      expect(repository.closedIds, isEmpty);
     });
 
     test('a reconnection whose read fails does not buy more time', () async {
@@ -247,7 +249,8 @@ void main() {
 
     test('a socket that flaps does not restart the clock', () async {
       await reachConfirmedActive();
-      repository.closeResult = closeUnreachable;
+      // Every re-read fails: only a read could have confirmed it.
+      repository.currentResult = remoteSessionUnreachable;
       for (var i = 0; i < 4; i++) {
         await channel(up: false);
         timers.elapse(grace ~/ 5);
@@ -259,22 +262,34 @@ void main() {
       expect(bloc.state, isA<RemoteSessionEndedLocally>());
     });
 
-    test('reconnecting after it ran out finds the session ended, and the '
-        'backend still holding it ACTIVE only gets another close', () async {
+    test('reconnecting after it ran out finds the session ended; the backend '
+        'still holding it ACTIVE gets no close, and its own close confirms '
+        'it', () async {
       await reachConfirmedActive();
-      repository.closeResult = closeUnreachable;
+      repository.currentResult = remoteSessionUnreachable;
       await channel(up: false);
       timers.elapse(grace);
       await settle();
 
-      repository.closeResult = const Ok(closedSession);
-      repository.currentQueue.add(activatedRemoteSession);
-      repository.currentResult = noRemoteSession;
+      // The backend's grace is still running: it still says ACTIVE.
+      repository.currentResult = activatedRemoteSession;
       await channel(up: true);
       await sync();
+      expect(bloc.state, isA<RemoteSessionEndedLocally>());
+      expect(repository.closeCount, 0);
 
-      expect(repository.closeCount, 2);
-      expect(bloc.state, isA<RemoteSessionIdle>());
+      // It closes the session itself (SYSTEM), and says so.
+      repository.currentResult = noRemoteSession;
+      bloc.add(
+        const RemoteSessionClosureAnnounced(
+          testRemoteSessionId,
+          endedBy: RemoteSessionEndedBy.system,
+        ),
+      );
+      await settle();
+
+      expect(repository.closeCount, 0);
+      expect(bloc.state, const RemoteSessionIdle(interrupted: true));
       expect(endedSessionStore.value, isNull);
     });
 
@@ -289,10 +304,9 @@ void main() {
         await channel(up: true);
         await sync();
 
-        expect(
-          bloc.state,
-          const RemoteSessionIdle(lastClosure: RemoteSessionEndedBy.unknown),
-        );
+        // Nobody said who closed it, and it went while the tablet could not
+        // confirm it: a connection problem, never a FINALIZAR.
+        expect(bloc.state, const RemoteSessionIdle(interrupted: true));
         timers.elapse(grace * 2);
         await settle();
         expect(repository.closeCount, 0);
@@ -395,7 +409,8 @@ void main() {
     test('while suspended, it still withdraws (and stops the clock)', () async {
       await reachConfirmedActive();
       await channel(up: false);
-      expect(timers.pending, hasLength(1));
+      // The grace period and the first re-read.
+      expect(timers.pending, hasLength(2));
 
       bloc.add(
         const RemoteSessionClosureAnnounced(

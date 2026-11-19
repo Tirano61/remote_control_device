@@ -85,13 +85,28 @@ class SignalingCoordinator {
 
   /// The id of a session that may be joined, or `null`.
   ///
-  /// Only a live session qualifies, and `RemoteSessionLive` is precisely the
-  /// backend's `CONNECTING`/`ACTIVE`. Everything else — no session, a state
-  /// that could not be read, a cleared identity — is "nothing to join", which
-  /// is the safe reading: a session this client cannot confirm is live is one
-  /// whose room the backend would refuse anyway.
+  /// Only a live session whose authority is *confirmed* qualifies:
+  /// `RemoteSessionLive` is precisely the backend's `CONNECTING`/`ACTIVE`, and
+  /// confirmed means a `/current` read made after the socket last came up
+  /// returned it. Everything else — no session, a state that could not be
+  /// read, a cleared identity, a session the tablet is still re-checking after
+  /// a reconnection — is "nothing to join".
+  ///
+  /// The join is what the backend calls *taking part* in the session: while
+  /// the device has a socket joined to its room, the backend's disconnect
+  /// grace does not run. Joining only a confirmed session keeps that claim
+  /// honest. A tablet that cannot confirm its session (REST failing after a
+  /// reconnection) does not claim to be taking part, so if it never manages
+  /// to, the backend closes the session itself with `SYSTEM` — and the tablet
+  /// never has to send a close the user did not ask for (Prompt 38). The cost
+  /// is one `/current` round trip before rejoining after a reconnection, and
+  /// a suspended session refuses recovery offers anyway.
   static String? _sessionIdOf(RemoteSessionState state) => switch (state) {
-    RemoteSessionLive(:final session) => session.id,
+    RemoteSessionLive(
+      :final session,
+      authority: RemoteSessionAuthority.confirmed,
+    ) =>
+      session.id,
     _ => null,
   };
 

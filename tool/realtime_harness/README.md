@@ -79,6 +79,9 @@ backend itself sends:
 | `serverDisconnect: true` | every open `/devices` socket gets `41/devices,` (namespace DISCONNECT) and is closed |
 | `loginReject: bool` | `POST /device-auth/login` gets the exact `401 DEVICE_CREDENTIAL_REJECTED` body without reaching the backend, so nothing in the database changes |
 | `cutMs: ms` | drops every relayed connection and refuses new ones |
+| `closeDevices: true` | closes every open `/devices` WebSocket gracefully; behind a dev tunnel the tablet notices in seconds instead of after the ping timeout |
+| `blockDevicesMs: ms` | `closeDevices`, then every WebSocket upgrade is answered `503` for *ms* while HTTP keeps passing: socket down, REST up |
+| `failCurrentMs: ms` | `GET /device/remote-sessions/current` is answered `503` for *ms* without reaching the backend; everything else passes |
 
 Bodies are never logged, and tokens appear only as `tok#n`. Run it with
 `NODE_PATH=../remote_control_backend/node_modules node tool/realtime_harness/fault_relay.js`.

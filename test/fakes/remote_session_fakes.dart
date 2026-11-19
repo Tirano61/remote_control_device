@@ -159,9 +159,14 @@ const Err<RemoteSession> closeNotFound = Err<RemoteSession>(NotFoundFailure());
 /// blocs is how a test stands for the application being killed and opened
 /// again: the second bloc starts with nothing but what was stored.
 class FakeEndedRemoteSessionStore implements EndedRemoteSessionStore {
-  FakeEndedRemoteSessionStore([this.value]);
+  FakeEndedRemoteSessionStore([this.value, this.closeOwed = true]);
 
+  /// The stored session id, or `null`.
   String? value;
+
+  /// Whether the stored marker owes the backend a close (FINALIZAR) or not
+  /// (ended because authority was lost). Meaningless while [value] is null.
+  bool closeOwed;
 
   /// Every operation that reached the store, in order: `'read'`,
   /// `('write', id)` and `'clear'`.
@@ -171,17 +176,21 @@ class FakeEndedRemoteSessionStore implements EndedRemoteSessionStore {
   bool failing = false;
 
   @override
-  Future<String?> read() async {
+  Future<EndedRemoteSessionMarker?> read() async {
     calls.add('read');
     if (failing) throw const EndedRemoteSessionStoreException('test');
-    return value;
+    final id = value;
+    return id == null
+        ? null
+        : EndedRemoteSessionMarker(id, closeOwed: closeOwed);
   }
 
   @override
-  Future<void> write(String remoteSessionId) async {
-    calls.add(('write', remoteSessionId));
+  Future<void> write(EndedRemoteSessionMarker marker) async {
+    calls.add(('write', marker.remoteSessionId));
     if (failing) throw const EndedRemoteSessionStoreException('test');
-    value = remoteSessionId;
+    value = marker.remoteSessionId;
+    closeOwed = marker.closeOwed;
   }
 
   @override
@@ -189,5 +198,6 @@ class FakeEndedRemoteSessionStore implements EndedRemoteSessionStore {
     calls.add('clear');
     if (failing) throw const EndedRemoteSessionStoreException('test');
     value = null;
+    closeOwed = true;
   }
 }

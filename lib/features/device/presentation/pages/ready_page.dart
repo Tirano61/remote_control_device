@@ -101,6 +101,12 @@ class _AssistanceSection extends StatelessWidget {
             const SupportPanel(),
           ],
         ),
+        // No session, after one that ended during a loss of connection: say
+        // it was the connection, never that anybody pressed FINALIZAR.
+        RemoteSessionIdle(interrupted: true) => const Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [RemoteSessionClosureNote.interrupted(), SupportPanel()],
+        ),
         // No session, or not asked yet: the support request is what the user
         // can act on.
         _ => const SupportPanel(),

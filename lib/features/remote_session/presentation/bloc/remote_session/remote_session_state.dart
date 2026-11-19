@@ -33,7 +33,11 @@ final class RemoteSessionLoading extends RemoteSessionState {
 /// a session is expected, not an error. A `CLOSED` session lands here too —
 /// `/current` stops returning it the moment it ends.
 final class RemoteSessionIdle extends RemoteSessionState {
-  const RemoteSessionIdle({this.lastFailure, this.lastClosure});
+  const RemoteSessionIdle({
+    this.lastFailure,
+    this.lastClosure,
+    this.interrupted = false,
+  });
 
   /// Why the previous attempt did not go through, when there was one. Shown as
   /// a short note; nothing is blocked by it.
@@ -46,8 +50,16 @@ final class RemoteSessionIdle extends RemoteSessionState {
   /// Shown as a short note above the support request; it decides nothing.
   final RemoteSessionEndedBy? lastClosure;
 
+  /// The assistance this tablet was last taking part in ended while the tablet
+  /// could not confirm it with the backend: either the tablet stopped it by
+  /// itself ([RemoteSessionLocalEndReason.authorityLost]), or a read made
+  /// while it was suspended found it gone without any `remote-session:closed`
+  /// saying who closed it. Shown as "lost connection", never as a FINALIZAR.
+  /// [lastClosure], when set, is the more precise of the two and wins.
+  final bool interrupted;
+
   @override
-  List<Object?> get props => [lastFailure, lastClosure];
+  List<Object?> get props => [lastFailure, lastClosure, interrupted];
 }
 
 /// Whether the tablet can currently *confirm* that a live session is still
@@ -62,8 +74,9 @@ final class RemoteSessionIdle extends RemoteSessionState {
 /// suspended   anything else: the channel is down, or it came back and the
 ///             backend has not been asked again yet, or the read that would
 ///             have confirmed it failed or started too early. No command runs.
-///             The peer connection and the screen are kept for a bounded grace
-///             period and then taken down: see RemoteSessionBloc.
+///             The peer connection and the screen are kept while the backend
+///             re-read is retried, for a bounded grace period, and then taken
+///             down: see RemoteSessionBloc.
 /// ```
 enum RemoteSessionAuthority { confirmed, suspended }
 
@@ -186,7 +199,9 @@ enum RemoteSessionLocalEndReason {
   userRequest,
 
   /// The tablet could not confirm with the backend, within the grace period,
-  /// that the session was still authorised, and ended it by itself.
+  /// that the session was still authorised, and ended it by itself. No close
+  /// is sent for it: the backend closes it on its own (`SYSTEM`), because the
+  /// device no longer takes part in it. See RemoteSessionBloc.
   authorityLost,
 }
 

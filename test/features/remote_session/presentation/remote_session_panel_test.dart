@@ -627,6 +627,81 @@ void main() {
     expect(find.byKey(SupportPanel.requestButtonKey), findsNothing);
   });
 
+  group('authority recovery (Prompt 38)', () {
+    testWidgets('a short loss that recovers leaves nothing alarming behind', (
+      tester,
+    ) async {
+      await pumpAccepted(tester);
+      remoteSessionRepository.currentResult = activatedRemoteSession;
+      remoteSessionBloc.add(const RemoteSessionSyncRequested());
+      await settle(tester);
+
+      client.push(const RealtimeDisconnected());
+      await settle(tester);
+      timers.elapse(const Duration(seconds: 30));
+      await settle(tester);
+      client.push(const RealtimeConnected());
+      await settle(tester);
+      expect(find.text('Verificando la asistencia...'), findsOneWidget);
+      remoteSessionBloc.add(const RemoteSessionSyncRequested());
+      await settle(tester);
+
+      expect(find.text('Asistencia en curso'), findsOneWidget);
+      expect(find.text('Asistencia interrumpida'), findsNothing);
+      expect(
+        find.text(RemoteSessionEndedPanel.authorityLostMessage),
+        findsNothing,
+      );
+      expect(find.byKey(RemoteSessionClosureNote.noteKey), findsNothing);
+      expect(remoteSessionRepository.closeCount, 0);
+    });
+
+    testWidgets('a prolonged loss says it was the connection, offers no '
+        'REINTENTAR, and sends nothing', (tester) async {
+      await pumpAccepted(tester);
+      remoteSessionRepository.currentResult = activatedRemoteSession;
+      remoteSessionBloc.add(const RemoteSessionSyncRequested());
+      await settle(tester);
+
+      remoteSessionRepository.currentResult = remoteSessionUnreachable;
+      client.push(const RealtimeDisconnected());
+      await settle(tester);
+      timers.elapse(RemoteSessionBloc.defaultAuthorityGracePeriod);
+      await settle(tester);
+
+      expect(find.text('Asistencia interrumpida'), findsOneWidget);
+      expect(
+        find.text(RemoteSessionEndedPanel.authorityLostMessage),
+        findsOneWidget,
+      );
+      expect(
+        find.text(RemoteSessionEndedPanel.authorityLostNextStep),
+        findsOneWidget,
+      );
+      // Nothing reads like a FINALIZAR, and nothing offers to send one.
+      expect(find.text('Asistencia finalizada'), findsNothing);
+      expect(find.text('Finalizando la asistencia...'), findsNothing);
+      expect(find.byKey(RemoteSessionEndedPanel.retryButtonKey), findsNothing);
+      expect(find.byKey(RemoteSessionPanel.closeButtonKey), findsNothing);
+      expect(remoteSessionRepository.closeCount, 0);
+
+      // The backend closes it on its own; the tablet hears it on return.
+      remoteSessionRepository.currentResult = noRemoteSession;
+      supportRepository.currentResult = const Ok<SupportRequest?>(null);
+      client.push(const RealtimeConnected());
+      remoteSessionBloc.add(const RemoteSessionSyncRequested());
+      supportBloc.add(const SupportSyncRequested());
+      await settle(tester);
+
+      expect(
+        find.text(RemoteSessionClosureNote.interruptedMessage),
+        findsOneWidget,
+      );
+      expect(find.byKey(SupportPanel.requestButtonKey), findsOneWidget);
+      expect(remoteSessionRepository.closeCount, 0);
+    });
+  });
+
   testWidgets('ending it from the tablet closes and returns to the request', (
     tester,
   ) async {
