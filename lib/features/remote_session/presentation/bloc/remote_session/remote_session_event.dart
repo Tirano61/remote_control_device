@@ -101,6 +101,12 @@ final class _RemoteSessionAuthorityGraceExpired extends RemoteSessionEvent {
   List<Object?> get props => [remoteSessionId];
 }
 
+/// The next re-read of a suspended session is due. Raised only by the bloc's
+/// own backoff timer.
+final class _RemoteSessionAuthorityRetryDue extends RemoteSessionEvent {
+  const _RemoteSessionAuthorityRetryDue();
+}
+
 /// The user pressed `FINALIZAR ASISTENCIA`, or `REINTENTAR` on an assistance
 /// already ended here whose close the backend has not confirmed. Only a
 /// deliberate press produces this event.

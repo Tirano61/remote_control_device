@@ -407,10 +407,10 @@ void main() {
       expect(screenCapture.isActive, isTrue);
     });
 
-    test('back after the window: ended here, and the backend still saying '
-        'ACTIVE gets the close again', () async {
+    test('back after the window: ended here, no close sent, no rejoin; the '
+        'backend closing it on its own confirms it', () async {
       final (peer, channel) = await reachActiveAssistance();
-      remoteSessionRepository.closeResult = closeUnreachable;
+      remoteSessionRepository.currentResult = remoteSessionUnreachable;
       await dropSocket();
 
       timers.elapse(grace);
@@ -420,15 +420,34 @@ void main() {
       expect(ended.reason, RemoteSessionLocalEndReason.authorityLost);
       expectNothingLeft(peer, channel);
       expect(endedSessionStore.value, testRemoteSessionId);
+      expect(remoteSessionRepository.closeCount, 0);
 
-      remoteSessionRepository.closeResult = const Ok(closedSession);
+      // Back while the backend's grace still runs: it still says ACTIVE.
       remoteSessionRepository.currentQueue.add(activatedRemoteSession);
       remoteSessionRepository.currentResult = noRemoteSession;
       final joins = client.joinedSessionIds.length;
       await restoreSocket();
 
-      expect(remoteSessionRepository.closeCount, 2);
-      expect(remoteSessionBloc.state, isA<RemoteSessionIdle>());
+      // No close, and above all no join: the device does not take part, so
+      // the backend's grace runs out and it closes the session as SYSTEM.
+      expect(remoteSessionRepository.closeCount, 0);
+      expect(client.joinedSessionIds, hasLength(joins));
+      expect(remoteSessionBloc.state, isA<RemoteSessionEndedLocally>());
+
+      await client.emit(
+        const RealtimeRemoteSessionClosed(
+          testRemoteSessionId,
+          endedBy: 'SYSTEM',
+        ),
+      );
+      await settle();
+
+      expect(remoteSessionRepository.closeCount, 0);
+      expect(
+        remoteSessionBloc.state,
+        const RemoteSessionIdle(interrupted: true),
+      );
+      expect(endedSessionStore.value, isNull);
       expect(client.joinedSessionIds, hasLength(joins));
       expect(screenCapture.requests, [testRemoteSessionId]);
       expectNothingLeft(peer, channel);
@@ -445,7 +464,7 @@ void main() {
 
       expect(
         remoteSessionBloc.state,
-        const RemoteSessionIdle(lastClosure: RemoteSessionEndedBy.unknown),
+        const RemoteSessionIdle(interrupted: true),
       );
       expectNothingLeft(peer, channel);
       expect(remoteSessionRepository.closeCount, 0);

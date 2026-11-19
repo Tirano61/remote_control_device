@@ -53,10 +53,15 @@ part 'remote_session_state.dart';
 ///                                good; then /current
 ///
 /// the realtime channel lost  ──> the session stays live but SUSPENDED: no
-///                                command runs. Peer and screen are kept for
+///                                command runs. `/current` is re-read with
+///                                backoff ([defaultAuthorityRetryBackoff]); an
+///                                answer without this session live ends it at
+///                                once. Peer and screen are kept for at most
 ///                                [authorityGracePeriod]; if the session is not
-///                                confirmed again by then, it is ended here
-///                                exactly as FINALIZAR would end it.
+///                                confirmed again by then, it is ended here —
+///                                torn down exactly as FINALIZAR would, but
+///                                *without* a close: the backend closes it on
+///                                its own (SYSTEM).
 /// ```
 ///
 /// And one thing grants it back: a `/current` read that *started after* the
@@ -74,11 +79,13 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
     required CloseRemoteSession closeRemoteSession,
     required EndedRemoteSessionStore endedSessionStore,
     Duration authorityGracePeriod = defaultAuthorityGracePeriod,
+    List<Duration> authorityRetryBackoff = defaultAuthorityRetryBackoff,
     TimerFactory timerFactory = systemTimerFactory,
   }) : _loadCurrentRemoteSession = loadCurrentRemoteSession,
        _closeRemoteSession = closeRemoteSession,
        _endedSessionStore = endedSessionStore,
        _authorityGracePeriod = authorityGracePeriod,
+       _authorityRetryBackoff = List.unmodifiable(authorityRetryBackoff),
        _timerFactory = timerFactory,
        super(const RemoteSessionInitial()) {
     on<RemoteSessionSyncRequested>(_onSyncRequested);
@@ -89,28 +96,56 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
     on<RemoteSessionResetRequested>(_onResetRequested);
     on<RemoteSessionAuthorityChannelChanged>(_onAuthorityChannelChanged);
     on<_RemoteSessionAuthorityGraceExpired>(_onAuthorityGraceExpired);
+    on<_RemoteSessionAuthorityRetryDue>(_onAuthorityRetryDue);
   }
 
+  /// The backend's own grace for a side that left an `ACTIVE` session
+  /// (`REMOTE_SESSION_DISCONNECT_GRACE_MS`, 60 s by default in REALTIME.md).
+  /// Counted by the backend from the moment *it* sees this device's last
+  /// joined socket go; if the device has not joined again by then, the backend
+  /// closes the session with `SYSTEM`.
+  static const Duration backendDisconnectGrace = Duration(seconds: 60);
+
   /// How long a live session may stay [RemoteSessionAuthority.suspended]
-  /// before the tablet ends it by itself.
+  /// before the tablet ends it by itself: [backendDisconnectGrace] + 15 s.
   ///
   /// Counted from the moment *this tablet* noticed it could no longer confirm
-  /// the session — not from when the backend noticed, which may be up to a
-  /// ping timeout (about 45 s with Socket.IO defaults) earlier or later. The
-  /// backend's own grace (`REMOTE_SESSION_DISCONNECT_GRACE_MS`, 60 s) starts
-  /// from *its* detection; the two clocks are never assumed to agree.
+  /// the session — not from when the backend noticed, which may be earlier or
+  /// later (up to a ping timeout, ~45 s with Socket.IO defaults). The two
+  /// clocks are never compared.
   ///
-  /// 45 s because:
+  /// It is a backstop, not the normal way a lost session ends:
   ///
-  /// * control is already suspended for the whole window, so the window only
-  ///   bounds how long the *screen* may keep flowing to a peer whose session
-  ///   the tablet cannot vouch for;
-  /// * it is shorter than the backend's 60 s, so when both ends notice the loss
-  ///   together the tablet stops sharing before the backend can have closed the
-  ///   session with `SYSTEM`;
-  /// * it still fits several reconnection attempts (backoff 2 s doubling up to
-  ///   20 s) plus the `/current` read that has to follow them.
-  static const Duration defaultAuthorityGracePeriod = Duration(seconds: 45);
+  /// * control is suspended for the whole window, from its first instant,
+  ///   whatever the window is. The window only bounds how long the *screen*
+  ///   may keep flowing to a peer the tablet cannot vouch for;
+  /// * while the backend can be reached, it decides: a suspended session is
+  ///   re-read with backoff, and the `SYSTEM` close the backend makes 60 s
+  ///   after noticing is seen by the next read, at most one backoff step
+  ///   later;
+  /// * not shorter than [backendDisconnectGrace]: a tablet that noticed the
+  ///   loss together with the backend must not give up on a session the
+  ///   backend would still let it rejoin. The old 45 s did (M1, Prompt 38);
+  /// * the 15 s over it cover the backend noticing a clean drop slightly
+  ///   later than the tablet, plus one backoff step (8 s) and the round trip
+  ///   of the read that sees the `SYSTEM` close — so when the backend is
+  ///   reachable, the backend's close, not this timer, ends the session;
+  /// * it is not restarted by a socket that flaps, by a reconnection whose
+  ///   read fails, or by a read answering `ACTIVE` while the socket is down.
+  static const Duration defaultAuthorityGracePeriod = Duration(seconds: 75);
+
+  /// Delays between re-reads of `/current` while a session is suspended. The
+  /// last one repeats. Restarted whenever the realtime channel changes, so
+  /// the read after a reconnection is retried promptly if it fails.
+  ///
+  /// Before Prompt 38 nothing retried: one failed read after a reconnection
+  /// left the session suspended — with the socket up and REST working again —
+  /// until the grace period ended it (M1).
+  static const List<Duration> defaultAuthorityRetryBackoff = [
+    Duration(seconds: 2),
+    Duration(seconds: 4),
+    Duration(seconds: 8),
+  ];
 
   static const String _loggerName = 'remote-session';
 
@@ -118,6 +153,7 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
   final CloseRemoteSession _closeRemoteSession;
   final EndedRemoteSessionStore _endedSessionStore;
   final Duration _authorityGracePeriod;
+  final List<Duration> _authorityRetryBackoff;
   final TimerFactory _timerFactory;
 
   /// Bumped when the device identity is dropped. An answer that arrives after
@@ -143,6 +179,11 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
   /// closed from the other side. Shown by [RemoteSessionIdle]; cleared when
   /// another session begins or the user ends one here.
   RemoteSessionEndedBy? _lastClosure;
+
+  /// Whether the session this tablet was last taking part in ended while its
+  /// authority was suspended, with nobody saying who closed it. Shown through
+  /// [RemoteSessionIdle.interrupted].
+  bool _interrupted = false;
 
   /// The session [_endedSessionStore] holds, as far as this bloc knows: ended
   /// here and not yet confirmed `CLOSED` by the backend.
@@ -175,6 +216,15 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
   Timer? _graceTimer;
   String? _graceSessionId;
 
+  /// The next re-read of a suspended session, if one is scheduled, and how
+  /// many have been made since the channel last changed.
+  Timer? _retryTimer;
+  int _retryAttempt = 0;
+
+  /// `/current` reads on the wire. A retry is never stacked on one: the read
+  /// in flight schedules the next retry when it answers.
+  int _readsInFlight = 0;
+
   // ------------------------------------------------------------- authority
 
   /// The realtime channel came up or went down.
@@ -190,6 +240,10 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
     if (event.available == _authorityChannelUp) return;
     _authorityChannelUp = event.available;
     _authorityEpoch++;
+    // A new channel state is a new situation: back to the shortest delay, so
+    // the read that follows a reconnection is retried promptly if it fails.
+    _cancelRetry();
+    _retryAttempt = 0;
 
     final current = state;
     if (current is RemoteSessionLive && !current.isSuspended) {
@@ -199,16 +253,47 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
       );
       emit(_withAuthority(current, RemoteSessionAuthority.suspended));
     }
+    _ensureRetry(state);
+  }
+
+  /// A scheduled re-read of a suspended session.
+  ///
+  /// It confirms under the same rule as any other read — the channel up and
+  /// the read started after it came up — and ends the session the way any
+  /// other read does: by the backend no longer returning it live. With the
+  /// channel down it confirms nothing, but it still finds a session the
+  /// backend closed (`SYSTEM`, or the technician) while the
+  /// `remote-session:closed` event could not reach this tablet.
+  Future<void> _onAuthorityRetryDue(
+    _RemoteSessionAuthorityRetryDue event,
+    Emitter<RemoteSessionState> emit,
+  ) async {
+    final current = state;
+    if (current is! RemoteSessionLive || !current.isSuspended) return;
+    // A read already on the wire answers the same question, and schedules
+    // the next retry itself when it does.
+    if (_readsInFlight > 0 || _confirmInFlight) return;
+    _retryAttempt++;
+    _log(
+      'authority over ${current.session.id} still suspended: re-reading '
+      '(attempt $_retryAttempt)',
+    );
+    await _syncAndReconcile(emit);
   }
 
   /// The grace period of a suspended session ran out.
   ///
-  /// The session is ended here, through the same path as FINALIZAR: it joins
-  /// the ended set, the persistent marker is written, and the close is sent.
-  /// The tablet cannot know whether the backend still holds the session, and
-  /// it no longer matters: an assistance whose authorisation could not be
-  /// confirmed for this long is not resumed, and a new one needs a new request
-  /// and a new consent.
+  /// The session is ended here and torn down through the same path as
+  /// FINALIZAR: it joins the ended set and the persistent marker is written.
+  /// An assistance whose authorisation could not be confirmed for this long is
+  /// not resumed, and a new one needs a new request and a new consent.
+  ///
+  /// What it does *not* do is send `POST /device/remote-sessions/:id/close`.
+  /// That call is recorded as `endedBy: DEVICE` — the user pressed FINALIZAR —
+  /// and the user did not. The device no longer takes part in the session (it
+  /// joins the signaling room only of a session it has confirmed), so the
+  /// backend closes it on its own with `SYSTEM`, which is what happened. See
+  /// [_syncAndReconcile].
   Future<void> _onAuthorityGraceExpired(
     _RemoteSessionAuthorityGraceExpired event,
     Emitter<RemoteSessionState> emit,
@@ -221,7 +306,8 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
     }
     _log(
       'authority over ${current.session.id} not confirmed within '
-      '${_authorityGracePeriod.inSeconds} s: ending it on this tablet',
+      '${_authorityGracePeriod.inSeconds} s: ending it on this tablet '
+      '(no close sent: the backend closes it as SYSTEM)',
     );
     await _endHere(
       emit,
@@ -230,26 +316,33 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
     );
   }
 
-  /// Starts, keeps or cancels the grace period after every state change.
+  /// Starts, keeps or cancels the grace period and the re-reads after every
+  /// state change.
   ///
-  /// It runs from the first moment a live session is suspended and is *not*
-  /// restarted by later suspended states of the same session — a reconnection
-  /// whose read fails, or a socket that flaps, does not buy more time.
+  /// The grace period runs from the first moment a live session is suspended
+  /// and is *not* restarted by later suspended states of the same session — a
+  /// reconnection whose read fails, a socket that flaps, or a read answering
+  /// `ACTIVE` while the channel is down does not buy more time.
   @override
   void onChange(Change<RemoteSessionState> change) {
     super.onChange(change);
     final next = change.nextState;
     if (next is RemoteSessionLive && next.isSuspended) {
       final id = next.session.id;
-      if (_graceTimer != null && _graceSessionId == id) return;
-      _cancelGrace();
-      _graceSessionId = id;
-      _graceTimer = _timerFactory(_authorityGracePeriod, () {
-        _graceTimer = null;
-        if (!isClosed) add(_RemoteSessionAuthorityGraceExpired(id));
-      });
+      if (_graceTimer == null || _graceSessionId != id) {
+        _cancelGrace();
+        _graceSessionId = id;
+        _graceTimer = _timerFactory(_authorityGracePeriod, () {
+          _graceTimer = null;
+          if (!isClosed) add(_RemoteSessionAuthorityGraceExpired(id));
+        });
+      }
+      // `state` is still the previous one while onChange runs.
+      _ensureRetry(next);
     } else {
       _cancelGrace();
+      _cancelRetry();
+      _retryAttempt = 0;
     }
   }
 
@@ -257,6 +350,30 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
     _graceTimer?.cancel();
     _graceTimer = null;
     _graceSessionId = null;
+  }
+
+  /// Schedules the next re-read if [current] is a suspended live session and
+  /// neither a re-read nor a read is already pending.
+  void _ensureRetry(RemoteSessionState current) {
+    if (isClosed) return;
+    if (current is! RemoteSessionLive || !current.isSuspended) {
+      _cancelRetry();
+      return;
+    }
+    if (_retryTimer != null || _readsInFlight > 0) return;
+    if (_authorityRetryBackoff.isEmpty) return;
+    final step = _retryAttempt < _authorityRetryBackoff.length
+        ? _retryAttempt
+        : _authorityRetryBackoff.length - 1;
+    _retryTimer = _timerFactory(_authorityRetryBackoff[step], () {
+      _retryTimer = null;
+      if (!isClosed) add(const _RemoteSessionAuthorityRetryDue());
+    });
+  }
+
+  void _cancelRetry() {
+    _retryTimer?.cancel();
+    _retryTimer = null;
   }
 
   /// What a read that started at [epoch] may say about authority.
@@ -386,7 +503,12 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
   }
 
   /// A read, and — when it shows the backend still holds live a session the
-  /// user ended here — one more close of it.
+  /// user ended here with FINALIZAR — one more close of it.
+  ///
+  /// A session the tablet stopped because it lost authority gets no close,
+  /// here or anywhere: the device does not take part in it any more, so the
+  /// backend's grace runs out and it closes the session with `SYSTEM`. Until
+  /// then the session simply stays ended here.
   ///
   /// This is the whole reconciliation of an unconfirmed end, and it is
   /// deliberately borrowed rather than scheduled: it runs on the cues that
@@ -399,6 +521,13 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
 
     final current = state;
     if (current is RemoteSessionEndedLocally) {
+      if (!_closeOwed(current.remoteSessionId)) {
+        _log(
+          'session ${current.remoteSessionId} stopped here (authority lost) '
+          'is still live at the backend: waiting for its own close',
+        );
+        return;
+      }
       _log(
         'session ${current.remoteSessionId} ended here is still live at '
         'the backend: closing it again',
@@ -432,9 +561,29 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
     if (generation != _generation) return false;
 
     final epoch = _authorityEpoch;
-    final result = await _loadCurrentRemoteSession();
+    final Result<RemoteSession?> result;
+    _readsInFlight++;
+    try {
+      result = await _loadCurrentRemoteSession();
+    } finally {
+      _readsInFlight--;
+    }
     if (generation != _generation) return false;
+    try {
+      return await _adopt(emit, result, epoch, generation, reason);
+    } finally {
+      // Whatever the answer, a session still suspended gets its next re-read.
+      _ensureRetry(state);
+    }
+  }
 
+  Future<bool> _adopt(
+    Emitter<RemoteSessionState> emit,
+    Result<RemoteSession?> result,
+    int epoch,
+    int generation,
+    Failure? reason,
+  ) async {
     switch (result) {
       case Ok<RemoteSession?>(:final value):
         await _settleConfirmation(value);
@@ -496,13 +645,26 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
       _ => null,
     };
     if (heldId != null && (live == null || live.id != heldId)) {
-      _lastClosure = _closedRemotely[heldId] ?? RemoteSessionEndedBy.unknown;
+      final closedBy = _closedRemotely[heldId];
+      final wasSuspended =
+          previous is RemoteSessionLive && previous.isSuspended;
+      if (closedBy == null && wasSuspended) {
+        // Found gone by a read made while the tablet could not confirm it, and
+        // nobody said who closed it: it went during a connection problem.
+        // Most likely the backend's SYSTEM close; possibly the technician.
+        _lastClosure = null;
+        _interrupted = true;
+      } else {
+        _lastClosure = closedBy ?? RemoteSessionEndedBy.unknown;
+        _interrupted = false;
+      }
     }
     if (live != null &&
         _isLiveStatus(live.status) &&
         !_endedHere.contains(live.id) &&
         !_closedRemotely.containsKey(live.id)) {
       _lastClosure = null;
+      _interrupted = false;
     }
   }
 
@@ -517,6 +679,13 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
         await _endHere(emit, session.id);
       case RemoteSessionEndedLocally(:final remoteSessionId)
           when !_confirmInFlight:
+        if (!_closeOwed(remoteSessionId)) {
+          // Stopped here because authority was lost: there is no close to
+          // send (it would read as the user's FINALIZAR). Asking again is all
+          // there is to do.
+          await _syncAndReconcile(emit);
+          return;
+        }
         // REINTENTAR: the assistance is already over here; this only tells the
         // backend again.
         await _confirm(emit, remoteSessionId);
@@ -547,10 +716,15 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
         RemoteSessionLocalEndReason.userRequest,
   }) async {
     final generation = _generation;
+    // Only the user's own FINALIZAR is reported to the backend: that call is
+    // recorded as `endedBy: DEVICE`, and an end the user did not ask for must
+    // not read like one. See [_onAuthorityGraceExpired].
+    final closeOwed = reason == RemoteSessionLocalEndReason.userRequest;
     _endedHere.add(remoteSessionId);
     _endReasons[remoteSessionId] = reason;
     _lastClosure = null;
-    final token = _confirming = Object();
+    _interrupted = !closeOwed;
+    final token = closeOwed ? _confirming = Object() : null;
     emit(_endedState(remoteSessionId));
     _log('assistance ended on this tablet for $remoteSessionId');
 
@@ -559,11 +733,12 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
     // again. The marker never gates the end itself: a store that cannot be
     // written costs the restart guarantee, not the local revocation.
     await _loadMarker();
-    await _rememberPending(remoteSessionId);
+    await _rememberPending(remoteSessionId, closeOwed: closeOwed);
     if (generation != _generation) {
-      if (identical(_confirming, token)) _confirming = null;
+      if (token != null && identical(_confirming, token)) _confirming = null;
       return;
     }
+    if (token == null) return;
 
     await _confirm(emit, remoteSessionId, token: token);
   }
@@ -634,6 +809,7 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
     _authorityEpoch++;
     _confirming = null;
     _lastClosure = null;
+    _interrupted = false;
     // [_endedHere], [_closedRemotely] and the stored marker are deliberately
     // kept. A session that is over does not become acceptable because the
     // identity was reset.
@@ -643,6 +819,7 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
   @override
   Future<void> close() {
     _cancelGrace();
+    _cancelRetry();
     return super.close();
   }
 
@@ -652,9 +829,16 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
 
   Future<void> _readMarker() async {
     try {
-      final remoteSessionId = await _endedSessionStore.read();
-      if (remoteSessionId == null) return;
+      final marker = await _endedSessionStore.read();
+      if (marker == null) return;
+      final remoteSessionId = marker.remoteSessionId;
       _endedHere.add(remoteSessionId);
+      if (!marker.closeOwed) {
+        _endReasons.putIfAbsent(
+          remoteSessionId,
+          () => RemoteSessionLocalEndReason.authorityLost,
+        );
+      }
       _pendingConfirmation ??= remoteSessionId;
       _log(
         'session $remoteSessionId was ended on this tablet before: '
@@ -665,10 +849,15 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
     }
   }
 
-  Future<void> _rememberPending(String remoteSessionId) async {
+  Future<void> _rememberPending(
+    String remoteSessionId, {
+    required bool closeOwed,
+  }) async {
     _pendingConfirmation = remoteSessionId;
     try {
-      await _endedSessionStore.write(remoteSessionId);
+      await _endedSessionStore.write(
+        EndedRemoteSessionMarker(remoteSessionId, closeOwed: closeOwed),
+      );
     } on EndedRemoteSessionStoreException {
       _log('the ended-session marker could not be written');
     }
@@ -703,6 +892,11 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
   // ---------------------------------------------------------------- plumbing
 
   bool get _confirmInFlight => _confirming != null;
+
+  /// Whether a session ended here is one the backend must be told about with
+  /// `POST close` (FINALIZAR), as opposed to one the backend closes itself.
+  bool _closeOwed(String remoteSessionId) =>
+      _endReasons[remoteSessionId] != RemoteSessionLocalEndReason.authorityLost;
 
   /// `404` and `409` both mean the same thing here: what this client believed
   /// is no longer what the backend holds. The contract is explicit that the
@@ -756,6 +950,7 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
       return RemoteSessionIdle(
         lastFailure: lastFailure,
         lastClosure: _lastClosure,
+        interrupted: _lastClosure == null && _interrupted,
       );
     }
 
