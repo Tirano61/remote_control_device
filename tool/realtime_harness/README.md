@@ -47,3 +47,28 @@ Without `REALTIME_HARNESS=1` the integration test is skipped, so a plain
 | `cutMs: ms` | drops every relayed connection and refuses new ones for *ms* |
 | `setActive: bool` | `DevicesService.update(isActive)`, the real admin path; deactivating closes the sockets (`io server disconnect`) |
 | `serverDisconnect: true` | `DevicePresenceService.disconnectDevice` on a device that stays active |
+
+## Fault relay for physical tests
+
+`fault_relay.js` sits between a tablet and a **real** backend, which it never
+modifies:
+
+```text
+tablet --(dev tunnel)--> 127.0.0.1:3010 --> 127.0.0.1:3000 (the backend)
+```
+
+Everything passes through untouched until a fault is armed on
+`127.0.0.1:3011` (`POST /ctl`). The faults reproduce byte for byte what the
+backend itself sends:
+
+| Field | Effect |
+|---|---|
+| `rejectHandshakes: n` | the next *n* `/devices` CONNECTs get `44/devices,{"message":"Unauthorized"}` and are not forwarded |
+| `serverDisconnect: true` | every open `/devices` socket gets `41/devices,` (namespace DISCONNECT) and is closed |
+| `loginReject: bool` | `POST /device-auth/login` gets the exact `401 DEVICE_CREDENTIAL_REJECTED` body without reaching the backend, so nothing in the database changes |
+| `cutMs: ms` | drops every relayed connection and refuses new ones |
+
+Bodies are never logged, and tokens appear only as `tok#n`. Run it with
+`NODE_PATH=../remote_control_backend/node_modules node tool/realtime_harness/fault_relay.js`.
+The tablet needs a build whose `BACKEND_BASE_URL` points at the forwarded relay
+port.
