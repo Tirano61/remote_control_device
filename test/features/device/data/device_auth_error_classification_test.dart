@@ -83,6 +83,35 @@ void main() {
   };
 
   group('POST /device-auth/login', () {
+    test('P35: a 200 that arrives after authorisation was withdrawn installs '
+        'no token', () async {
+      final answer = Completer<void>();
+      backend.on(loginPath, (request) async {
+        await answer.future;
+        await _json(200, loginBody)(request);
+      });
+
+      final login = authRepository.login(testCredentials);
+      // While the login is on the wire, a confirmed refusal (or a stop, or a
+      // newer attempt) withdraws authorisation.
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      tokenStore.clear();
+      answer.complete();
+
+      expect(await login, isA<Ok<Object?>>());
+      expect(tokenStore.token, isNull);
+    });
+
+    test('a login started after a withdrawal installs its token normally',
+        () async {
+      tokenStore.clear();
+      backend.on(loginPath, _json(200, loginBody));
+
+      await authRepository.login(testCredentials);
+
+      expect(tokenStore.token, testDeviceJwt);
+    });
+
     test('1. 200 with the documented body authenticates', () async {
       backend.on(loginPath, _json(200, loginBody));
 

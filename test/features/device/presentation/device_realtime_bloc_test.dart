@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:bloc_test/bloc_test.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:remote_control_device/core/error/failures.dart';
@@ -12,6 +14,7 @@ import 'package:remote_control_device/features/device/domain/usecases/renew_devi
 import 'package:remote_control_device/features/device/presentation/bloc/realtime/device_realtime_bloc.dart';
 
 import '../../../fakes/device_fakes.dart';
+import '../../../fakes/manual_timers.dart';
 import '../../../fakes/realtime_fakes.dart';
 
 void main() {
@@ -19,6 +22,7 @@ void main() {
   late FakeDeviceCredentialsStorage storage;
   late FakeDeviceAuthRepository authRepository;
   late DeviceTokenStore tokenStore;
+  late ManualTimers timers;
 
   const confirmation = DeviceRealtimeConfirmation(
     deviceId: testDeviceId,
@@ -35,9 +39,12 @@ void main() {
       authenticateDevice: AuthenticateDevice(authRepository),
     ),
     reauthRetryDelay: const Duration(milliseconds: 20),
+    timerFactory: timers.factory,
+    clock: () => DateTime.utc(2026, 11, 19).add(timers.now),
   );
 
   setUp(() {
+    timers = ManualTimers();
     client = FakeDeviceRealtimeClient();
     storage = FakeDeviceCredentialsStorage(testCredentials);
     tokenStore = InMemoryDeviceTokenStore()..save(testDeviceJwt);
@@ -373,8 +380,11 @@ void main() {
         await client.emit(const RealtimeHandshakeRejected());
         await FakeDeviceRealtimeClient.pump();
         authRepository.loginResult = const Ok(testRenewedSession);
-        await Future<void>.delayed(const Duration(milliseconds: 60));
+        timers.elapse(const Duration(milliseconds: 20));
+        await FakeDeviceRealtimeClient.pump();
         await client.emit(const RealtimeConnected());
+        // Once connected, nothing is left scheduled.
+        expect(timers.pending, isEmpty);
       },
       expect: () => const [
         DeviceRealtimeConnecting(),
@@ -412,35 +422,6 @@ void main() {
 
   group('no authentication loop', () {
     blocTest<DeviceRealtimeBloc, DeviceRealtimeState>(
-      'a token that was just issued and refused again ends the attempts',
-      build: buildBloc,
-      act: (bloc) async {
-        bloc.add(const DeviceRealtimeStartRequested());
-        await FakeDeviceRealtimeClient.pump();
-        await client.emit(const RealtimeHandshakeRejected());
-        await FakeDeviceRealtimeClient.pump();
-        // The renewed token is refused as well.
-        await client.emit(const RealtimeHandshakeRejected());
-        await FakeDeviceRealtimeClient.pump();
-        await client.emit(const RealtimeHandshakeRejected());
-        await FakeDeviceRealtimeClient.pump();
-      },
-      expect: () => const [
-        DeviceRealtimeConnecting(),
-        DeviceRealtimeConnectionError(retrying: false),
-      ],
-      verify: (_) {
-        // One login, not one per rejection.
-        expect(authRepository.loginCount, 1);
-        expect(client.connectedWithTokens, [
-          testDeviceJwt,
-          testRenewedDeviceJwt,
-        ]);
-        expect(storage.clearCount, 0);
-      },
-    );
-
-    blocTest<DeviceRealtimeBloc, DeviceRealtimeState>(
       'rejections arriving together produce a single login',
       build: buildBloc,
       act: (bloc) async {
@@ -456,11 +437,12 @@ void main() {
       verify: (_) {
         expect(authRepository.loginCount, 1);
         expect(client.connectedWithTokens.length, 2);
+        expect(timers.pending, isEmpty);
       },
     );
 
     blocTest<DeviceRealtimeBloc, DeviceRealtimeState>(
-      'a working connection restores the right to recover once more',
+      'a connection that stayed up restores the immediate recovery',
       build: buildBloc,
       act: (bloc) async {
         bloc.add(const DeviceRealtimeStartRequested());
@@ -468,7 +450,9 @@ void main() {
         await client.emit(const RealtimeHandshakeRejected());
         await FakeDeviceRealtimeClient.pump();
         await client.emit(const RealtimeConnected());
-        // A day later the renewed token expires in its turn.
+        // It stays up long enough to count as stable...
+        timers.elapse(DeviceRealtimeBloc.defaultStableConnectionPeriod);
+        // ...and a day later the renewed token expires in its turn.
         authRepository.loginResult = const Ok(testSession);
         await client.emit(const RealtimeHandshakeRejected());
         await FakeDeviceRealtimeClient.pump();
@@ -482,6 +466,382 @@ void main() {
         ]);
       },
     );
+  });
+
+  group('P35 — a refusal after a fresh login is never terminal', () {
+    Future<void> start(DeviceRealtimeBloc bloc) async {
+      bloc.add(const DeviceRealtimeStartRequested());
+      await FakeDeviceRealtimeClient.pump();
+    }
+
+    Future<void> reject() async {
+      await client.emit(const RealtimeHandshakeRejected());
+      await FakeDeviceRealtimeClient.pump();
+    }
+
+    Duration nextDelay() => timers.pending.single.dueAt - timers.now;
+
+    blocTest<DeviceRealtimeBloc, DeviceRealtimeState>(
+      'C: a freshly minted JWT refused again is retried after 15 s, '
+      'and connects once the backend is healthy',
+      build: buildBloc,
+      act: (bloc) async {
+        await start(bloc);
+        await reject(); // login 1 at once
+        await reject(); // the fresh token is refused too
+        expect(authRepository.loginCount, 1, reason: 'nothing before 15 s');
+        expect(nextDelay(), const Duration(seconds: 15));
+        timers.elapse(const Duration(seconds: 14));
+        await FakeDeviceRealtimeClient.pump();
+        expect(authRepository.loginCount, 1);
+        authRepository.loginResult = const Ok(testSession);
+        timers.elapse(const Duration(seconds: 1));
+        await FakeDeviceRealtimeClient.pump();
+        await client.emit(const RealtimeConnected());
+      },
+      expect: () => const [
+        DeviceRealtimeConnecting(),
+        DeviceRealtimeConnectionError(),
+        DeviceRealtimeConnecting(),
+        DeviceRealtimeConnected(),
+      ],
+      verify: (_) {
+        expect(authRepository.loginCount, 2);
+        // Three handshakes, each on a socket of its own.
+        expect(client.connectedWithTokens, [
+          testDeviceJwt,
+          testRenewedDeviceJwt,
+          testDeviceJwt,
+        ]);
+        expect(storage.clearCount, 0);
+      },
+    );
+
+    blocTest<DeviceRealtimeBloc, DeviceRealtimeState>(
+      'the backoff is 15 s, 30 s, 60 s, then 60 s for as long as it takes',
+      build: buildBloc,
+      act: (bloc) async {
+        await start(bloc);
+        await reject();
+        final delays = <Duration>[];
+        for (var i = 0; i < 5; i++) {
+          await reject();
+          delays.add(nextDelay());
+          timers.elapse(delays.last);
+          await FakeDeviceRealtimeClient.pump();
+        }
+        expect(delays, const [
+          Duration(seconds: 15),
+          Duration(seconds: 30),
+          Duration(seconds: 60),
+          Duration(seconds: 60),
+          Duration(seconds: 60),
+        ]);
+      },
+      verify: (_) {
+        // One login per step, never two at once, never more than one timer.
+        expect(authRepository.loginCount, 6);
+        expect(client.connectedWithTokens.length, 7);
+        expect(timers.pending, isEmpty);
+      },
+    );
+
+    blocTest<DeviceRealtimeBloc, DeviceRealtimeState>(
+      'a connection that drops before it is stable does not reset the backoff',
+      build: buildBloc,
+      act: (bloc) async {
+        await start(bloc);
+        await reject(); // login 1 at once
+        await client.emit(const RealtimeConnected());
+        timers.elapse(const Duration(seconds: 5)); // not yet stable
+        await reject();
+        expect(authRepository.loginCount, 1);
+        expect(nextDelay(), const Duration(seconds: 15));
+      },
+    );
+
+    blocTest<DeviceRealtimeBloc, DeviceRealtimeState>(
+      'a confirmed refusal during the backoff stops everything',
+      build: buildBloc,
+      act: (bloc) async {
+        await start(bloc);
+        await reject();
+        await reject();
+        authRepository.loginResult = loginRejected;
+        timers.elapse(const Duration(seconds: 15));
+        await FakeDeviceRealtimeClient.pump();
+        // Whatever arrives afterwards changes nothing.
+        await reject();
+        timers.elapse(const Duration(minutes: 10));
+        await FakeDeviceRealtimeClient.pump();
+      },
+      expect: () => const [
+        DeviceRealtimeConnecting(),
+        DeviceRealtimeConnectionError(),
+        DeviceRealtimeConnecting(),
+        DeviceRealtimeDisconnected(
+          cause: DeviceRealtimeStopCause.credentialRejected,
+        ),
+      ],
+      verify: (_) {
+        expect(authRepository.loginCount, 2);
+        expect(timers.pending, isEmpty);
+        expect(storage.clearCount, 0);
+      },
+    );
+
+    blocTest<DeviceRealtimeBloc, DeviceRealtimeState>(
+      'a namespace refusal that destroyed the socket is recovered like one',
+      build: buildBloc,
+      act: (bloc) async {
+        await start(bloc);
+        await client.emit(const RealtimeConnectFailed(transportRetrying: false));
+        await FakeDeviceRealtimeClient.pump();
+      },
+      verify: (_) {
+        expect(authRepository.loginCount, 1);
+        expect(client.connectedWithTokens, [testDeviceJwt, testRenewedDeviceJwt]);
+      },
+    );
+
+    blocTest<DeviceRealtimeBloc, DeviceRealtimeState>(
+      'a transport failure the package retries costs no login',
+      build: buildBloc,
+      act: (bloc) async {
+        await start(bloc);
+        await client.emit(const RealtimeConnectFailed());
+        timers.elapse(const Duration(minutes: 5));
+        await FakeDeviceRealtimeClient.pump();
+      },
+      verify: (_) {
+        expect(authRepository.loginCount, 0);
+        expect(client.connectedWithTokens, [testDeviceJwt]);
+        expect(timers.pending, isEmpty);
+      },
+    );
+  });
+
+  group('P35 — io server disconnect', () {
+    Future<void> connected(DeviceRealtimeBloc bloc) async {
+      bloc.add(const DeviceRealtimeStartRequested());
+      await FakeDeviceRealtimeClient.pump();
+      await client.emit(const RealtimeConnected());
+    }
+
+    blocTest<DeviceRealtimeBloc, DeviceRealtimeState>(
+      'G2: the server closing an active device re-authenticates and reconnects',
+      build: buildBloc,
+      act: (bloc) async {
+        await connected(bloc);
+        await client.emit(const RealtimeServerDisconnected());
+        await FakeDeviceRealtimeClient.pump();
+        await client.emit(const RealtimeConnected());
+      },
+      expect: () => const [
+        DeviceRealtimeConnecting(),
+        DeviceRealtimeConnected(),
+        DeviceRealtimeReconnecting(),
+        DeviceRealtimeConnected(),
+      ],
+      verify: (_) {
+        expect(authRepository.loginCount, 1);
+        // The destroyed socket is released, a new one built with the new JWT.
+        expect(client.disconnectCount, 1);
+        expect(client.connectedWithTokens, [testDeviceJwt, testRenewedDeviceJwt]);
+      },
+    );
+
+    blocTest<DeviceRealtimeBloc, DeviceRealtimeState>(
+      'F1: a deactivated device finds out through the login and stops',
+      build: buildBloc,
+      act: (bloc) async {
+        await connected(bloc);
+        authRepository.loginResult = loginRejected;
+        await client.emit(const RealtimeServerDisconnected());
+        await FakeDeviceRealtimeClient.pump();
+        timers.elapse(const Duration(minutes: 10));
+        await FakeDeviceRealtimeClient.pump();
+      },
+      expect: () => const [
+        DeviceRealtimeConnecting(),
+        DeviceRealtimeConnected(),
+        DeviceRealtimeReconnecting(),
+        DeviceRealtimeDisconnected(
+          cause: DeviceRealtimeStopCause.credentialRejected,
+        ),
+      ],
+      verify: (_) {
+        expect(authRepository.loginCount, 1, reason: 'no automatic loop');
+        expect(client.connectedWithTokens, [testDeviceJwt]);
+        expect(timers.pending, isEmpty);
+        expect(storage.clearCount, 0);
+      },
+    );
+
+    blocTest<DeviceRealtimeBloc, DeviceRealtimeState>(
+      'a backend that keeps accepting and dropping the socket is bounded by '
+      'the backoff',
+      build: buildBloc,
+      act: (bloc) async {
+        await connected(bloc);
+        for (var i = 0; i < 4; i++) {
+          await client.emit(const RealtimeServerDisconnected());
+          await FakeDeviceRealtimeClient.pump();
+          final pending = timers.pending;
+          if (pending.isNotEmpty) {
+            timers.elapse(pending.single.dueAt - timers.now);
+            await FakeDeviceRealtimeClient.pump();
+          }
+          await client.emit(const RealtimeConnected());
+        }
+      },
+      verify: (_) {
+        // Four drops, four logins — but spread over 0 + 15 + 30 + 60 s.
+        expect(authRepository.loginCount, 4);
+        expect(timers.now, const Duration(seconds: 105));
+      },
+    );
+  });
+
+  group('P35 — generations', () {
+    blocTest<DeviceRealtimeBloc, DeviceRealtimeState>(
+      'a stop during the login: its answer installs nothing',
+      build: buildBloc,
+      act: (bloc) async {
+        bloc.add(const DeviceRealtimeStartRequested());
+        await FakeDeviceRealtimeClient.pump();
+        authRepository.loginGate = Completer<void>();
+        await client.emit(const RealtimeHandshakeRejected());
+        bloc.add(const DeviceRealtimeStopRequested());
+        await FakeDeviceRealtimeClient.pump();
+        authRepository.loginGate!.complete();
+        await FakeDeviceRealtimeClient.pump();
+        await FakeDeviceRealtimeClient.pump();
+      },
+      expect: () => const [
+        DeviceRealtimeConnecting(),
+        DeviceRealtimeDisconnected(),
+      ],
+      verify: (_) {
+        expect(client.connectedWithTokens, [testDeviceJwt]);
+        expect(timers.pending, isEmpty);
+      },
+    );
+
+    blocTest<DeviceRealtimeBloc, DeviceRealtimeState>(
+      'a late login does not replace the socket of a newer start',
+      build: buildBloc,
+      act: (bloc) async {
+        bloc.add(const DeviceRealtimeStartRequested());
+        await FakeDeviceRealtimeClient.pump();
+        authRepository.loginGate = Completer<void>();
+        await client.emit(const RealtimeHandshakeRejected());
+        bloc.add(const DeviceRealtimeStopRequested());
+        await FakeDeviceRealtimeClient.pump();
+        // The session is READY again with a token of its own.
+        tokenStore.save('header.session-payload.signature');
+        bloc.add(const DeviceRealtimeStartRequested());
+        await FakeDeviceRealtimeClient.pump();
+        authRepository.loginGate!.complete();
+        await FakeDeviceRealtimeClient.pump();
+        await FakeDeviceRealtimeClient.pump();
+        await client.emit(const RealtimeConnected());
+      },
+      expect: () => const [
+        DeviceRealtimeConnecting(),
+        DeviceRealtimeDisconnected(),
+        DeviceRealtimeConnecting(),
+        DeviceRealtimeConnected(),
+      ],
+      verify: (_) {
+        expect(client.connectedWithTokens, [
+          testDeviceJwt,
+          'header.session-payload.signature',
+        ]);
+      },
+    );
+
+    blocTest<DeviceRealtimeBloc, DeviceRealtimeState>(
+      'logins are never concurrent, even across generations',
+      build: buildBloc,
+      act: (bloc) async {
+        bloc.add(const DeviceRealtimeStartRequested());
+        await FakeDeviceRealtimeClient.pump();
+        authRepository.loginGate = Completer<void>();
+        await client.emit(const RealtimeHandshakeRejected()); // login A starts
+        bloc.add(const DeviceRealtimeStopRequested());
+        await FakeDeviceRealtimeClient.pump();
+        bloc.add(const DeviceRealtimeStartRequested());
+        await FakeDeviceRealtimeClient.pump();
+        await client.emit(const RealtimeHandshakeRejected()); // B must wait
+        await FakeDeviceRealtimeClient.pump();
+        expect(authRepository.loginCount, 1);
+        authRepository.loginGate!.complete();
+        await FakeDeviceRealtimeClient.pump();
+        await FakeDeviceRealtimeClient.pump();
+      },
+      verify: (_) {
+        expect(authRepository.loginCount, 2);
+        // Only the current generation's renewal opened a socket: the first
+        // two are the starts, the third is B's renewal. A's answer opened none.
+        expect(client.connectedWithTokens, [
+          testDeviceJwt,
+          testDeviceJwt,
+          testRenewedDeviceJwt,
+        ]);
+      },
+    );
+
+    blocTest<DeviceRealtimeBloc, DeviceRealtimeState>(
+      'a timer of an earlier generation does nothing',
+      build: buildBloc,
+      act: (bloc) async {
+        bloc.add(const DeviceRealtimeStartRequested());
+        await FakeDeviceRealtimeClient.pump();
+        await client.emit(const RealtimeHandshakeRejected());
+        await FakeDeviceRealtimeClient.pump();
+        await client.emit(const RealtimeHandshakeRejected()); // 15 s scheduled
+        bloc.add(const DeviceRealtimeStopRequested());
+        await FakeDeviceRealtimeClient.pump();
+        expect(timers.pending, isEmpty, reason: 'the stop cancels it');
+        bloc.add(const DeviceRealtimeStartRequested());
+        await FakeDeviceRealtimeClient.pump();
+        timers.elapse(const Duration(minutes: 5));
+        await FakeDeviceRealtimeClient.pump();
+      },
+      verify: (_) => expect(authRepository.loginCount, 1),
+    );
+
+    test('closing the bloc during a login leaves nothing behind', () async {
+      final bloc = buildBloc();
+      bloc.add(const DeviceRealtimeStartRequested());
+      await FakeDeviceRealtimeClient.pump();
+      authRepository.loginGate = Completer<void>();
+      await client.emit(const RealtimeHandshakeRejected());
+      await bloc.close();
+      authRepository.loginGate!.complete();
+      await FakeDeviceRealtimeClient.pump();
+      await FakeDeviceRealtimeClient.pump();
+
+      expect(client.disposeCount, 1);
+      expect(client.connectedWithTokens, [testDeviceJwt]);
+      expect(timers.pending, isEmpty);
+    });
+
+    test('closing the bloc cancels a scheduled retry', () async {
+      final bloc = buildBloc();
+      bloc.add(const DeviceRealtimeStartRequested());
+      await FakeDeviceRealtimeClient.pump();
+      await client.emit(const RealtimeHandshakeRejected());
+      await FakeDeviceRealtimeClient.pump();
+      await client.emit(const RealtimeHandshakeRejected());
+      expect(timers.pending, hasLength(1));
+
+      await bloc.close();
+
+      expect(timers.pending, isEmpty);
+      expect(authRepository.loginCount, 1);
+    });
   });
 
   group('session invalidation', () {

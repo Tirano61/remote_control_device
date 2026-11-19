@@ -141,6 +141,58 @@ void main() {
     );
   });
 
+  test('P35 F: a deactivation the server announces by closing the socket ends '
+      'in CredentialRefused, and an explicit retry after reactivation '
+      'recovers with the same credential', () async {
+    await reachReady();
+    await client.emit(const RealtimeConnected());
+
+    // PATCH isActive=false: the backend closes the socket (io server
+    // disconnect) and from now on refuses the login.
+    authRepository.loginResult = loginRejected;
+    await client.emit(const RealtimeServerDisconnected());
+    await FakeDeviceRealtimeClient.pump();
+    await FakeDeviceRealtimeClient.pump();
+
+    expect(sessionBloc.state, const DeviceSessionCredentialRefused());
+    expect(tokenStore.hasToken, isFalse);
+    expect(storage.clearCount, 0);
+    expect(authRepository.loginCount, 2, reason: 'startup + one renewal');
+    expect(client.connectedWithTokens, [testDeviceJwt]);
+
+    // Nothing is retried on its own...
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    expect(authRepository.loginCount, 2);
+    expect(authRepository.checkStatusCount, 1);
+
+    // ...until the admin reactivates the device and the user retries.
+    authRepository.loginResult = const Ok(testSession);
+    sessionBloc.add(const DeviceSessionRetryRequested());
+    await FakeDeviceRealtimeClient.pump();
+    await FakeDeviceRealtimeClient.pump();
+    await client.emit(const RealtimeConnected());
+
+    expect(sessionBloc.state, const DeviceSessionReady(testIdentity));
+    expect(realtimeBloc.state, const DeviceRealtimeConnected());
+    expect(storage.credentials, testCredentials);
+    expect(client.connectedWithTokens, [testDeviceJwt, testDeviceJwt]);
+  });
+
+  test('P35 G2: a server disconnect of an active device stays READY and '
+      'reconnects with a renewed JWT', () async {
+    await reachReady();
+    await client.emit(const RealtimeConnected());
+
+    authRepository.loginResult = const Ok(testRenewedSession);
+    await client.emit(const RealtimeServerDisconnected());
+    await FakeDeviceRealtimeClient.pump();
+    await client.emit(const RealtimeConnected());
+
+    expect(sessionBloc.state, const DeviceSessionReady(testIdentity));
+    expect(client.connectedWithTokens, [testDeviceJwt, testRenewedDeviceJwt]);
+    expect(realtimeBloc.state, const DeviceRealtimeConnected());
+  });
+
   test('an expired Device JWT never sends the device back to enrollment',
       () async {
     await reachReady();

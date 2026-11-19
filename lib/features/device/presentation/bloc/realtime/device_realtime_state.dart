@@ -6,9 +6,10 @@ enum DeviceRealtimeStopCause {
   /// for the channel to be closed.
   noSession,
 
-  /// `POST /device-auth/login` answered `401`: the permanent credential itself
-  /// is no longer accepted. The session layer reacts by wiping the local
-  /// installation identity and requiring re-enrollment.
+  /// `POST /device-auth/login` answered `401 DEVICE_CREDENTIAL_REJECTED`: the
+  /// permanent credential itself is not accepted now. The session layer reacts
+  /// by withdrawing authorisation; the credential stays in secure storage and
+  /// nothing is retried until the user asks.
   credentialRejected,
 }
 
@@ -62,14 +63,10 @@ final class DeviceRealtimeReconnecting extends DeviceRealtimeState {
 }
 
 /// A connection attempt failed and none has succeeded yet in this session.
+///
+/// Always transient: the transport or the bloc's own backoff will try again.
+/// Only a confirmed refusal of the credential stops the channel, and that is
+/// [DeviceRealtimeDisconnected] with [DeviceRealtimeStopCause.credentialRejected].
 final class DeviceRealtimeConnectionError extends DeviceRealtimeState {
-  const DeviceRealtimeConnectionError({this.retrying = true});
-
-  /// `false` when nothing is trying any more — the client refused to keep
-  /// re-authenticating in a loop. The user-facing text is the same either way;
-  /// only a new device session restarts the channel.
-  final bool retrying;
-
-  @override
-  List<Object?> get props => [retrying];
+  const DeviceRealtimeConnectionError();
 }
