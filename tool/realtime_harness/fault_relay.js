@@ -27,6 +27,13 @@
  *   closeDevices         closes every open /devices WebSocket gracefully; behind
  *                        a dev tunnel the client notices at once, while a cut
  *                        only shows after the Engine.IO ping timeout
+ *   blockDevicesMs ms    closes every open /devices WebSocket gracefully, as
+ *                        closeDevices, and refuses every WebSocket upgrade for
+ *                        ms. HTTP keeps passing: the socket is down, REST is up
+ *                        (Prompt 38)
+ *   failCurrentMs ms     GET /device/remote-sessions/current is answered 503
+ *                        for ms without reaching the backend; everything else
+ *                        passes (Prompt 38)
  *
  * Privacy: request and response bodies are never logged. A Device JWT is only
  * ever recorded as `tok#n`, the order in which this relay first saw it; the
@@ -68,6 +75,8 @@ const faults = {
   legacyRejectHandshakes: 0,
   loginReject: false,
   cutUntil: 0,
+  blockDevicesUntil: 0,
+  failCurrentUntil: 0,
 };
 const events = [];
 const t0 = Date.now();
@@ -99,6 +108,18 @@ const server = http.createServer((req, res) => {
     return;
   }
   const isLogin = req.method === 'POST' && req.url.startsWith('/device-auth/login');
+  const isCurrentSession =
+    req.method === 'GET' && req.url.split('?')[0] === '/device/remote-sessions/current';
+
+  if (isCurrentSession && Date.now() < faults.failCurrentUntil) {
+    req.resume();
+    req.on('end', () => {
+      res.writeHead(503, { 'content-type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ statusCode: 503, message: 'Service Unavailable' }));
+      log({ ev: 'http', method: req.method, path: req.url, status: 503, note: 'synthesised by relay (failCurrentMs)' });
+    });
+    return;
+  }
 
   if (isLogin && faults.loginReject) {
     req.resume(); // drain the credential, never read it
@@ -157,6 +178,12 @@ const wss = new WebSocketServer({ noServer: true });
 server.on('upgrade', (req, socket, head) => {
   if (cut()) {
     socket.destroy();
+    return;
+  }
+  if (Date.now() < faults.blockDevicesUntil) {
+    // An HTTP answer rather than a reset, so the tunnel passes it on at once.
+    socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+    log({ ev: 'upgrade-refused', note: 'blockDevicesMs' });
     return;
   }
   wss.handleUpgrade(req, socket, head, (client) => relayWebSocket(req, client));
@@ -247,6 +274,13 @@ http
           faults.cutUntil = Date.now() + cmd.cutMs;
           for (const s of liveSockets) s.destroy();
           for (const p of deviceSockets) p.client.terminate();
+        }
+        if (typeof cmd.failCurrentMs === 'number') {
+          faults.failCurrentUntil = Date.now() + cmd.failCurrentMs;
+        }
+        if (typeof cmd.blockDevicesMs === 'number') {
+          faults.blockDevicesUntil = Date.now() + cmd.blockDevicesMs;
+          cmd.closeDevices = true;
         }
         if (cmd.closeDevices) {
           // A graceful WebSocket close, which the dev tunnel forwards: the
