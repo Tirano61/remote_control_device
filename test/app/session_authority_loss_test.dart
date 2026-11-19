@@ -624,6 +624,229 @@ void main() {
     expectNothingLeft(peer, channel);
   });
 
+  group('Prompt 38. recovery within the backend grace', () {
+    const backendGrace = RemoteSessionBloc.backendDisconnectGrace;
+
+    test('1. a loss shorter than the backend grace (50 s, past the old 45 s) '
+        'is recovered: same peer, same capture, no close', () async {
+      final (peer, channel) = await reachActiveAssistance();
+      await dropSocket();
+      timers.elapse(const Duration(seconds: 50));
+      await settle();
+      expect(remoteSessionBloc.state, isA<RemoteSessionActive>());
+
+      await restoreSocket();
+
+      expect(await tapRuns(channel, 'after'), isTrue);
+      expect(peer.isClosed, isFalse);
+      expect(peerFactory.createCount, 1);
+      expect(screenCapture.isActive, isTrue);
+      expect(screenCapture.requests, [testRemoteSessionId]);
+      expect(remoteSessionRepository.closeCount, 0);
+    });
+
+    test('2. a prolonged loss ends it at the grace, tears everything down, '
+        'and sends no close', () async {
+      final (peer, channel) = await reachActiveAssistance();
+      remoteSessionRepository.currentResult = remoteSessionUnreachable;
+      await dropSocket();
+
+      timers.elapse(grace - const Duration(milliseconds: 1));
+      await settle();
+      expect(remoteSessionBloc.state, isA<RemoteSessionActive>());
+      expect(screenCapture.isActive, isTrue);
+
+      timers.elapse(const Duration(milliseconds: 1));
+      await settle();
+      expect(remoteSessionBloc.state, isA<RemoteSessionEndedLocally>());
+      expectNothingLeft(peer, channel);
+      expect(remoteSessionRepository.closeCount, 0);
+      expect(grace, greaterThan(backendGrace));
+    });
+
+    test('3-4. REST down after the socket returns: retried with backoff until '
+        'it confirms ACTIVE; control only then', () async {
+      final (peer, channel) = await reachActiveAssistance();
+      await dropSocket();
+      remoteSessionRepository.currentResult = remoteSessionUnreachable;
+      await restoreSocket();
+      expect(await tapRuns(channel, 'rest-down'), isFalse);
+
+      // Still failing at the first retry...
+      timers.elapse(const Duration(seconds: 2));
+      await settle();
+      expect(await tapRuns(channel, 'still-down'), isFalse);
+
+      // ...and back before the next one.
+      remoteSessionRepository.currentResult = activatedRemoteSession;
+      timers.elapse(const Duration(seconds: 4));
+      await settle();
+
+      expect(await tapRuns(channel, 'rest-back'), isTrue);
+      expect(peer.isClosed, isFalse);
+      expect(remoteSessionRepository.closeCount, 0);
+    });
+
+    test('the device rejoins only once the session is confirmed', () async {
+      await reachActiveAssistance();
+      final joins = client.joinedSessionIds.length;
+      await dropSocket();
+      final gate = remoteSessionRepository.currentGate = Completer<void>();
+
+      await restoreSocket();
+      // Connected, but the read has not answered: not taking part yet, so
+      // the backend's grace keeps running.
+      expect(client.joinedSessionIds, hasLength(joins));
+
+      gate.complete();
+      await settle();
+      expect(client.joinedSessionIds, hasLength(joins + 1));
+      expect(client.joinedSessionIds.last, testRemoteSessionId);
+    });
+
+    test('5. a re-read made with the socket still down that finds the session '
+        'gone ends it at once', () async {
+      final (peer, channel) = await reachActiveAssistance();
+      await dropSocket();
+      // The backend closed it as SYSTEM; the event could not reach the tablet.
+      remoteSessionRepository.currentResult = noRemoteSession;
+
+      timers.elapse(const Duration(seconds: 2));
+      await settle();
+
+      expect(
+        remoteSessionBloc.state,
+        const RemoteSessionIdle(interrupted: true),
+      );
+      expectNothingLeft(peer, channel);
+      expect(remoteSessionRepository.closeCount, 0);
+      expect(timers.pending.where((t) => t.dueAt >= timers.now), isEmpty);
+    });
+
+    test('6. SYSTEM close arriving during the recovery wins over a read '
+        'still on the wire', () async {
+      final (peer, channel) = await reachActiveAssistance();
+      await dropSocket();
+      final gate = remoteSessionRepository.currentGate = Completer<void>();
+      await restoreSocket();
+
+      await client.emit(
+        const RealtimeRemoteSessionClosed(
+          testRemoteSessionId,
+          endedBy: 'SYSTEM',
+        ),
+      );
+      await settle();
+      expectNothingLeft(peer, channel);
+
+      // The read made on reconnection answers ACTIVE, as of before the close.
+      gate.complete();
+      await settle();
+      expect(remoteSessionBloc.state, isA<RemoteSessionClosedRemotely>());
+      expect(await tapRuns(channel, 'after'), isFalse);
+      expect(remoteSessionRepository.closeCount, 0);
+    });
+
+    test(
+      '11. a revoked credential during the recovery tears it down at once',
+      () async {
+        final (peer, channel) = await reachActiveAssistance();
+        await dropSocket();
+
+        credentialRevocation.report();
+        await settle();
+
+        expect(remoteSessionBloc.state, const RemoteSessionInitial());
+        expectNothingLeft(peer, channel);
+        timers.elapse(grace * 2);
+        await settle();
+        expect(remoteSessionRepository.closeCount, 0);
+      },
+    );
+
+    test('12. a DRAG is abandoned on the drop, and nothing of it, nor a new '
+        'one, runs while suspended or after', () async {
+      final (_, channel) = await reachActiveAssistance();
+      final handle = await holdFinger(channel);
+      await dropSocket();
+      expectAbandoned(handle);
+      final calls = accessibility.touchCalls.length;
+
+      // The technician keeps dragging while the tablet is suspended.
+      pushHold(channel);
+      channel.pushFrame(
+        const WebRtcDataChannelMessage.text(
+          '{"v":1,"type":"touch_release","id":"rel-2","touch":"t-1",'
+          '"seq":2,"x":0.6,"y":0.7}',
+        ),
+      );
+      await settle();
+      expect(accessibility.touchCalls, hasLength(calls));
+
+      await restoreSocket();
+      // The old stroke's release after confirmation reaches nothing either.
+      channel.pushFrame(
+        const WebRtcDataChannelMessage.text(
+          '{"v":1,"type":"touch_release","id":"rel-3","touch":"t-1",'
+          '"seq":3,"x":0.6,"y":0.7}',
+        ),
+      );
+      await settle();
+      expect(
+        accessibility.touchCalls
+            .whereType<(String, int, int, double, double)>(),
+        isEmpty,
+      );
+    });
+
+    test('13. a recovery offer is refused while suspended; the old peer is '
+        'kept and carries on once confirmed', () async {
+      final (peer, channel) = await reachActiveAssistance();
+      await dropSocket();
+      await client.deliver(offerReceived(sdp: testSecondOfferSdp));
+      await settle();
+      expect(peerFactory.createCount, 1);
+      expect(peer.isClosed, isFalse);
+
+      await restoreSocket();
+      expect(peerFactory.createCount, 1);
+      expect(await tapRuns(channel, 'same-peer'), isTrue);
+    });
+
+    test('14. MediaProjection is kept through the recovery, never asked for '
+        'again, and stopped at the grace', () async {
+      final (peer, channel) = await reachActiveAssistance();
+      await dropSocket();
+      timers.elapse(const Duration(seconds: 30));
+      await settle();
+      expect(screenCapture.isActive, isTrue);
+      await restoreSocket();
+      expect(screenCapture.requests, [testRemoteSessionId]);
+
+      remoteSessionRepository.currentResult = remoteSessionUnreachable;
+      await dropSocket();
+      timers.elapse(grace);
+      await settle();
+      expect(screenCapture.isActive, isFalse);
+      expect(screenCapture.requests, [testRemoteSessionId]);
+      expectNothingLeft(peer, channel);
+    });
+
+    test('18. no command runs at any point without confirmed authority, not '
+        'even when REST says ACTIVE while the socket is down', () async {
+      final (_, channel) = await reachActiveAssistance();
+      await dropSocket();
+      for (var i = 0; i < 6; i++) {
+        // Each step fires a re-read; REST answers ACTIVE every time.
+        timers.elapse(const Duration(seconds: 8));
+        await settle();
+        expect(await tapRuns(channel, 'down-$i'), isFalse);
+      }
+      expect(remoteSessionRepository.currentCount, greaterThan(3));
+      expect(accessibility.taps, hasLength(1));
+    });
+  });
+
   test('19. a new, legitimate assistance starts through its own consent and '
       'its own confirmation', () async {
     final (peer, channel) = await reachActiveAssistance();
