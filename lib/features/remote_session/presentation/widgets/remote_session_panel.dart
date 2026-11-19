@@ -466,8 +466,13 @@ class RemoteSessionClosureNote extends StatelessWidget {
 
   /// Shown instead when the last assistance ended during a loss of connection
   /// and nobody said who closed it ([RemoteSessionIdle.interrupted]).
+  ///
+  /// "durante", not "por": a session found gone by a read made while the
+  /// tablet was suspended may have been closed by the technician (seen on the
+  /// T10A, Prompt 38) as much as by the backend's SYSTEM close. The sentence
+  /// is true either way, and never suggests a FINALIZAR on this tablet.
   static const String interruptedMessage =
-      'La asistencia anterior terminó por una pérdida de conexión con el '
+      'La asistencia anterior terminó durante una pérdida de conexión con el '
       'servidor.';
 
   static String messageFor(RemoteSessionEndedBy endedBy) => switch (endedBy) {
