@@ -6,6 +6,7 @@ import 'package:socket_io_client/socket_io_client.dart' as io;
 import 'package:remote_control_device/core/config/app_config.dart';
 import 'package:remote_control_device/features/device/data/realtime/device_realtime_payloads.dart';
 import 'package:remote_control_device/features/device/data/realtime/device_socket_options.dart';
+import 'package:remote_control_device/features/device/data/realtime/socket_zone.dart';
 import 'package:remote_control_device/features/device/domain/realtime/device_realtime_channel.dart';
 import 'package:remote_control_device/features/device/domain/realtime/device_realtime_signal.dart';
 import 'package:remote_control_device/features/signaling/data/signaling_events.dart';
@@ -60,6 +61,12 @@ class SocketIoDeviceRealtimeClient implements DeviceRealtimeChannel {
 
   io.Socket? _socket;
 
+  /// Bumped every time a socket is built or released. Every listener captures
+  /// the value its socket was built under and drops anything once it is no
+  /// longer current, so a late callback of a released socket — a `connect`, a
+  /// `connect_error`, a `disconnect` — can never speak for the current one.
+  int _socketGeneration = 0;
+
   /// Removers returned by every registered listener, so teardown is explicit
   /// and not left to the package's own bookkeeping.
   final List<void Function()> _listenerRemovers = [];
@@ -80,15 +87,21 @@ class SocketIoDeviceRealtimeClient implements DeviceRealtimeChannel {
     if (_signals.isClosed) return;
 
     _log('connecting to ${AppConfig.deviceRealtimeNamespace}');
-    final socket = io.io(
-      _config.deviceRealtimeUrl,
-      buildDeviceSocketOptions(config: _config, deviceToken: deviceToken),
-    );
-    // Listeners first, connection second: auto-connect is off precisely so that
-    // no event can be missed and none can be registered twice.
-    _bindListeners(socket);
-    _socket = socket;
-    socket.connect();
+    final generation = ++_socketGeneration;
+    // Built and connected inside the socket zone, so that the package's own
+    // asynchronous work for this socket — including the close it performs by
+    // itself on a server disconnection — inherits it.
+    _inSocketZone(() {
+      final socket = io.io(
+        _config.deviceRealtimeUrl,
+        buildDeviceSocketOptions(config: _config, deviceToken: deviceToken),
+      );
+      // Listeners first, connection second: auto-connect is off precisely so
+      // that no event can be missed and none can be registered twice.
+      _bindListeners(socket, generation);
+      _socket = socket;
+      socket.connect();
+    });
   }
 
   @override
@@ -105,13 +118,19 @@ class SocketIoDeviceRealtimeClient implements DeviceRealtimeChannel {
     if (!_peerReadiness.isClosed) await _peerReadiness.close();
   }
 
-  void _bindListeners(io.Socket socket) {
+  void _bindListeners(io.Socket socket, int generation) {
+    // Every handler below starts with this: a socket that is no longer the
+    // current one has nothing to report.
+    bool stale() => generation != _socketGeneration;
+
     _listenerRemovers.addAll([
       socket.onConnect((_) {
+        if (stale()) return;
         _log('connected');
         _emit(const RealtimeConnected());
       }),
       socket.on(deviceConnectedEvent, (Object? payload) {
+        if (stale()) return;
         final confirmation = parseDeviceConnectedPayload(payload);
         if (confirmation == null) {
           _log('$deviceConnectedEvent ignored: unexpected payload');
@@ -122,6 +141,7 @@ class SocketIoDeviceRealtimeClient implements DeviceRealtimeChannel {
         _emit(RealtimeIdentityConfirmed(confirmation));
       }),
       socket.on(supportAssignedEvent, (Object? payload) {
+        if (stale()) return;
         final assigned = parseSupportAssignedPayload(payload);
         if (assigned == null) {
           _log('$supportAssignedEvent ignored: unexpected payload');
@@ -132,6 +152,7 @@ class SocketIoDeviceRealtimeClient implements DeviceRealtimeChannel {
         _emit(assigned);
       }),
       socket.on(remoteSessionCreatedEvent, (Object? payload) {
+        if (stale()) return;
         final created = parseRemoteSessionCreatedPayload(payload);
         if (created == null) {
           _log('$remoteSessionCreatedEvent ignored: unexpected payload');
@@ -142,6 +163,7 @@ class SocketIoDeviceRealtimeClient implements DeviceRealtimeChannel {
         _emit(created);
       }),
       socket.on(remoteSessionActiveEvent, (Object? payload) {
+        if (stale()) return;
         final activated = parseRemoteSessionActivePayload(payload);
         if (activated == null) {
           _log('$remoteSessionActiveEvent ignored: unexpected payload');
@@ -151,6 +173,7 @@ class SocketIoDeviceRealtimeClient implements DeviceRealtimeChannel {
         _emit(activated);
       }),
       socket.on(remoteSessionClosedEvent, (Object? payload) {
+        if (stale()) return;
         final closed = parseRemoteSessionClosedPayload(payload);
         if (closed == null) {
           _log('$remoteSessionClosedEvent ignored: unexpected payload');
@@ -160,6 +183,7 @@ class SocketIoDeviceRealtimeClient implements DeviceRealtimeChannel {
         _emit(closed);
       }),
       socket.on(remoteSessionPeerJoinedEvent, (Object? payload) {
+        if (stale()) return;
         final ready = parseRemoteSessionPeerJoinedPayload(payload);
         if (ready == null) {
           _log('$remoteSessionPeerJoinedEvent ignored: unexpected payload');
@@ -170,6 +194,7 @@ class SocketIoDeviceRealtimeClient implements DeviceRealtimeChannel {
         _peerReadiness.add(ready);
       }),
       socket.on(webRtcOfferEvent, (Object? payload) {
+        if (stale()) return;
         final message = parseWebRtcOfferPayload(payload);
         if (message == null) {
           _log('$webRtcOfferEvent ignored: unexpected payload');
@@ -180,6 +205,7 @@ class SocketIoDeviceRealtimeClient implements DeviceRealtimeChannel {
         _emitSignaling(message);
       }),
       socket.on(webRtcAnswerEvent, (Object? payload) {
+        if (stale()) return;
         final message = parseWebRtcAnswerPayload(payload);
         if (message == null) {
           _log('$webRtcAnswerEvent ignored: unexpected payload');
@@ -189,6 +215,7 @@ class SocketIoDeviceRealtimeClient implements DeviceRealtimeChannel {
         _emitSignaling(message);
       }),
       socket.on(webRtcIceCandidateEvent, (Object? payload) {
+        if (stale()) return;
         final message = parseWebRtcIceCandidatePayload(payload);
         if (message == null) {
           _log('$webRtcIceCandidateEvent ignored: unexpected payload');
@@ -197,22 +224,39 @@ class SocketIoDeviceRealtimeClient implements DeviceRealtimeChannel {
         _log('$webRtcIceCandidateEvent received for ${message.remoteSessionId}');
         _emitSignaling(message);
       }),
-      socket.onDisconnect((_) {
-        _log('disconnected');
-        _emit(const RealtimeDisconnected());
+      socket.onDisconnect((Object? reason) {
+        if (stale()) return;
+        // `active` is the package's own answer to "will I reconnect?": a
+        // server-initiated disconnection destroys the socket before this
+        // callback runs, a lost transport does not. The client's own closes
+        // never get here — listeners are detached first.
+        if (socket.active) {
+          _log('disconnected; the transport will retry');
+          _emit(const RealtimeDisconnected());
+        } else {
+          _log('disconnected by the server; the transport will not retry');
+          _emit(const RealtimeServerDisconnected());
+        }
       }),
       socket.onConnectError((Object? error) {
+        if (stale()) return;
         // Only the classification is logged. The raw error may carry the
         // handshake it failed on, and with it the Authorization payload.
         if (isUnauthorizedHandshakeError(error)) {
           _log('handshake rejected by the namespace');
           _emit(const RealtimeHandshakeRejected());
-        } else {
-          _log('connection attempt failed');
+        } else if (socket.active) {
+          _log('connection attempt failed; the transport will retry');
           _emit(const RealtimeConnectFailed());
+        } else {
+          // A namespace-level refusal with some other message: the package
+          // destroyed the socket, exactly as it does for `Unauthorized`.
+          _log('connection refused; the transport will not retry');
+          _emit(const RealtimeConnectFailed(transportRetrying: false));
         }
       }),
       socket.onReconnectAttempt((_) {
+        if (stale()) return;
         _log('reconnect attempt');
         _emit(const RealtimeReconnectAttempt());
       }),
@@ -224,12 +268,21 @@ class SocketIoDeviceRealtimeClient implements DeviceRealtimeChannel {
   void _releaseSocket() {
     final socket = _socket;
     _socket = null;
+    _socketGeneration++;
     for (final remove in _listenerRemovers) {
       remove();
     }
     _listenerRemovers.clear();
-    socket?.dispose();
+    if (socket != null) _inSocketZone(socket.dispose);
   }
+
+  /// See [runInSocketZone]: only the package's unawaited close of a WebSocket
+  /// the server had already closed is absorbed; every other error passes on.
+  void _inSocketZone(void Function() body) => runInSocketZone(
+    body,
+    onTransportAlreadyClosed: () =>
+        _log('transport was already closed by the other end'),
+  );
 
   // ------------------------------------------------------------- signaling
 

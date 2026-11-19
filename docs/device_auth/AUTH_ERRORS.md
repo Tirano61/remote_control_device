@@ -121,15 +121,23 @@ renewing the JWT after a `401`:
 
 ```text
 authenticated REST call ──401──> renew ──┐
-Socket.IO handshake refused ──> renew ───┼── 401 + code ──> report ──> CredentialRefused
+Socket.IO handshake refused ──> renew ───┤
+Socket.IO io server disconnect ──> renew ┼── 401 + code ──> report ──> CredentialRefused
                                          └── anything else ──> nothing reported;
                                              the call fails as retryable /
-                                             the socket retries on its timer
+                                             the socket recovers on its backoff
 ```
 
 Only a renewal answered `401 DEVICE_CREDENTIAL_REJECTED` reaches
 `DeviceCredentialRevocation`. A report supersedes an attempt in flight, so a
 late login answer cannot put a refused device back in `Ready`.
+
+It cannot put a Device JWT back in memory either. The token store has an
+*epoch*, which every withdrawal bumps (`SuspendDeviceAuthorization` calls
+`clear()`). A login reads the epoch before the request leaves and installs its
+token only if the epoch is unchanged when the answer arrives. Before Prompt 35,
+a login still on the wire when a refusal was confirmed installed its token
+afterwards, so `CredentialRefused` could hold a JWT.
 
 ### Socket.IO
 
@@ -139,6 +147,145 @@ containing the word is a transport failure. Even the exact message only starts
 a renewal; it never proves anything about the credential. An upgrade refused by
 an intermediary (`401`/`302` on the WebSocket request) is a transport failure
 too, retried with the socket's own backoff.
+
+[Socket.IO recovery](#socketio-recovery) covers the cases the socket cannot
+recover from by itself.
+
+## Socket.IO recovery
+
+[`DeviceRealtimeBloc`](../../lib/features/device/presentation/bloc/realtime/device_realtime_bloc.dart)
+owns it.
+
+### Root cause fixed in Prompt 35
+
+Prompt 34 reproduced it with the real client against the backend's own gateway.
+The tablet could stay offline until the app was restarted:
+
+* **Terminal stop.** After a second handshake refusal with no connection in
+  between, the bloc stopped for good (`ConnectionError(retrying: false)`). The
+  session stayed `Ready`, so the coordinator never asked for the channel again.
+* **Infrastructure errors read as a refusal.** The backend middleware turns
+  every failure of its check into `Unauthorized`, including a PostgreSQL error.
+  One database blip spanning two handshakes was enough to strand the tablet.
+* **`io server disconnect` waited forever.** `socket_io_client` 3.1.6 destroys
+  the socket when the server disconnects it, and does not reconnect. The client
+  reported it like a lost transport, so the screen showed "Reconectando..."
+  forever. A deactivated device never renewed its JWT, so it never learnt that
+  it was refused.
+* **Uncaught async error.** On that same disconnection the package closes the
+  WebSocket without awaiting the close. The close fails with
+  `WebSocketConnectionClosed`, and nothing catches it.
+
+### What destroys the socket, and who reconnects
+
+| Signal | Cause | Who reconnects |
+|---|---|---|
+| `RealtimeDisconnected`, `RealtimeConnectFailed()` | lost transport, network, timeout | the package, same socket, same JWT |
+| `RealtimeHandshakeRejected` | `connect_error: Unauthorized`: expired JWT, deactivated device, revoked credential, **or a backend that failed to check** | the bloc |
+| `RealtimeServerDisconnected` | `io server disconnect`: the backend closed the socket (deactivation, re-enrollment elsewhere) | the bloc |
+| `RealtimeConnectFailed(transportRetrying: false)` | a namespace refusal with any other message | the bloc |
+
+The client picks between them with `socket.active`, which is the package's own
+answer to "will I reconnect?". A close the app asked for never produces a
+signal, because listeners are detached first.
+
+When the bloc reconnects, it releases the dead socket (a destroyed socket is
+never reused), renews the JWT through `POST /device-auth/login`, and then
+handles the answer:
+
+* **`200`:** opens a new socket with the new JWT.
+* **`401 DEVICE_CREDENTIAL_REJECTED`:** stops the channel. The session moves to
+  `CredentialRefused`:
+  * the JWT is dropped and the socket closed;
+  * support and the remote session are reset;
+  * the credential is **kept**;
+  * nothing retries until the user taps **Reintentar**.
+* **Anything else:** nothing learnt; the renewal is retried after 15 s.
+
+### Backoff
+
+```text
+first recovery since the last stable connection   at once
+then                                              15 s, 30 s, 60 s, 60 s, ...
+```
+
+* **It never stops by itself.** A refused fresh JWT is what a database blip
+  looks like from the tablet, and blips heal.
+* **The count resets only after a stable connection.** It resets when a
+  connection that stayed up at least 30 s is lost. A backend that accepts the
+  socket and drops it straight away costs one login per step, not one per drop.
+  No timer runs while connected: stability is read from the clock when the
+  connection ends.
+* **There is one retry at a time.** There is never more than one retry timer.
+  Logins are serialised, so a renewal never starts while another one is still
+  waiting for its answer, even one from an older generation.
+* **Configuration:** `AppConfig.realtimeRecoveryBackoff` and
+  `AppConfig.realtimeStableConnectionPeriod`.
+
+### Generations
+
+Every start, stop and close begins a generation. A login answer or a timer from
+an older generation does nothing: it installs no socket, adopts no token, emits
+nothing and schedules nothing.
+
+The client also numbers its sockets and drops callbacks from a released one. A
+late `connect`, `connect_error` or `disconnect` never speaks for the current
+socket.
+
+### A reconnection never resumes a remote session by itself
+
+This is unchanged, and `io server disconnect` is now covered too
+(`test/app/webrtc_coordinator_test.dart`, group 19):
+
+* Any realtime state other than `Connected` suspends control at once.
+* A gesture that arrives while control is suspended is dropped, not queued.
+* The reconnection triggers `GET /device/remote-sessions/current`, and only
+  that answer can confirm the session again.
+* If the answer says the session is gone, the peer and the capture are closed.
+  A `CLOSED` session is never recovered.
+* The 45 s authority grace period and the backend's 60 s grace are untouched.
+
+### The uncaught close error
+
+Sockets are built, connected and disposed inside `runInSocketZone`
+([`socket_zone.dart`](../../lib/features/device/data/realtime/socket_zone.dart)).
+
+* That zone absorbs **only** `WebSocketConnectionClosed`, the error the package
+  leaves behind when it closes a WebSocket the server had already closed.
+* Every other error goes to the parent zone, so real bugs stay observable.
+* Synchronous exceptions still reach the caller.
+* No global error handler was added.
+
+### Pending on the backend
+
+The handshake middleware answers `Unauthorized` both when it refuses a token
+and when its own check fails:
+
+```text
+namespace.use: authenticate(socket).then(next, () => next(new Error('Unauthorized')))
+a PostgreSQL error inside authorizePayload  ->  connect_error "Unauthorized"
+```
+
+The client is safe with this: it infers nothing from a refused handshake, and
+only the login can confirm a refusal. The cost is that every database blip
+spends a login and delays recovery by one backoff step.
+
+Proposal for `remote_control_backend` (not implemented; the contract is
+unchanged): reject infrastructure failures with a distinct, documented
+`connect_error` — a different message, or a `data` object with a stable code
+that marks the refusal as temporary. Clients could then retry without renewing.
+Until such a field is in `REALTIME.md`, the client must not read one.
+
+### Tools
+
+`tool/realtime_harness/` holds two tools:
+
+* **An isolated backend** built from the backend's own gateway and auth code.
+  `test/integration/socket_reconnect_isolated_test.dart` drives it; that test
+  is skipped unless `REALTIME_HARNESS` is set.
+* **A fault relay** for physical tests. It reproduces the backend's refusals
+  and disconnections, byte for byte, in front of the real backend, without
+  modifying it.
 
 ## Why a confirmed rejection keeps the credential
 
@@ -187,7 +334,8 @@ place. Nothing in the application deletes the credential any more.
 * **Not a proof of origin.** Something able to produce the exact JSON body over
   the transport can produce a refusal. The consequence is bounded — a withdrawn
   authorisation and a retry button, no data loss.
-* **Fresh JWT refused by the socket.** If a Device JWT minted moments ago is
+* **Fresh JWT refused by the socket — fixed in Prompt 35** (see
+  [Socket.IO recovery](#socketio-recovery)). Until then: if a Device JWT minted moments ago is
   refused at the handshake again, the realtime channel stops (as before) and
   stays disconnected until the session is re-established; it does not spin
   through logins.
@@ -215,3 +363,41 @@ only, never decrypted), identical in every step.
 
 Not exercised on the device: a refusal discovered at runtime during a live
 remote session (covered by `test/app/webrtc_coordinator_test.dart`, group 19).
+
+### Socket.IO recovery on the T10A (Prompt 35)
+
+Setup, 2026-11-19 (times UTC):
+
+* **Tablet:** physical T10A (`LSTT10M2026081504`), debug build of
+  `fix/device-socket-reconnection`, installed with `install -r` (same
+  `firstInstallTime`, enrollment kept).
+* **Backend:** the shared one, untouched (`dist` built from
+  `feature/backend-device-auth-error-contract`).
+* **Fault injection:** `tool/realtime_harness/fault_relay.js` behind a second
+  dev-tunnel port (`…-3010`, Public).
+  * Handshake refusals and the namespace `DISCONNECT` are the backend's exact
+    frames.
+  * The login refusal is the exact contract body and is synthesised by the
+    relay, so no login reached the database.
+* **Observation:** the relay log (`tok#n` labels only), the web console's
+  device list, and screencaps. No mobile-mcp and no UiAutomation.
+
+| Test | Fault | Tablet / relay | Console |
+|---|---|---|---|
+| A start | none | login `tok#1`, check-status 200, socket accepted, REST re-read | Online |
+| B Wi-Fi | `svc wifi disable` for 25 s | "Reconectando..."; on Wi-Fi back, the package reconnected with the same `tok#1`, no login, REST re-read | Online |
+| C refusals | 3 handshakes refused | `tok#1` refused → login at once → `tok#2` refused → **15 s** → `tok#3` refused → **30 s** (11:43:55.9 → 11:44:28.4) → `tok#4` accepted, REST re-read; no restart | Offline → Online |
+| D server disconnect | `41/devices,` after a connection up for 23 s | not stable, so the **60 s** step applied: login 62.7 s later, `tok#5` accepted | Online |
+| D' server disconnect | `41/devices,` after a connection up for 40 s | login after 2.6 s, `tok#7` accepted 4 s after the disconnect | Online |
+| E refusal | `41/devices,` + login 401 `DEVICE_CREDENTIAL_REJECTED` | "Autenticación rechazada"; then **no request at all for 127 s** (no login, no REST, no socket) | Offline |
+| F retry | relay passes again, "Reintentar" tapped | login 200 with the same stored credential (`tok#6`), check-status 200, socket accepted, REST re-read; no re-enrollment | Online |
+
+The app process stayed the same from the first scenario to the last. Afterwards
+the `…-3000` build was reinstalled.
+
+Only covered by tests, not on the device:
+
+* the PostgreSQL error in the handshake (the integration harness, E1/E2);
+* a server disconnect during a live remote session (`webrtc_coordinator_test`,
+  group 19). It needs Accessibility and a MediaProjection consent by hand, and
+  `enabled_accessibility_services` was `null` on the T10A throughout.

@@ -21,14 +21,20 @@ class DeviceAuthRepositoryImpl implements DeviceAuthRepository {
 
   @override
   Future<Result<DeviceSession>> login(DeviceCredentials credentials) async {
+    // Read before the request leaves: whether authorisation was withdrawn
+    // while it was on the wire is only known by comparing afterwards.
+    final epoch = _tokenStore.epoch;
     try {
       final model = await _remoteDataSource.login(
         DeviceLoginRequestModel.fromCredentials(credentials),
       );
       final session = model.toEntity();
       // The token becomes the current session credential for every
-      // device-authenticated request that follows.
-      _tokenStore.save(session.token);
+      // device-authenticated request that follows — unless authorisation was
+      // withdrawn in the meantime (a confirmed refusal, a stop, a newer
+      // attempt). Then it is not installed: the caller that started this login
+      // has been superseded, and its own generation check discards the answer.
+      if (_tokenStore.epoch == epoch) _tokenStore.save(session.token);
       return Ok(session);
     } on ApiException catch (exception) {
       return Err(mapApiException(exception));

@@ -783,5 +783,62 @@ void main() {
       expect(realtimeBloc.state, const DeviceRealtimeConnectionError());
       expect(peer.isClosed, isFalse);
     });
+
+    test('P35: io server disconnect suspends control at once; a reconnection '
+        'whose read finds the session gone does not bring it back', () async {
+      final (peer, channel) = await reachActive();
+
+      await client.emit(const RealtimeServerDisconnected());
+      await settle();
+
+      // Re-authenticating, not connected: authority is suspended right now,
+      // before any read, and a gesture that arrives runs nothing.
+      expect(sessionBloc.state, const DeviceSessionReady(testIdentity));
+      expect(realtimeBloc.state, isNot(isA<DeviceRealtimeConnected>()));
+      final suspended = remoteSessionBloc.state;
+      expect(suspended, isA<RemoteSessionActive>());
+      expect((suspended as RemoteSessionActive).isSuspended, isTrue);
+      channel.pushTap('t-suspended');
+      await settle();
+      expect(accessibility.taps, isEmpty);
+
+      // The new socket connects, but the backend closed the session meanwhile.
+      remoteSessionRepository.currentResult = noRemoteSession;
+      await client.emit(const RealtimeConnected());
+      await settle();
+
+      expect(remoteSessionBloc.state, isNot(isA<RemoteSessionLive>()));
+      expect(peer.isClosed, isTrue);
+      expect(screenCapture.isActive, isFalse);
+      channel.pushTap('t-after');
+      await settle();
+      expect(accessibility.taps, isEmpty);
+      // The renewal re-checked the credential; nothing was wiped.
+      expect(storage.clearCount, 0);
+    });
+
+    test('P35: a reconnection whose read confirms ACTIVE restores control on '
+        'the same channel, and only after that read', () async {
+      final (peer, channel) = await reachActive();
+
+      await client.emit(const RealtimeServerDisconnected());
+      await settle();
+      channel.pushTap('t-suspended');
+      await settle();
+      expect(accessibility.taps, isEmpty);
+
+      remoteSessionRepository.currentResult = activatedRemoteSession;
+      await client.emit(const RealtimeConnected());
+      await settle();
+
+      final live = remoteSessionBloc.state;
+      expect(live, isA<RemoteSessionActive>());
+      expect((live as RemoteSessionActive).isSuspended, isFalse);
+      expect(peer.isClosed, isFalse);
+      channel.pushTap('t-confirmed');
+      await settle();
+      // The gesture sent while suspended stays dropped; the new one runs.
+      expect(accessibility.taps, [(0.5, 0.5)]);
+    });
   });
 }

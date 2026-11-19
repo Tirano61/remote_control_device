@@ -135,15 +135,39 @@ final class RealtimeDisconnected extends DeviceRealtimeSignal {
   const RealtimeDisconnected();
 }
 
+/// The backend closed the connection itself (`io server disconnect`).
+///
+/// Unlike [RealtimeDisconnected], the transport does **not** retry: a
+/// server-initiated disconnection destroys the socket. The backend does this
+/// when it withdraws the device's authorisation — an administrator
+/// deactivating it, or a re-enrollment revoking the credential the token was
+/// minted from — so the client must find out where it stands by
+/// re-authenticating, not by waiting for a reconnection that never comes.
+///
+/// It is never emitted for a close the application asked for: the client
+/// detaches its listeners before closing.
+final class RealtimeServerDisconnected extends DeviceRealtimeSignal {
+  const RealtimeServerDisconnected();
+}
+
 /// The transport is retrying after having lost the connection.
 final class RealtimeReconnectAttempt extends DeviceRealtimeSignal {
   const RealtimeReconnectAttempt();
 }
 
-/// A connection attempt failed for a transport reason: no network, DNS,
-/// timeout, backend down. The credential is not implicated.
+/// A connection attempt failed for a reason other than the documented
+/// `Unauthorized`: no network, DNS, timeout, backend down — or a namespace
+/// refusal with some other message. The credential is not implicated.
 final class RealtimeConnectFailed extends DeviceRealtimeSignal {
-  const RealtimeConnectFailed();
+  const RealtimeConnectFailed({this.transportRetrying = true});
+
+  /// Whether the transport will try again by itself. `false` when the failure
+  /// destroyed the socket (a namespace-level `connect_error` does), in which
+  /// case only the client can open a new one.
+  final bool transportRetrying;
+
+  @override
+  List<Object?> get props => [transportRetrying];
 }
 
 /// The namespace middleware refused the handshake.
