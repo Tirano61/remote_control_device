@@ -204,3 +204,14 @@ final class _WebRtcOrphanCaptureExpired extends WebRtcSessionEvent {
   @override
   List<Object?> get props => [remoteSessionId];
 }
+
+/// The capture client could not change the capture's transmission and stopped
+/// it. Raised only by the bloc, from the client's answer.
+final class _WebRtcScreenTransmissionFailed extends WebRtcSessionEvent {
+  const _WebRtcScreenTransmissionFailed(this.remoteSessionId);
+
+  final String remoteSessionId;
+
+  @override
+  List<Object?> get props => [remoteSessionId];
+}
