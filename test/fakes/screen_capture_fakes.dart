@@ -62,6 +62,9 @@ class FakeScreenCapturePlatform {
   /// When true, opening the capture throws.
   bool captureThrows = false;
 
+  /// When true, changing a capture's transmission throws.
+  bool transmissionThrows = false;
+
   /// The tracks the next capture yields. A real screen share is exactly one.
   List<ScreenVideoTrack> nextVideoTracks = const [testScreenVideoTrack];
 
@@ -149,6 +152,12 @@ class FakeScreenMediaCapture implements ScreenMediaCapture {
   void Function()? _onEnded;
   int disposeCount = 0;
 
+  /// What the Android side's gate is, as the calls left it. Starts closed.
+  bool transmitting = false;
+
+  /// Every transmission change asked of this capture, in order.
+  final List<bool> transmissionCalls = [];
+
   bool get isDisposed => disposeCount > 0;
   bool get isListened => _onEnded != null;
 
@@ -159,6 +168,15 @@ class FakeScreenMediaCapture implements ScreenMediaCapture {
   Future<void> dispose() async {
     disposeCount++;
     _platform.calls.add('capture.dispose');
+  }
+
+  @override
+  Future<void> setTransmitting(bool transmitting) async {
+    _platform.calls.add('capture.transmit:$transmitting');
+    transmissionCalls.add(transmitting);
+    if (_platform.transmissionThrows) throw StateError('gate unavailable');
+    if (isDisposed) return;
+    this.transmitting = transmitting;
   }
 
   /// Android ended the capture on its own — the user pressing *Stop sharing*
@@ -185,6 +203,37 @@ class FakeScreenCaptureClient implements ScreenCaptureClient {
   bool _active = false;
   String? _remoteSessionId;
 
+  /// Whether frames of the running capture reach the technician right now. A
+  /// capture starts with them kept back, as the real one does natively.
+  bool transmitting = false;
+
+  /// Every transmission change that reached a running capture, in order, as
+  /// `(remote session, transmitting)`. Repeats are not recorded: the real
+  /// client sends nothing for them.
+  final List<(String, bool)> transmissions = [];
+
+  /// When true, the next change fails: the capture is stopped and `false`
+  /// returned, as the real client does when the platform refuses it.
+  bool transmissionFails = false;
+
+  /// Frames the technician would receive: one per [screenChanged] made while
+  /// [transmitting]. What a frame counter on the receiving side would count.
+  int framesSent = 0;
+
+  /// Frames the capture produced while held back.
+  int framesWithheld = 0;
+
+  /// The screen changed. Counted as sent only while transmitting, and only
+  /// while a capture runs at all.
+  void screenChanged() {
+    if (!_active) return;
+    if (transmitting) {
+      framesSent++;
+    } else {
+      framesWithheld++;
+    }
+  }
+
   @override
   bool get isActive => _active;
 
@@ -198,10 +247,28 @@ class FakeScreenCaptureClient implements ScreenCaptureClient {
 
     final outcome = result;
     if (outcome is ScreenCaptureStarted) {
+      // A running capture for the same session is handed back as it is;
+      // anything else is a new one, which starts held back.
+      if (!_active || _remoteSessionId != remoteSessionId) transmitting = false;
       _active = true;
       _remoteSessionId = remoteSessionId;
     }
     return outcome;
+  }
+
+  @override
+  Future<bool> setTransmitting(bool transmitting) async {
+    final remoteSessionId = _remoteSessionId;
+    if (!_active || remoteSessionId == null) return true;
+    if (this.transmitting == transmitting) return true;
+    if (transmissionFails) {
+      transmissionFails = false;
+      await stop();
+      return false;
+    }
+    this.transmitting = transmitting;
+    transmissions.add((remoteSessionId, transmitting));
+    return true;
   }
 
   /// Called at the moment [stop] is, before anything is released. Lets a test
@@ -214,6 +281,7 @@ class FakeScreenCaptureClient implements ScreenCaptureClient {
     stopCount++;
     _active = false;
     _remoteSessionId = null;
+    transmitting = false;
   }
 
   final StreamController<String> _endedByPlatform =
@@ -229,6 +297,7 @@ class FakeScreenCaptureClient implements ScreenCaptureClient {
     if (remoteSessionId == null) return;
     _active = false;
     _remoteSessionId = null;
+    transmitting = false;
     stopCount++;
     _endedByPlatform.add(remoteSessionId);
   }

@@ -559,6 +559,111 @@ void main() {
       expect(ended, isEmpty);
     });
   });
+
+  // ------------------------------------------------- transmission (Prompt 40)
+
+  group('transmitting is not capturing', () {
+    test('a new capture transmits nothing until it is told to', () async {
+      await client.requestAndStart(session);
+
+      // Nothing was sent to open it: the Android side starts it closed.
+      expect(platform.lastCapture.transmissionCalls, isEmpty);
+      expect(platform.lastCapture.transmitting, isFalse);
+
+      expect(await client.setTransmitting(true), isTrue);
+      expect(platform.lastCapture.transmitting, isTrue);
+    });
+
+    test('each change reaches the platform once and in order; a repeat '
+        'sends nothing', () async {
+      await client.requestAndStart(session);
+
+      final results = await Future.wait([
+        client.setTransmitting(true),
+        client.setTransmitting(true),
+        client.setTransmitting(false),
+        client.setTransmitting(false),
+        client.setTransmitting(true),
+      ]);
+
+      expect(results, everyElement(isTrue));
+      expect(platform.lastCapture.transmissionCalls, [true, false, true]);
+    });
+
+    test('holding back keeps the capture, its service and its consent',
+        () async {
+      await client.requestAndStart(session);
+      await client.setTransmitting(true);
+      final from = platform.calls.length;
+
+      await client.setTransmitting(false);
+
+      expect(platform.calls.skip(from), ['capture.transmit:false']);
+      expect(client.isActive, isTrue);
+      expect(platform.foregroundServiceRunning, isTrue);
+      // The same session afterwards needs no second dialog.
+      await client.requestAndStart(session);
+      await client.setTransmitting(true);
+      expect(
+        platform.calls.skip(from).where((c) => c == 'consent.request'),
+        isEmpty,
+      );
+    });
+
+    test('a reused capture keeps what it was told; a new one starts held back',
+        () async {
+      await client.requestAndStart(session);
+      await client.setTransmitting(true);
+
+      await client.requestAndStart(session);
+      expect(await client.setTransmitting(true), isTrue);
+      expect(platform.lastCapture.transmissionCalls, [true]);
+
+      await client.requestAndStart(otherSession);
+      expect(platform.lastCapture.transmitting, isFalse);
+      await client.setTransmitting(true);
+      expect(platform.lastCapture.transmissionCalls, [true]);
+    });
+
+    test('with no capture there is nothing to transmit or hold back',
+        () async {
+      expect(await client.setTransmitting(true), isTrue);
+      expect(await client.setTransmitting(false), isTrue);
+      expect(platform.calls, isEmpty);
+
+      await client.requestAndStart(session);
+      await client.stop();
+      platform.calls.clear();
+      expect(await client.setTransmitting(true), isTrue);
+      expect(platform.calls, isEmpty);
+    });
+
+    test('a change the platform refuses stops the capture as a last resort',
+        () async {
+      await client.requestAndStart(session);
+      await client.setTransmitting(true);
+      platform.transmissionThrows = true;
+
+      expect(await client.setTransmitting(false), isFalse);
+
+      expect(client.isActive, isFalse);
+      expect(platform.lastCapture.isDisposed, isTrue);
+      expect(platform.foregroundServiceRunning, isFalse);
+    });
+
+    test('Android ending a held-back capture is reported as before', () async {
+      await client.requestAndStart(session);
+      final ended = <String>[];
+      client.endedByPlatform.listen(ended.add);
+
+      platform.lastCapture.endFromPlatform();
+      await Future<void>.delayed(Duration.zero);
+
+      expect(ended, [session]);
+      expect(await client.setTransmitting(true), isTrue);
+      expect(platform.lastCapture.transmissionCalls, isEmpty);
+    });
+  });
 }
 
 /// Lets every pending microtask and zero-delay timer run.

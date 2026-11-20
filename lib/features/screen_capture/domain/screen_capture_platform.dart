@@ -78,6 +78,14 @@ abstract interface class ScreenMediaCapture {
   /// come back as a notification about a capture nobody holds any more.
   set onEnded(void Function()? listener);
 
+  /// Lets the capture's frames reach WebRTC, or keeps every one of them back,
+  /// without stopping the capture: the projection, the user's consent and the
+  /// notification stay. A new capture starts with its frames kept back.
+  ///
+  /// Throws when the platform could not apply it. Nothing on a capture that is
+  /// already released.
+  Future<void> setTransmitting(bool transmitting);
+
   /// Stops every track and releases the stream. Idempotent, and never throws:
   /// it is called from teardown paths that have nothing left to do about a
   /// failure.

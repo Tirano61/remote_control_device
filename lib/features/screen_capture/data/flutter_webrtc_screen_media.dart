@@ -48,6 +48,10 @@ class FlutterWebRtcScreenMediaSource implements ScreenMediaSource {
   static const String startCaptureMethod = 'startScreenCapture';
   static const String stopCaptureMethod = 'stopScreenCapture';
 
+  /// `{ "trackId": "<id>", "transmitting": <bool> }`: opens or closes the
+  /// running capture's transmission gate on the Android side.
+  static const String setTransmissionMethod = 'setScreenCaptureTransmission';
+
   /// Called *by Android* when MediaProjection's `onStop` fired for a capture:
   /// `{ "trackId": "<id>" }`. The Android side has already released it.
   static const String stoppedByPlatformMethod =
@@ -155,6 +159,21 @@ class FlutterWebRtcScreenMediaCapture implements ScreenMediaCapture {
   void _endedByPlatform() {
     if (_disposed) return;
     _onEnded?.call();
+  }
+
+  /// Opens or closes this capture's transmission gate natively, keyed by track
+  /// id so that it can only ever reach this capture. Platform failures reach
+  /// the caller. Nothing once released.
+  @override
+  Future<void> setTransmitting(bool transmitting) async {
+    if (_disposed) return;
+    await FlutterWebRtcScreenMediaSource._channel.invokeMethod<bool>(
+      FlutterWebRtcScreenMediaSource.setTransmissionMethod,
+      <String, Object?>{
+        'trackId': _videoTrack.id,
+        'transmitting': transmitting,
+      },
+    );
   }
 
   /// Stops this capture natively — the virtual display, the projection and
