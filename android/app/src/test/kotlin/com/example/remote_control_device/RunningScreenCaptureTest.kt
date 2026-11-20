@@ -73,6 +73,26 @@ class RunningScreenCaptureTest {
     }
 
     @Test
+    fun `a transmission change reaches only the capture it names`() {
+        running.started(Capture("old"))
+        running.started(Capture("new"))
+        val reached = mutableListOf<String>()
+
+        assertNull(running.ifRunning("old") { reached += it.trackId })
+        assertEquals(true, running.ifRunning("new") { reached += it.trackId; true })
+
+        assertEquals(listOf("new"), reached)
+    }
+
+    @Test
+    fun `a transmission change after the capture stopped reaches nothing`() {
+        running.started(Capture("a"))
+        running.stop()
+
+        assertNull(running.ifRunning("a") { true })
+    }
+
+    @Test
     fun `nothing running means nothing to report`() {
         assertFalse(running.stoppedByPlatform("a"))
         running.stop()
