@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:remote_control_device/core/error/failures.dart';
 import 'package:remote_control_device/core/result/result.dart';
 import 'package:remote_control_device/features/remote_session/domain/entities/remote_session.dart';
+import 'package:remote_control_device/features/remote_session/domain/entities/remote_session_ended_by.dart';
 import 'package:remote_control_device/features/remote_session/domain/entities/remote_session_status.dart';
 import 'package:remote_control_device/features/remote_session/domain/usecases/close_remote_session.dart';
 import 'package:remote_control_device/features/remote_session/domain/usecases/load_current_remote_session.dart';
@@ -170,7 +171,24 @@ void main() {
       },
     );
 
-    test('a 409 on the repeat, with the session gone, confirms it', () async {
+    test('a repeat after the technician closed it meanwhile answers 200 '
+        'TECHNICIAN, and that confirms it', () async {
+      // The idempotent close (remote_control_backend f5b8a1c): no 409 for a
+      // session that is already CLOSED, and endedBy stays the technician's.
+      await endWhileUnreachable();
+      repository.currentQueue.addAll([activatedRemoteSession, noRemoteSession]);
+      repository.closeResult = Ok(
+        closedSessionBy(RemoteSessionEndedBy.technician),
+      );
+
+      await sync();
+
+      expect(bloc.state, const RemoteSessionIdle());
+      expect(store.value, isNull);
+    });
+
+    test('a 409 on the repeat, with the session gone by the re-read, is '
+        'confirmed by that read', () async {
       await endWhileUnreachable();
       repository.currentQueue.addAll([activatedRemoteSession, noRemoteSession]);
       repository.closeResult = closeConflict;

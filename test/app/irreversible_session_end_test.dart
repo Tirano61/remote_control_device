@@ -19,6 +19,7 @@ import 'package:remote_control_device/features/device/presentation/bloc/realtime
 import 'package:remote_control_device/features/device/presentation/bloc/session/device_session_bloc.dart';
 import 'package:remote_control_device/features/remote_control/domain/entities/remote_control_ack.dart';
 import 'package:remote_control_device/features/remote_session/domain/entities/remote_session.dart';
+import 'package:remote_control_device/features/remote_session/domain/entities/remote_session_ended_by.dart';
 import 'package:remote_control_device/features/remote_session/domain/entities/remote_session_status.dart';
 import 'package:remote_control_device/features/remote_session/domain/usecases/close_remote_session.dart';
 import 'package:remote_control_device/features/remote_session/domain/usecases/load_current_remote_session.dart';
@@ -509,4 +510,131 @@ void main() {
       expect(client.sentAnswers.last.remoteSessionId, testOtherRemoteSessionId);
     },
   );
+
+  group('Prompt 39 — the idempotent close, end to end', () {
+    test('15. FINALIZAR during a DRAG, answered 200 TECHNICIAN: the finger is '
+        'abandoned, the end confirmed, nothing rebuilt', () async {
+      final (peer, channel) = await reachActiveAssistance();
+      pushHold(channel);
+      await settle();
+      accessibility.answerStart();
+      await settle();
+      final handle =
+          (accessibility.touchCalls.single as (String, int, double, double)).$2;
+      // The technician had closed it a moment earlier and the event was lost:
+      // the losing close answers 200 with their endedBy.
+      remoteSessionRepository.closeResult = Ok(
+        closedSessionBy(RemoteSessionEndedBy.technician),
+      );
+      remoteSessionRepository.currentResult = noRemoteSession;
+
+      remoteSessionBloc.add(const RemoteSessionCloseRequested());
+      await settle();
+
+      expect(accessibility.touchCalls, [
+        accessibility.touchCalls.first,
+        ('abandon', handle),
+      ]);
+      expect(remoteSessionBloc.state, const RemoteSessionIdle());
+      expect(endedSessionStore.value, isNull);
+      expect(remoteSessionRepository.closeCount, 1);
+      expect(peerFactory.createCount, 1);
+      expectNothingLeft(peer, channel);
+    });
+
+    test('21-22. a 200 naming another, ACTIVE session revives nothing: no '
+        'peer, no room, no screen, no command', () async {
+      final (peer, channel) = await reachActiveAssistance();
+      final joins = client.joinedSessionIds.length;
+      remoteSessionRepository.closeResult = const Ok(
+        RemoteSession(
+          id: testOtherRemoteSessionId,
+          supportRequestId: testSupportRequestId,
+          status: RemoteSessionStatus.active,
+          technician: testRemoteSessionTechnician,
+        ),
+      );
+      // The backend still holds the ended session live.
+      remoteSessionRepository.currentResult = activatedRemoteSession;
+
+      remoteSessionRepository.closeGate = Completer<void>();
+      remoteSessionBloc.add(const RemoteSessionCloseRequested());
+      await settle();
+      // A command queued behind the end, delivered after the odd answer.
+      channel.pushTap('late');
+      remoteSessionRepository.closeGate!.complete();
+      await settle();
+      await client.deliver(
+        offerReceived(remoteSessionId: testOtherRemoteSessionId),
+      );
+      await settle();
+
+      expect(remoteSessionBloc.state, isA<RemoteSessionEndedLocally>());
+      expect(endedSessionStore.value, testRemoteSessionId);
+      expect(accessibility.taps, hasLength(1));
+      expect(peerFactory.createCount, 1);
+      expect(client.joinedSessionIds, hasLength(joins));
+      expect(screenCapture.requests, [testRemoteSessionId]);
+      expectNothingLeft(peer, channel);
+    });
+
+    test('18. remote-session:closed SYSTEM while the POST is pending, then '
+        '200 SYSTEM: one teardown, nothing restarts', () async {
+      final (peer, channel) = await reachActiveAssistance();
+      final gate = remoteSessionRepository.closeGate = Completer<void>();
+      remoteSessionRepository.closeResult = Ok(
+        closedSessionBy(RemoteSessionEndedBy.system),
+      );
+      remoteSessionRepository.currentResult = noRemoteSession;
+
+      remoteSessionBloc.add(const RemoteSessionCloseRequested());
+      await settle();
+      await client.emit(
+        const RealtimeRemoteSessionClosed(
+          testRemoteSessionId,
+          endedBy: 'SYSTEM',
+        ),
+      );
+      await settle();
+      expect(remoteSessionBloc.state, isA<RemoteSessionEndedLocally>());
+
+      gate.complete();
+      await settle();
+
+      expect(remoteSessionBloc.state, const RemoteSessionIdle());
+      expect(remoteSessionRepository.closeCount, 1);
+      expect(peer.closeCount, 1);
+      expect(peerFactory.createCount, 1);
+      expect(endedSessionStore.value, isNull);
+      expectNothingLeft(peer, channel);
+    });
+
+    test('a lost response, a reconnection that still reads ACTIVE, the repeat '
+        'answers 200 DEVICE: confirmed with no rejoin and no new peer', () async {
+      final (peer, channel) = await reachActiveAssistance();
+      remoteSessionRepository.closeResult = closeUnreachable;
+      remoteSessionBloc.add(const RemoteSessionCloseRequested());
+      await settle();
+      final joins = client.joinedSessionIds.length;
+
+      remoteSessionRepository.closeResult = Ok(closedSession);
+      remoteSessionRepository.currentQueue.add(activatedRemoteSession);
+      remoteSessionRepository.currentResult = noRemoteSession;
+      await client.emit(const RealtimeDisconnected());
+      await settle();
+      await client.emit(const RealtimeConnected());
+      await settle();
+
+      expect(remoteSessionBloc.state, const RemoteSessionIdle());
+      expect(remoteSessionRepository.closedIds, [
+        testRemoteSessionId,
+        testRemoteSessionId,
+      ]);
+      expect(endedSessionStore.value, isNull);
+      expect(client.joinedSessionIds, hasLength(joins));
+      expect(peerFactory.createCount, 1);
+      expect(screenCapture.requests, [testRemoteSessionId]);
+      expectNothingLeft(peer, channel);
+    });
+  });
 }
