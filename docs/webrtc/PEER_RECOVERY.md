@@ -131,6 +131,10 @@ still awaiting a send cannot keep the new one from draining.
   capture without it.
 * **Stopped by Android** (`onStop`) in this session: no offer is answered at
   all, recovery included; control stays withdrawn for that session.
+* **Transmission** is the capture's, not the peer's (Prompt 40): a new peer
+  attached to a held-back capture sends nothing until the session's authority
+  is confirmed, and a suspension holds back every peer the track is on. See
+  [LIFECYCLE.md](../remote_session/LIFECYCLE.md#video-during-an-authority-loss-prompt-40).
 * **Dialog still open** when the recovery arrives: the client already
   deduplicates requests for one session, so there is one dialog; the grant goes
   to the newest negotiation only.
