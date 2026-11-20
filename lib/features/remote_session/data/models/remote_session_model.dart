@@ -1,6 +1,7 @@
 import 'package:remote_control_device/core/network/api_exception.dart';
 import 'package:remote_control_device/features/device/data/models/json_parsing.dart';
 import 'package:remote_control_device/features/remote_session/domain/entities/remote_session.dart';
+import 'package:remote_control_device/features/remote_session/domain/entities/remote_session_ended_by.dart';
 import 'package:remote_control_device/features/remote_session/domain/entities/remote_session_status.dart';
 import 'package:remote_control_device/features/remote_session/domain/entities/remote_session_technician.dart';
 
@@ -21,11 +22,16 @@ import 'package:remote_control_device/features/remote_session/domain/entities/re
 /// }
 /// ```
 ///
-/// Only `id`, `supportRequestId`, `status`, `connectedAt` and `technician` are
-/// read. The rest is present in the response and deliberately unused: the
-/// `device` block because this client never asserts or re-checks its own
-/// identity, `createdAt`, `endedAt` and `endedBy` because nothing displays
-/// them.
+/// `createdAt` and the `device` block are present in the response and
+/// deliberately unused: the `device` block because this client never asserts or
+/// re-checks its own identity, `createdAt` because nothing displays it.
+///
+/// `endedAt` and `endedBy` are read so the answer to a close can be checked
+/// against the session that was addressed (see `RemoteSession.confirmsCloseOf`).
+/// Both are lenient, like `connectedAt`: absent, `null` or malformed reads as
+/// `null`, never as a parse error — a `/current` payload must not be refused
+/// over them, and a close answer without a readable `endedAt` is simply not a
+/// confirmation.
 ///
 /// `connectedAt` is read because the screen shows it, and it is read *only*
 /// from here: the backend writes it once, on the real `CONNECTING -> ACTIVE`
@@ -37,6 +43,8 @@ class RemoteSessionModel {
     required this.supportRequestId,
     required this.status,
     this.connectedAt,
+    this.endedAt,
+    this.endedBy,
     this.technician,
   });
 
@@ -46,6 +54,8 @@ class RemoteSessionModel {
         supportRequestId: json.requireString('supportRequestId'),
         status: _statusFromWire(json.requireString('status')),
         connectedAt: _timestampFromJson(json['connectedAt']),
+        endedAt: _timestampFromJson(json['endedAt']),
+        endedBy: _endedByFromJson(json['endedBy']),
         technician: _technicianFromJson(json['technician']),
       );
 
@@ -72,6 +82,8 @@ class RemoteSessionModel {
   final String supportRequestId;
   final RemoteSessionStatus status;
   final DateTime? connectedAt;
+  final DateTime? endedAt;
+  final RemoteSessionEndedBy? endedBy;
   final RemoteSessionTechnicianModel? technician;
 
   RemoteSession toEntity() => RemoteSession(
@@ -79,6 +91,8 @@ class RemoteSessionModel {
     supportRequestId: supportRequestId,
     status: status,
     connectedAt: connectedAt,
+    endedAt: endedAt,
+    endedBy: endedBy,
     technician: technician?.toEntity(),
   );
 }
@@ -114,6 +128,12 @@ RemoteSessionStatus _statusFromWire(String value) => switch (value) {
 /// where it is displayed.
 DateTime? _timestampFromJson(Object? value) =>
     value is String ? DateTime.tryParse(value) : null;
+
+/// `null` when absent or not a string; otherwise the typed value, with
+/// [RemoteSessionEndedBy.unknown] for one this build does not know. The wire
+/// strings themselves live in [RemoteSessionEndedBy.fromWire].
+RemoteSessionEndedBy? _endedByFromJson(Object? value) =>
+    value is String ? RemoteSessionEndedBy.fromWire(value) : null;
 
 /// Absent, `null`, or malformed all answer `null`.
 ///

@@ -16,6 +16,7 @@ import 'package:remote_control_device/features/device/domain/usecases/renew_devi
 import 'package:remote_control_device/features/remote_session/data/datasources/remote_session_remote_data_source.dart';
 import 'package:remote_control_device/features/remote_session/data/repositories/remote_session_repository_impl.dart';
 import 'package:remote_control_device/features/remote_session/domain/entities/remote_session.dart';
+import 'package:remote_control_device/features/remote_session/domain/entities/remote_session_ended_by.dart';
 import 'package:remote_control_device/features/remote_session/domain/entities/remote_session_status.dart';
 import 'package:remote_control_device/features/remote_session/domain/repositories/remote_session_repository.dart';
 
@@ -24,6 +25,9 @@ import '../../../fakes/remote_session_fakes.dart';
 import '../../../fakes/support_fakes.dart';
 
 /// One scripted HTTP reply.
+/// A [_Reply] status meaning "no answer within the receive timeout".
+const int _timeout = -1;
+
 class _Reply {
   const _Reply(this.statusCode, this.body);
 
@@ -54,6 +58,14 @@ class _RecordingAdapter implements HttpClientAdapter {
     requests.add(options);
     final reply = replies[_served.clamp(0, replies.length - 1)];
     _served++;
+    if (reply.statusCode == _timeout) {
+      // The request went out and no answer came back in time: from here it is
+      // impossible to tell whether the backend closed the session.
+      throw DioException(
+        requestOptions: options,
+        type: DioExceptionType.receiveTimeout,
+      );
+    }
     return ResponseBody.fromString(
       jsonEncode(reply.body),
       reply.statusCode,
@@ -277,7 +289,8 @@ void main() {
       expect(result.valueOrNull?.status.isLive, isFalse);
     });
 
-    test('maps 404 — unknown, or another device — to NotFoundFailure', () async {
+    test('maps 404 — unknown, or another device, even CLOSED — to '
+        'NotFoundFailure', () async {
       build([const _Reply(404, {'message': 'not found'})]);
 
       expect(
@@ -286,14 +299,126 @@ void main() {
       );
     });
 
-    test('maps 409 — already closed, or the technician won the race — '
-        'to ConflictFailure', () async {
+    test('maps 409 — a live session whose request cannot complete — to '
+        'ConflictFailure', () async {
+      // Since remote_control_backend f5b8a1c, the only 409 of this endpoint.
+      // An already-CLOSED session of this device is a 200, not a 409.
       build([const _Reply(409, {'message': 'conflict'})]);
 
       expect(
         (await repository.close(testRemoteSessionId)).failureOrNull,
         isA<ConflictFailure>(),
       );
+    });
+
+    test('reads the closed session: endedAt and endedBy as the backend sent '
+        'them', () async {
+      build([
+        _Reply(200, remoteSessionJson(status: 'CLOSED', endedBy: 'DEVICE')),
+      ]);
+
+      final session = (await repository.close(testRemoteSessionId)).valueOrNull;
+
+      expect(session?.id, testRemoteSessionId);
+      expect(session?.endedAt, DateTime.parse(testEndedAtWire));
+      expect(session?.endedAt?.isUtc, isTrue);
+      expect(session?.endedBy, RemoteSessionEndedBy.device);
+      expect(session?.confirmsCloseOf(testRemoteSessionId), isTrue);
+    });
+
+    for (final (wire, endedBy) in [
+      ('DEVICE', RemoteSessionEndedBy.device),
+      ('TECHNICIAN', RemoteSessionEndedBy.technician),
+      ('SYSTEM', RemoteSessionEndedBy.system),
+    ]) {
+      test('a repeat answers 200 with the original close — endedBy $wire — '
+          'and it confirms', () async {
+        // Idempotent close: the same body as the first close, whoever made
+        // it. Two calls, two identical answers.
+        build([
+          _Reply(200, remoteSessionJson(status: 'CLOSED', endedBy: wire)),
+        ]);
+
+        final first = (await repository.close(testRemoteSessionId)).valueOrNull;
+        final repeat =
+            (await repository.close(testRemoteSessionId)).valueOrNull;
+
+        expect(adapter.requests, hasLength(2));
+        expect(repeat, first);
+        expect(repeat?.endedBy, endedBy);
+        expect(repeat?.endedAt, DateTime.parse(testEndedAtWire));
+        expect(repeat?.confirmsCloseOf(testRemoteSessionId), isTrue);
+      });
+    }
+
+    test('an endedBy this build does not know is read as unknown, and still '
+        'confirms', () async {
+      build([
+        _Reply(200, remoteSessionJson(status: 'CLOSED', endedBy: 'JANITOR')),
+      ]);
+
+      final session = (await repository.close(testRemoteSessionId)).valueOrNull;
+
+      expect(session?.endedBy, RemoteSessionEndedBy.unknown);
+      expect(session?.confirmsCloseOf(testRemoteSessionId), isTrue);
+    });
+
+    test('a 200 without endedAt parses, but does not confirm', () async {
+      build([
+        _Reply(
+          200,
+          remoteSessionJson(status: 'CLOSED', endedBy: 'DEVICE')
+            ..['endedAt'] = null,
+        ),
+      ]);
+
+      final session = (await repository.close(testRemoteSessionId)).valueOrNull;
+
+      expect(session, isNotNull);
+      expect(session?.endedAt, isNull);
+      expect(session?.confirmsCloseOf(testRemoteSessionId), isFalse);
+    });
+
+    test('a 200 naming another session, or still ACTIVE, does not '
+        'confirm', () async {
+      build([
+        _Reply(
+          200,
+          remoteSessionJson(
+            id: testOtherRemoteSessionId,
+            status: 'CLOSED',
+            endedBy: 'DEVICE',
+          ),
+        ),
+        _Reply(200, remoteSessionJson(status: 'ACTIVE')),
+      ]);
+
+      final other = (await repository.close(testRemoteSessionId)).valueOrNull;
+      final active = (await repository.close(testRemoteSessionId)).valueOrNull;
+
+      expect(other?.confirmsCloseOf(testRemoteSessionId), isFalse);
+      expect(active?.confirmsCloseOf(testRemoteSessionId), isFalse);
+    });
+
+    test('maps 500 — nothing written, retrying is safe — to '
+        'ServerFailure', () async {
+      build([const _Reply(500, {'message': 'Internal server error'})]);
+
+      expect(
+        (await repository.close(testRemoteSessionId)).failureOrNull,
+        isA<ServerFailure>(),
+      );
+    });
+
+    test('maps a timeout — the outcome is unknown — to NetworkFailure', () async {
+      build([const _Reply(_timeout, {})]);
+
+      expect(
+        (await repository.close(testRemoteSessionId)).failureOrNull,
+        isA<NetworkFailure>(),
+      );
+      // Not mistaken for a revoked credential.
+      expect(storage.clearCount, 0);
     });
 
     test('maps 400 — the id was not a UUID — to ValidationFailure', () async {

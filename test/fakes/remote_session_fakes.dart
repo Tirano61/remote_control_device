@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:remote_control_device/core/error/failures.dart';
 import 'package:remote_control_device/core/result/result.dart';
 import 'package:remote_control_device/features/remote_session/domain/entities/remote_session.dart';
+import 'package:remote_control_device/features/remote_session/domain/entities/remote_session_ended_by.dart';
 import 'package:remote_control_device/features/remote_session/domain/entities/remote_session_status.dart';
 import 'package:remote_control_device/features/remote_session/domain/entities/remote_session_technician.dart';
 import 'package:remote_control_device/features/remote_session/domain/repositories/remote_session_repository.dart';
@@ -46,10 +47,25 @@ final RemoteSession activatedSession = RemoteSession(
   technician: testRemoteSessionTechnician,
 );
 
-const RemoteSession closedSession = RemoteSession(
-  id: testRemoteSessionId,
+/// `endedAt` exactly as [remoteSessionJson] sends it for a closed session.
+const String testEndedAtWire = '2026-03-11T09:41:02.000Z';
+
+/// The answer to this device's close, as the backend documents it: the same
+/// id, `CLOSED`, with `endedAt` and `endedBy`.
+final RemoteSession closedSession = closedSessionBy(RemoteSessionEndedBy.device);
+
+/// [closedSession] as the idempotent close answers it when [endedBy] closed
+/// the session first: same id, same `endedAt`, their `endedBy`.
+RemoteSession closedSessionBy(
+  RemoteSessionEndedBy? endedBy, {
+  String id = testRemoteSessionId,
+  bool withEndedAt = true,
+}) => RemoteSession(
+  id: id,
   supportRequestId: testSupportRequestId,
   status: RemoteSessionStatus.closed,
+  endedAt: withEndedAt ? DateTime.parse(testEndedAtWire) : null,
+  endedBy: endedBy,
   technician: testRemoteSessionTechnician,
 );
 
@@ -67,7 +83,7 @@ Map<String, dynamic> remoteSessionJson({
   'status': status,
   'createdAt': '2026-03-11T09:33:41.000Z',
   'connectedAt': connectedAt,
-  'endedAt': endedBy == null ? null : '2026-03-11T09:41:02.000Z',
+  'endedAt': endedBy == null ? null : testEndedAtWire,
   'endedBy': endedBy,
   'device': <String, dynamic>{
     'id': '550e8400-e29b-41d4-a716-446655440000',
@@ -90,8 +106,8 @@ Map<String, dynamic> currentRemoteSessionEnvelope(
 class FakeRemoteSessionRepository implements RemoteSessionRepository {
   FakeRemoteSessionRepository({
     this.currentResult = const Ok<RemoteSession?>(null),
-    this.closeResult = const Ok(closedSession),
-  });
+    Result<RemoteSession>? closeResult,
+  }) : closeResult = closeResult ?? Ok(closedSession);
 
   Result<RemoteSession?> currentResult;
   Result<RemoteSession> closeResult;

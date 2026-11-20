@@ -309,10 +309,28 @@ void main() {
   });
 
   group('a close that lost a race with the backend', () {
+    test('the technician closed a moment earlier: the idempotent 200 says '
+        'TECHNICIAN and confirms it', () async {
+      // Before remote_control_backend f5b8a1c this was a 409. Now the losing
+      // close answers 200 with the winner's endedBy and endedAt.
+      await reachConnecting();
+      repository.closeResult = Ok(
+        closedSessionBy(RemoteSessionEndedBy.technician),
+      );
+      repository.currentResult = noRemoteSession;
+
+      bloc.add(const RemoteSessionCloseRequested());
+      await settle();
+
+      expect(repository.currentCount, 2);
+      expect(bloc.state, const RemoteSessionIdle());
+    });
+
     test('adopts the real state after a 409 instead of inventing one', () async {
+      // 409 is now only a live session whose request cannot complete. If the
+      // re-read no longer finds it, that read is what confirms the end.
       await reachConnecting();
       repository.closeResult = closeConflict;
-      // The technician closed a moment earlier.
       repository.currentResult = noRemoteSession;
 
       bloc.add(const RemoteSessionCloseRequested());
@@ -335,7 +353,7 @@ void main() {
 
     test('a 409 whose re-read still finds the session keeps it ended here',
         () async {
-      // The other documented 409: the session is live but its request cannot be
+      // The one documented 409: the session is live but its request cannot be
       // completed. The backend still holds it; the tablet still refuses it.
       await reachConnecting();
       repository.closeResult = closeConflict;
@@ -508,7 +526,7 @@ void main() {
     });
 
     test('a CLOSED session is never shown as live', () async {
-      repository.currentResult = const Ok<RemoteSession?>(closedSession);
+      repository.currentResult = Ok<RemoteSession?>(closedSession);
 
       await sync();
 

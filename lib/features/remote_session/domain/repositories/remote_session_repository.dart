@@ -19,5 +19,13 @@ abstract interface class RemoteSessionRepository {
   /// `POST /device/remote-sessions/:id/close` — the user of the tablet ends the
   /// assistance. Answers the `CLOSED` session; the backend completes the
   /// support request in the same transaction.
+  ///
+  /// Idempotent at the backend: on a session of this device that is already
+  /// `CLOSED` — closed by an earlier attempt whose response was lost, by the
+  /// technician or by the backend (`SYSTEM`) — it answers `200` with the
+  /// original close (`endedAt` and `endedBy` unchanged) and writes nothing. A
+  /// repeat is therefore always safe, and an `Ok` is not proof that *this*
+  /// call closed it. Whether an `Ok` confirms the close of [id] at all is
+  /// checked by the caller: see `RemoteSession.confirmsCloseOf`.
   Future<Result<RemoteSession>> close(String id);
 }

@@ -43,9 +43,14 @@ part 'remote_session_state.dart';
 ///
 /// ```text
 /// FINALIZAR here             ──> RemoteSessionEndedLocally, at once, for good
-///   POST close  200 CLOSED   ──> confirmed: Idle
+///   POST close  200, this id, CLOSED, endedAt
+///                            ──> confirmed: Idle, whoever closed it first
+///                                (the close is idempotent: endedBy may be
+///                                DEVICE, TECHNICIAN or SYSTEM)
+///   POST close  200 that says anything else (another id, a live status,
+///               no endedAt)  ──> not a confirmation; /current decides
 ///   POST close  404 / 409    ──> /current decides whether it is confirmed
-///   POST close  anything else (network, 5xx, 401, 400)
+///   POST close  anything else (network, timeout, 5xx, 401, 400)
 ///                            ──> still ended here; confirmation pending
 ///
 /// remote-session:closed for the session held (TECHNICIAN or SYSTEM)
@@ -763,23 +768,47 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
       if (generation != _generation) return;
 
       switch (result) {
-        case Ok<RemoteSession>(:final value):
-          // The backend returned the CLOSED session: confirmed. The screen can
-          // leave the assistance at once...
-          if (value.status == RemoteSessionStatus.closed) {
-            _log('close of $remoteSessionId confirmed by the backend');
-            await _forgetPending(remoteSessionId);
-            if (generation != _generation) return;
-          }
+        case Ok<RemoteSession>(:final value)
+            when value.confirmsCloseOf(remoteSessionId):
+          // `200` with this very session `CLOSED`: confirmed. The close is
+          // idempotent, so this is the answer to the first close, to a repeat
+          // after a lost response, and to a close the technician or the backend
+          // made first — `endedBy` says which, and any of them is a
+          // confirmation. The screen can leave the assistance at once...
+          _log(
+            'close of $remoteSessionId confirmed by the backend '
+            '(endedBy ${value.endedBy?.name ?? 'absent'})',
+          );
+          await _forgetPending(remoteSessionId);
+          if (generation != _generation) return;
           done();
           emit(_stateFor(value));
           // ...and the contract's own recovery call agrees. Normally `null`.
           await _sync(emit);
+        case Ok<RemoteSession>(:final value):
+          // `200` that does not say this session is closed: another id, a
+          // status other than `CLOSED`, or no `endedAt`. Not the documented
+          // answer, so not a confirmation — and never a reason to adopt what it
+          // carries: the session stays ended here, its marker stays, and
+          // `/current` decides, exactly as after a `404`. One read, no second
+          // close: the next cue reconciles it, as after any other failure.
+          _log(
+            'close of $remoteSessionId answered 200 without confirming it '
+            '(same id: ${value.id == remoteSessionId}, '
+            'status: ${value.status.name}, '
+            'endedAt: ${value.endedAt == null ? 'absent' : 'present'}): '
+            'asking /current',
+          );
+          done();
+          await _sync(emit, reason: const ServerFailure());
         case Err<RemoteSession>(:final failure) when _meansStaleState(failure):
-          // `404`/`409`: the session was already gone, or its request is no
-          // longer completable — the technician or the backend closed first,
-          // most likely. Nothing is guessed; the backend is asked, and whatever
-          // it answers this session stays ended here.
+          // `404`: no session of this device has that id — what this client
+          // believed is not what the backend holds.
+          // `409`: the session is still live but its request cannot complete;
+          // nothing was written.
+          // An already-`CLOSED` session of this device is neither: it answers
+          // `200` (above). Nothing is guessed here either; the backend is
+          // asked, and whatever it answers this session stays ended here.
           done();
           await _sync(emit, reason: failure);
         case Err<RemoteSession>(:final failure):
@@ -899,8 +928,9 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
       _endReasons[remoteSessionId] != RemoteSessionLocalEndReason.authorityLost;
 
   /// `404` and `409` both mean the same thing here: what this client believed
-  /// is no longer what the backend holds. The contract is explicit that the
-  /// client re-reads state rather than interpreting the message.
+  /// is not what the backend holds, and the close did not happen. The contract
+  /// is explicit that the client re-reads state rather than interpreting the
+  /// message. Neither stands for "already closed" any more: that is a `200`.
   static bool _meansStaleState(Failure failure) =>
       failure is ConflictFailure || failure is NotFoundFailure;
 

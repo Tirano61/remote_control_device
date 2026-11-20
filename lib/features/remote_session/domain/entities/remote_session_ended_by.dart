@@ -1,4 +1,5 @@
-/// Who closed a remote session, as `remote-session:closed` reports it.
+/// Who closed a remote session, as `remote-session:closed` and the
+/// `RemoteSession` payload report it.
 ///
 /// `RemoteSessionEndedBy` in the backend contract. Used only to tell the user
 /// who ended the assistance: no decision in this client depends on it. Every
