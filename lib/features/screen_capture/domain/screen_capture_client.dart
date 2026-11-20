@@ -52,6 +52,23 @@ abstract interface class ScreenCaptureClient {
   /// answering it without the screen.
   Future<ScreenCaptureResult> requestAndStart(String remoteSessionId);
 
+  /// Whether the running capture's frames may reach the technician.
+  ///
+  /// Capturing and transmitting are two things. A capture starts with nothing
+  /// transmitted — the Android side keeps every frame back, before the
+  /// encoder — and transmits only after this is called with `true`; `false`
+  /// keeps every frame back again while MediaProjection, its consent and its
+  /// notification stay, so a session that recovers needs no second dialog.
+  ///
+  /// Calls take effect in the order they are made. With no capture running
+  /// there is nothing to transmit, and nothing happens.
+  ///
+  /// Never throws. Returns `false` only when the platform could not apply the
+  /// change: the capture has then been stopped — a capture this side cannot
+  /// hold back is not left running — and the caller treats it as a failed
+  /// screen. `true` otherwise.
+  Future<bool> setTransmitting(bool transmitting);
+
   /// Stops the capture, releases the track and the stream, and takes the
   /// foreground notification down.
   ///

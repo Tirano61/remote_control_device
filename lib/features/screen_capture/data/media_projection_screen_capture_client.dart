@@ -61,6 +61,12 @@ class MediaProjectionScreenCaptureClient implements ScreenCaptureClient {
   ScreenVideoTrack? _videoTrack;
   String? _remoteSessionId;
 
+  /// Whether the running capture was last asked to transmit. A new capture
+  /// starts with nothing transmitted, natively, so this starts `false` with
+  /// it. Set before the platform is called, so that calls made one after the
+  /// other reach it in that order and each is compared with the last one.
+  bool _transmitting = false;
+
   /// Whether the foreground service was asked to start and not yet asked to
   /// stop. Set *before* the start is awaited, so that a start which threw
   /// half-way still gets a stop.
@@ -205,10 +211,37 @@ class MediaProjectionScreenCaptureClient implements ScreenCaptureClient {
     _capture = capture;
     _videoTrack = videoTracks.single;
     _remoteSessionId = remoteSessionId;
+    _transmitting = false;
     capture.onEnded = _onEndedByPlatform;
 
     _log('capture started');
     return ScreenCaptureStarted(videoTracks.single);
+  }
+
+  @override
+  Future<bool> setTransmitting(bool transmitting) async {
+    final capture = _capture;
+    if (capture == null) return true;
+    if (_transmitting == transmitting) return true;
+    _transmitting = transmitting;
+    _log(
+      transmitting
+          ? 'transmission resumed for $_remoteSessionId'
+          : 'transmission suspended for $_remoteSessionId',
+    );
+    try {
+      await capture.setTransmitting(transmitting);
+      return true;
+    } catch (_) {
+      // Stopped or replaced meanwhile: what the call was about is gone, and
+      // it transmits nothing.
+      if (!identical(_capture, capture)) return true;
+      // The last resort. A capture whose frames cannot be held back is not
+      // left running, and one that cannot be let through is of no use.
+      _log('transmission could not be changed: capture stopped');
+      await stop();
+      return false;
+    }
   }
 
   @override
@@ -222,6 +255,7 @@ class MediaProjectionScreenCaptureClient implements ScreenCaptureClient {
     _capture = null;
     _videoTrack = null;
     _remoteSessionId = null;
+    _transmitting = false;
 
     if (capture != null) {
       // Detached first, so this teardown cannot come back as "the platform

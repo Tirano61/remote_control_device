@@ -48,6 +48,17 @@ class RunningScreenCapture<S : Any>(
     }
 
     /**
+     * Runs [action] on the running capture if it is the one with [trackId], and returns its
+     * result; null when there is no capture or it is another one. A late message about a capture
+     * that was already replaced must never reach its replacement.
+     */
+    fun <R> ifRunning(trackId: String, action: (S) -> R): R? {
+        val session = running ?: return null
+        if (trackIdOf(session) != trackId) return null
+        return action(session)
+    }
+
+    /**
      * Android ended the capture with [trackId] by itself. Returns `true` when that is the
      * running capture — it has been released now, and Dart must be told — and `false` for
      * anything Dart already knows about.

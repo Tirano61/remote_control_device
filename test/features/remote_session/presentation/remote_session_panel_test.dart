@@ -516,6 +516,33 @@ void main() {
     expect(find.byKey(RemoteSessionPanel.screenCaptureLineKey), findsNothing);
   });
 
+  testWidgets('back online but unconfirmed, the screen reads paused, never '
+      'shared', (tester) async {
+    await pumpAccepted(tester);
+    remoteSessionRepository.currentResult = connectingRemoteSession;
+    remoteSessionBloc.add(const RemoteSessionAnnounced(testRemoteSessionId));
+    await settle(tester);
+    await establishPeerConnection(tester);
+    expect(find.text('Pantalla: compartiendo'), findsOneWidget);
+
+    client.push(const RealtimeDisconnected());
+    await settle(tester);
+
+    // The socket is back; no read has confirmed the session since.
+    client.push(const RealtimeConnected());
+    await settle(tester);
+    expect(find.text('Verificando la asistencia...'), findsOneWidget);
+    expect(
+      find.text('Pantalla: en pausa hasta confirmar con el servidor'),
+      findsOneWidget,
+    );
+    expect(find.text('Pantalla: compartiendo'), findsNothing);
+
+    remoteSessionBloc.add(const RemoteSessionSyncRequested());
+    await settle(tester);
+    expect(find.text('Pantalla: compartiendo'), findsOneWidget);
+  });
+
   testWidgets('CONNECTING becomes ACTIVE without contradicting itself', (
     tester,
   ) async {

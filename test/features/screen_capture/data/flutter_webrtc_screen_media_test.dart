@@ -117,6 +117,49 @@ void main() {
       ]);
     });
 
+    test('opens and closes its transmission gate by its own id', () async {
+      reply = (call) =>
+          call.method == 'startScreenCapture' ? started('track-a') : true;
+      final capture = await source.open();
+      calls.clear();
+
+      await capture.setTransmitting(true);
+      await capture.setTransmitting(false);
+
+      expect(calls.map((call) => call.method), [
+        'setScreenCaptureTransmission',
+        'setScreenCaptureTransmission',
+      ]);
+      expect(calls.map((call) => call.arguments), [
+        {'trackId': 'track-a', 'transmitting': true},
+        {'trackId': 'track-a', 'transmitting': false},
+      ]);
+    });
+
+    test('a gate the platform could not change reaches the caller', () async {
+      reply = (call) => started('track-a');
+      final capture = await source.open();
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        throw PlatformException(code: 'SCREEN_CAPTURE_TRANSMISSION_FAILED');
+      });
+
+      await expectLater(
+        capture.setTransmitting(false),
+        throwsA(isA<PlatformException>()),
+      );
+    });
+
+    test('a released capture sends nothing more', () async {
+      reply = (call) => started('track-a');
+      final capture = await source.open();
+      await capture.dispose();
+      calls.clear();
+
+      await capture.setTransmitting(true);
+
+      expect(calls, isEmpty);
+    });
+
     test('releasing never throws', () async {
       reply = (call) => started('track-a');
       final capture = await source.open();

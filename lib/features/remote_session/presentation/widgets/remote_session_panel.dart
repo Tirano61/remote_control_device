@@ -223,6 +223,10 @@ class RemoteSessionPanel extends StatelessWidget {
   /// Nothing is shown while the tablet is reconnecting: the headline is
   /// already saying the connection is the problem, and a capture that is still
   /// running locally is not what the user needs to read at that moment.
+  ///
+  /// Back online but not confirmed yet, a running capture is not "compartiendo"
+  /// either: nothing it captures reaches the technician until the backend
+  /// confirms the session (`WebRtcSessionBloc` holds the frames back).
   String? _screenLine(ScreenCaptureStatus status, {required bool connected}) {
     // Android taking the screen away is said whatever the connection: it is
     // the reason control is gone, and it does not depend on the socket.
@@ -230,6 +234,9 @@ class RemoteSessionPanel extends StatelessWidget {
       return 'Pantalla: Android detuvo la captura';
     }
     if (!connected) return null;
+    if (state.isSuspended && status == ScreenCaptureStatus.active) {
+      return 'Pantalla: en pausa hasta confirmar con el servidor';
+    }
 
     return switch (status) {
       ScreenCaptureStatus.idle => null,

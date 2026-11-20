@@ -413,6 +413,8 @@ every case below.
 | --- | --- | --- |
 | a new offer for the same session | rebuilt | reused, no second dialog |
 | a recovery offer while this peer still reads CONNECTED ([PEER_RECOVERY.md](PEER_RECOVERY.md)) | replaced, with authority confirmed | reused, no second dialog |
+| the session's authority is suspended (socket down, REST pending or failing) | kept, obeying nothing | kept running, **nothing transmitted** |
+| the session's authority is confirmed again | kept | frames let through again, no second dialog |
 | the transport failed or closed | torn down | kept running |
 | signaling room lost mid-negotiation | torn down | kept running |
 | the generation went stale during the consent dialog | already gone | kept, for the negotiation that replaced it |
@@ -470,6 +472,30 @@ closed by the other end, or is abandoned while negotiating, the capture is
 stopped after `WebRtcSessionBloc.defaultOrphanCaptureTimeout` (20 s) unless a
 new offer for the same live session attaches it first. After that a new offer
 goes through Android's dialog again. The device never renegotiates on its own.
+
+## Capturing is not transmitting
+
+Since Prompt 40 the capture and its transmission are separate switches:
+
+```text
+MediaProjection -> virtual display -> SurfaceTexture -> ScreenCapturer.onFrame
+    -> ScreenCaptureTransmission (gate) -> settle frame -> VideoSource -> encoder
+```
+
+The gate is native, checked first for every frame, and starts **closed** for
+every capture. `WebRtcSessionBloc` opens it over
+`setScreenCaptureTransmission {trackId, transmitting}` only while the capture's
+remote session is live, its authority confirmed and Android has not taken the
+screen away; it closes it, synchronously, the moment one of those stops being
+true. Closed, MediaProjection, its consent and its notification stay, and no
+frame reaches libwebrtc — not a black one either, which is what disabling the
+track would send. Opening it redelivers the current texture, so a still screen
+does not leave the technician on the image from before.
+
+Because the gate belongs to the capture, it holds for whatever peer or sender
+the track is on: a replaced peer, a recovery, an old generation. The policy,
+the alternatives considered and the runs on the T10A are in
+[LIFECYCLE.md](../remote_session/LIFECYCLE.md#video-during-an-authority-loss-prompt-40).
 
 ## The foreground service
 
@@ -592,6 +618,7 @@ On screen it is one discreet line and never the headline:
 ```text
 Pantalla: esperando autorización
 Pantalla: compartiendo
+Pantalla: en pausa hasta confirmar con el servidor   (back online, not confirmed)
 Pantalla: permiso rechazado
 Pantalla: error al compartir
 ```
@@ -626,6 +653,9 @@ Allowed, and what the code actually prints:
 [screen] capture starting / started / reused / stopped
 [screen] capture geometry 1280x800 landscape rotation=90 dpi=160
          virtualDisplay=1280 sending=1280x800
+[screen] transmission suspended / resumed for <remoteSessionId>
+[webrtc] screen transmission suspended for <id>: its authority is not confirmed
+[webrtc] screen transmission resumed for <id>
 [webrtc] video track attached
 ```
 
@@ -640,6 +670,8 @@ capture geometry 800x1280 portrait rotation=0 dpi=160,
     virtual display 1280x1280, sending 800x1280@(240,0)
 capture geometry 1280x800 landscape rotation=90 dpi=160,
     sending 1280x800@(0,240)                          (on each rotation)
+transmission suspended (admitted: 249, withheld: 0)
+transmission resumed (withheld while suspended: 758)  (counts only)
 ```
 
 `adb logcat -s RemoteControlScreen` is enough to check on the tablet that a
