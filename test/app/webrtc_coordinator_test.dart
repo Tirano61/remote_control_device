@@ -905,7 +905,7 @@ void main() {
 
       await client.emit(const RealtimeHandshakeUnavailable());
       await settle();
-      remoteSessionRepository.currentResult = const Ok<RemoteSession?>(
+      remoteSessionRepository.currentResult = Ok<RemoteSession?>(
         closedSession,
       );
       await client.emit(const RealtimeConnected());

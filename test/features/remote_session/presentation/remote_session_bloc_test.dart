@@ -508,7 +508,7 @@ void main() {
     });
 
     test('a CLOSED session is never shown as live', () async {
-      repository.currentResult = const Ok<RemoteSession?>(closedSession);
+      repository.currentResult = Ok<RemoteSession?>(closedSession);
 
       await sync();
 

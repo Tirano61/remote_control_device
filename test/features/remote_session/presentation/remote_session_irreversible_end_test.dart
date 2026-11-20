@@ -147,7 +147,7 @@ void main() {
     test('once the backend accepts it, the end is confirmed', () async {
       await endWhileUnreachable();
       repository.currentQueue.addAll([activatedRemoteSession, noRemoteSession]);
-      repository.closeResult = const Ok(closedSession);
+      repository.closeResult = Ok(closedSession);
 
       await sync();
 
@@ -288,7 +288,7 @@ void main() {
       'REINTENTAR after a failure sends the close again, and only that',
       () async {
         await endWhileUnreachable();
-        repository.closeResult = const Ok(closedSession);
+        repository.closeResult = Ok(closedSession);
         repository.currentResult = noRemoteSession;
 
         bloc.add(const RemoteSessionCloseRequested());
@@ -331,7 +331,7 @@ void main() {
 
       bloc = build();
       repository.currentQueue.addAll([activatedRemoteSession, noRemoteSession]);
-      repository.closeResult = const Ok(closedSession);
+      repository.closeResult = Ok(closedSession);
       await sync();
 
       expect(bloc.state, const RemoteSessionIdle());

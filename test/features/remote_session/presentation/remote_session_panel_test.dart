@@ -785,7 +785,7 @@ void main() {
     expect(find.byKey(SupportPanel.requestButtonKey), findsNothing);
 
     // REINTENTAR only tells the server again.
-    remoteSessionRepository.closeResult = const Ok(closedSession);
+    remoteSessionRepository.closeResult = Ok(closedSession);
     remoteSessionRepository.currentResult = noRemoteSession;
     await tester.ensureVisible(
       find.byKey(RemoteSessionEndedPanel.retryButtonKey),
