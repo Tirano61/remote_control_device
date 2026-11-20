@@ -54,14 +54,18 @@ local authorisation revoked   The user pressed FINALIZAR. From that instant this
                               network does afterwards undoes it.
                               State: RemoteSessionEndedLocally.
 
-close confirmed by backend    POST /close answered 200 with the CLOSED session,
-                              or a later GET /current no longer returns that
-                              session as live. Only now does the device say the
-                              session is closed. State: RemoteSessionIdle.
+close confirmed by backend    POST /close answered 200 with that same session
+                              CLOSED and endedAt set — whoever closed it first:
+                              the close is idempotent, so endedBy may be DEVICE,
+                              TECHNICIAN or SYSTEM — or a later GET /current no
+                              longer returns that session as live. Only now does
+                              the device say the session is closed. State:
+                              RemoteSessionIdle.
 
 close pending reconciliation  The POST did not get a confirming answer (network,
-                              timeout, 5xx, 401, 400, or 409 with the session
-                              still live). The backend may still hold the
+                              timeout, 5xx, 401, 400, a 200 that does not name
+                              that session CLOSED with endedAt, or 404/409 with
+                              the session still live). The backend may still hold the
                               session ACTIVE. The tablet still refuses it, and
                               says so: "La asistencia terminó en esta tablet,
                               pero no se pudo confirmar el cierre con el
@@ -99,10 +103,14 @@ press
   │
   ├─ ended-session marker written to secure storage
   └─ POST /device/remote-sessions/:id/close
-        200 CLOSED      marker cleared, Idle, then GET /current
+        200, same id, CLOSED, endedAt (any endedBy)
+                        marker cleared, Idle, then GET /current
+        200 otherwise   not a confirmation: GET /current decides (ServerFailure)
         404 / 409       GET /current decides; the session stays ended either way
         anything else   stays RemoteSessionEndedLocally(lastFailure)
 ```
+
+See [Idempotent close](#idempotent-close-prompt-39) for every answer.
 
 The local teardown does not wait for the POST and nothing in it depends on the
 POST's result. The POST is sent while the teardown runs (the marker write is the
@@ -142,8 +150,9 @@ the session on its next start.
 
 - It holds an operational identifier, not a credential. It grants nothing and the
   backend checks ownership on every call made with it.
-- It is written before the POST and cleared only on a backend confirmation (200
-  `CLOSED`, or a successful `/current` that no longer returns it as live).
+- It is written before the POST and cleared only on a backend confirmation (a 200
+  naming that session `CLOSED` with `endedAt`, or a successful `/current` that no
+  longer returns it as live). A 200 about another id never clears it.
 - Since Prompt 38 it also records whether a close is owed
   (`remote_session.ended_pending_cause`): absent for FINALIZAR, `authorityLost`
   for a session the tablet stopped by itself. The latter is still refused after a
@@ -691,3 +700,164 @@ What these runs do not show:
 * **Screen exposure while unreachable** grew from 45 s to 75 s after detection.
 * **Default grace assumed.** A backend configured with a longer grace makes the
   tablet give up first; with a shorter one the backend simply closes first.
+
+## Idempotent close (Prompt 39)
+
+Since `remote_control_backend` `f5b8a1c` (backend Prompt 34) both close endpoints
+are idempotent. Verified in the backend code, not only in the copied docs:
+`closeByDevice` and `closeByTechnician` go through `closeOwned`, which locks the
+row with the owner in the `WHERE` (`SELECT … FOR UPDATE`, `deviceId` from the
+Device JWT), runs the one transition (`closeWithin`) only if the row is still
+live, and re-reads the committed row inside the same transaction. `closedNow` is
+true only for the request that made the transition, and only that one emits
+`remote-session:closed`. `closeBySystem` takes the same lock.
+
+### What the tablet makes of each answer
+
+```text
+POST /device/remote-sessions/:id/close
+  200, same id, CLOSED, endedAt     confirmed — whoever closed it first.
+                                    endedBy DEVICE, TECHNICIAN, SYSTEM or
+                                    unknown: all the same to the tablet
+                                    (RemoteSession.confirmsCloseOf)
+  200, another id                   not a confirmation. The marker of the session
+  200, CONNECTING / ACTIVE          ended here stays, nothing in the body is
+  200, unknown status               adopted, one GET /current decides (lastFailure
+  200, CLOSED without endedAt       ServerFailure), no second close for that cue
+  404                               no session of this device has that id:
+                                    GET /current decides
+  409                               the session is still live and its request
+                                    cannot complete; nothing was written:
+                                    GET /current decides (normally: still live,
+                                    so it stays ended here, marker kept)
+  timeout, network, 5xx, 401, 400   nothing known: stays ended, marker kept
+```
+
+Whatever the answer, the session never becomes live again on the tablet: the
+end is decided before the POST is sent, and every path above maps the ended
+session through the ended set.
+
+`endedBy` is never required to be `DEVICE`. The close response is the
+confirmation for a session the technician or the backend closed first, for
+example when their `remote-session:closed` was lost or arrived while the POST
+was in flight. The tablet does not show who closed it in that case: the user
+pressed FINALIZAR, and that is what the idle screen reflects.
+
+`endedAt` and `endedBy` are now part of `RemoteSession` (lenient parsing like
+`connectedAt`). They are read only for the confirmation check and the log line;
+no screen depends on them.
+
+### Retries and the marker
+
+Unchanged from Prompt 37/38, and now safe in every case because a repeat is
+always a `200` for a session already closed:
+
+* the marker is written before the POST and cleared only by a confirming `200`
+  or by a successful `/current` that no longer returns that session live;
+* a pending close is sent again at most once per cue (socket back, application
+  start, realtime event, REINTENTAR) when `/current` still returns the session
+  live. A non-confirming `200` does not add a retry of its own;
+* a marker with `closeOwed: false` (`authorityLost`, Prompt 38) never produces a
+  POST, so a backend `SYSTEM` close is never turned into a `DEVICE` one;
+* a different session clears an old marker (a device has one live session at a
+  time) and is never addressed by the old close.
+
+### Compatibility
+
+* With a backend older than `f5b8a1c` a repeat answered `409`. The tablet maps
+  `404`/`409` to "re-read `/current`", which confirmed the end the moment the
+  session was no longer live, so old backends keep working.
+* The only behaviour change against the current backend is for answers it does
+  not produce: a `200` about another id or without `endedAt` used to be taken
+  as a confirmation (another id even cleared the marker of the ended session and
+  could put a live session from the close body on screen, suspended).
+
+### Seen on a device
+
+2026-11-20, T10A (`LSTT10M2026081504`, Android 16), debug build of this branch
+(`eac7464` + tests) installed as an update, backend `main` `f5b8a1c` (shared,
+PID 43164, `dist` built 09:35:01, untouched), reached through the Public dev
+tunnel port 3010 → `tool/realtime_harness/fault_relay.js` → 127.0.0.1:3000. Web
+console `remote_control_web` `main` `57e36aa`, release build served on
+`localhost:5173`, straight to 3000. PERMITIR and every MediaProjection dialog
+were answered by hand by the user; SOLICITAR, FINALIZAR and REINTENTAR on the
+tablet with `input tap`; no mobile-mcp, no UiAutomation, no `am force-stop`.
+Repeated device closes were sent by the relay as the tablet (`deviceClose`,
+with the tablet's own Device JWT, never printed); technician-side state read
+with `GET /remote-sessions/:id` from the console's origin. Times UTC; the
+tablet clock runs ~0.9 s ahead of the PC.
+
+```text
+A  FINALIZAR, session 893f4f23
+  14:00:46.917  ended on the tablet; signaling left .921, peer closed .922,
+                capture stopped 47.072
+  14:00:47.080  POST close (after the teardown, not before)
+  14:00:50.645  200 CLOSED endedBy DEVICE endedAt 14:00:48.300 -> confirmed
+
+B  repeat, same session, Device JWT, twice
+                200 CLOSED DEVICE 14:00:48.300 both times; tablet received
+                nothing; technician GET says the same
+
+C  lost response, session 3b4dc2d9 (relay loseCloseResponses 1)
+  14:20:31.040  POST close; backend CLOSED DEVICE 14:20:32.034, answer dropped
+  14:20:46.384  receiveTimeout -> "no se pudo confirmar el cierre", REINTENTAR
+  14:21:06.548  REINTENTAR: POST close
+  14:21:09.460  200 CLOSED DEVICE endedAt 14:20:32.034 (the original) ->
+                confirmed, marker cleared
+
+F  old closes during a new session, acc49686 ACTIVE
+                deviceClose 893f4f23 and 3b4dc2d9: 200 with their own original
+                closes; /current still acc49686 ACTIVE (device and technician);
+                tablet logged nothing; a remote tap afterwards completed
+
+D  technician closes while the device's POST is in flight, session acc49686
+  14:25:22.793  relay holds the device close 9 s
+  14:25:23.632  FINALIZAR: ended, capture stopped 23.735, POST 23.742
+  14:25:23.128  (PC clock) technician POST close (console origin) -> CLOSED TECHNICIAN
+                endedAt 14:25:24.959
+  14:25:27.259  remote-session:closed reaches the tablet: already ended, nothing
+                more to do
+  14:25:34.491  the held POST answers 200 endedBy TECHNICIAN 14:25:24.959 ->
+                confirmed. Repeat: same.
+
+E  SYSTEM, three times
+  745c6df7, 0afab5b6  the MediaProjection dialog was not accepted within the
+                backend's CONNECTING timeout: remote-session:closed SYSTEM,
+                everything withdrawn, a capture granted afterwards abandoned
+                ("stopped while starting"). Repeats: 200 SYSTEM with the
+                original endedAt (14:28:47.991, 14:32:52.674)
+  a255d8d5 (controlled) ACTIVE; relay blockDevicesMs + failCurrentMs 150 s
+  14:34:44.288  suspended; re-reads 503
+  14:35:43.602  backend CLOSED SYSTEM (60.6 s after the socket went)
+  14:35:47.513  FINALIZAR on the suspended tablet (it could not know)
+  14:35:49.399  its POST: 200 endedBy SYSTEM 14:35:43.602 -> confirmed, although
+                the follow-up /current still failed (503)
+  14:36:33      socket back: /current null, idle
+```
+
+After every end: `dumpsys media_projection` null, `TouchStatesByDisplay: <no
+displays touched>`, accessibility enabled and bound, credentials kept, one
+Device JWT for the whole run. The relay saw a device-initiated close only after
+FINALIZAR or REINTENTAR (A, C ×2, D, E controlled); none for the sessions the
+backend closed by itself.
+
+Not shown on a device: a `200` that does not confirm (another id, still live,
+no `endedAt`) — the backend does not produce one, so it is covered by
+`test/features/remote_session/presentation/remote_session_idempotent_close_test.dart`
+and `test/app/irreversible_session_end_test.dart` only; a restart with a close
+pending; a 409 (needs an inconsistent support request); a DRAG during
+FINALIZAR (unit/app tests, and Prompt 37 on the device).
+
+### Residual risks
+
+* **Idle text after a SYSTEM close.** "El servidor cerró la asistencia porque se
+  perdió la conexión" is also shown when the backend closed a `CONNECTING`
+  session because the MediaProjection dialog was not answered in time (E). The
+  backend gives no reason; the proposed `endReason` (Prompt 38) would fix it.
+* **A held/lost close blocks re-reads for up to the receive timeout (15 s).**
+  While a close is in flight no sync is started, so a new session is noticed at
+  most that much later. Control is never affected.
+* **A non-confirming `200` keeps the session ended until a cue.** By design:
+  one read, then the normal cues. With a backend that kept answering it, the
+  marker would never clear and the backend would keep the session live until
+  its own close.

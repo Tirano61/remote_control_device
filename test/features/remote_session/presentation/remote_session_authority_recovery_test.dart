@@ -149,7 +149,7 @@ void main() {
       await settle();
       expect(endedSessionStore.closeOwed, isTrue);
 
-      repository.closeResult = const Ok(closedSession);
+      repository.closeResult = Ok(closedSession);
       repository.currentQueue.add(activatedRemoteSession);
       repository.currentResult = noRemoteSession;
       await channel(up: true);

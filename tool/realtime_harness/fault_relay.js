@@ -1,5 +1,6 @@
 /*
- * Fault relay for physical tests of the /devices recovery (Prompts 35–36).
+ * Fault relay for physical tests of the /devices recovery (Prompts 35–36),
+ * the authority recovery (Prompt 38) and the idempotent close (Prompt 39).
  *
  * Sits between a tablet and a real backend it never modifies:
  *
@@ -34,10 +35,28 @@
  *   failCurrentMs ms     GET /device/remote-sessions/current is answered 503
  *                        for ms without reaching the backend; everything else
  *                        passes (Prompt 38)
+ *   loseCloseResponses n the next n POST /device/remote-sessions/:id/close are
+ *                        forwarded to the backend, which closes the session,
+ *                        and the answer is read here and then dropped: the
+ *                        tablet's connection is destroyed instead. "The POST
+ *                        arrived, the response was lost" (Prompt 39)
+ *   holdCloseMs ms       the next device close is held ms before it is
+ *                        forwarded, so the other side can close first while it
+ *                        is in flight (Prompt 39)
  *
- * Privacy: request and response bodies are never logged. A Device JWT is only
- * ever recorded as `tok#n`, the order in which this relay first saw it; the
- * mapping lives in memory and dies with the process.
+ * Diagnostic requests made AS the tablet, with the last Device JWT this relay
+ * saw on a /device/ request (Prompt 39). The token is kept in memory only and
+ * never printed or returned; the answer is summarised like a device close:
+ *
+ *   deviceClose "<id>"   POST /device/remote-sessions/<id>/close
+ *   deviceCurrent true   GET /device/remote-sessions/current
+ *
+ * Privacy: request and response bodies are never logged, with one exception:
+ * the answer to a device close (and to the two diagnostics above) is
+ * summarised as its id, status, endedBy and endedAt - operational fields of the
+ * contract, nothing secret. A Device JWT is only ever recorded as `tok#n`, the
+ * order in which this relay first saw it; the mapping lives in memory and dies
+ * with the process.
  *
  * Needs the `ws` package (remote_control_backend's node_modules has it):
  *
@@ -77,7 +96,12 @@ const faults = {
   cutUntil: 0,
   blockDevicesUntil: 0,
   failCurrentUntil: 0,
+  loseCloseResponses: 0,
+  holdCloseMs: 0,
 };
+// The Authorization header of the last /device/ request, for the diagnostics.
+// Never logged, never returned.
+let lastDeviceAuthorization = null;
 const events = [];
 const t0 = Date.now();
 const log = (e) => {
@@ -97,6 +121,47 @@ const bearer = (headers) =>
   label(String(headers.authorization ?? '').replace(/^Bearer /, ''));
 
 const cut = () => Date.now() < faults.cutUntil;
+
+const CLOSE_PATH = /^\/device\/remote-sessions\/([^/?]+)\/close$/;
+
+/** id, status, endedBy, endedAt of a RemoteSession body; nothing else. */
+const summarise = (buffer) => {
+  try {
+    const json = JSON.parse(buffer.toString('utf8'));
+    const s = json && typeof json === 'object' && 'remoteSession' in json ? json.remoteSession : json;
+    if (s === null) return { remoteSession: null };
+    if (!s || typeof s !== 'object') return { body: typeof json };
+    if (!('id' in s)) return { code: s.code ?? null, statusCode: s.statusCode ?? null };
+    return { id: s.id, status: s.status, endedBy: s.endedBy, endedAt: s.endedAt };
+  } catch (_) {
+    return { body: 'unparsed' };
+  }
+};
+
+/** A request to the backend as the tablet. Resolves to its summary. */
+const asDevice = (method, path) =>
+  new Promise((resolve) => {
+    if (!lastDeviceAuthorization) return resolve({ error: 'no Device JWT seen yet' });
+    const auth = lastDeviceAuthorization;
+    const up = http.request(
+      {
+        hostname: UPSTREAM.hostname,
+        port: UPSTREAM.port,
+        path,
+        method,
+        headers: { authorization: auth, 'content-type': 'application/json', host: UPSTREAM.host },
+      },
+      (upRes) => {
+        const chunks = [];
+        upRes.on('data', (c) => chunks.push(c));
+        upRes.on('end', () =>
+          resolve({ http: upRes.statusCode, auth: label(auth.replace(/^Bearer /, '')), ...summarise(Buffer.concat(chunks)) }),
+        );
+      },
+    );
+    up.on('error', (e) => resolve({ error: e.code }));
+    up.end();
+  });
 const liveSockets = new Set(); // raw TCP sockets of the relay server
 const deviceSockets = new Set(); // { client, upstream } for /devices
 
@@ -131,7 +196,58 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  if (req.url.startsWith('/device/') && req.headers.authorization) {
+    lastDeviceAuthorization = String(req.headers.authorization);
+  }
+  const closeMatch = req.method === 'POST' ? CLOSE_PATH.exec(req.url) : null;
   const headers = { ...req.headers, host: UPSTREAM.host };
+
+  if (closeMatch) {
+    const hold = faults.holdCloseMs;
+    faults.holdCloseMs = 0;
+    const lose = faults.loseCloseResponses > 0;
+    if (lose) faults.loseCloseResponses--;
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      if (hold > 0) log({ ev: 'close-held', path: req.url, ms: hold, auth: bearer(req.headers) });
+      setTimeout(() => {
+        const up = http.request(
+          { hostname: UPSTREAM.hostname, port: UPSTREAM.port, path: req.url, method: req.method, headers },
+          (upRes) => {
+            const body = [];
+            upRes.on('data', (c) => body.push(c));
+            upRes.on('end', () => {
+              const buffer = Buffer.concat(body);
+              const entry = {
+                ev: 'device-close',
+                path: req.url,
+                status: upRes.statusCode,
+                auth: bearer(req.headers),
+                answer: summarise(buffer),
+              };
+              if (lose) {
+                req.socket.destroy();
+                log({ ...entry, note: 'answer dropped by relay (loseCloseResponses)' });
+                return;
+              }
+              res.writeHead(upRes.statusCode, upRes.headers);
+              res.end(buffer);
+              log(entry);
+            });
+          },
+        );
+        up.on('error', (e) => {
+          res.writeHead(502);
+          res.end();
+          log({ ev: 'device-close', path: req.url, status: 502, error: e.code });
+        });
+        up.end(Buffer.concat(chunks));
+      }, hold);
+    });
+    return;
+  }
+
   const up = http.request(
     { hostname: UPSTREAM.hostname, port: UPSTREAM.port, path: req.url, method: req.method, headers },
     (upRes) => {
@@ -277,6 +393,20 @@ http
         }
         if (typeof cmd.failCurrentMs === 'number') {
           faults.failCurrentUntil = Date.now() + cmd.failCurrentMs;
+        }
+        if (typeof cmd.loseCloseResponses === 'number') faults.loseCloseResponses = cmd.loseCloseResponses;
+        if (typeof cmd.holdCloseMs === 'number') faults.holdCloseMs = cmd.holdCloseMs;
+        if (typeof cmd.deviceClose === 'string' || cmd.deviceCurrent === true) {
+          const isClose = typeof cmd.deviceClose === 'string';
+          if (isClose && !/^[0-9a-f-]{36}$/i.test(cmd.deviceClose)) return reply(400, { error: 'not a UUID' });
+          const path = isClose
+            ? `/device/remote-sessions/${cmd.deviceClose}/close`
+            : '/device/remote-sessions/current';
+          asDevice(isClose ? 'POST' : 'GET', path).then((answer) => {
+            log({ ev: 'diagnostic', method: isClose ? 'POST' : 'GET', path, ...answer });
+            reply(200, answer);
+          });
+          return;
         }
         if (typeof cmd.blockDevicesMs === 'number') {
           faults.blockDevicesUntil = Date.now() + cmd.blockDevicesMs;
