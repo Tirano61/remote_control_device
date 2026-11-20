@@ -55,6 +55,11 @@ import org.webrtc.VideoSink
  * The last frame before the screen goes quiet is sent a second time, once, by asking the helper
  * to deliver its texture again — see [ScreenCaptureSettleFrame].
  *
+ * Capturing and transmitting are separate: every frame goes through a gate first
+ * ([ScreenCaptureTransmission], [setTransmitting]) that starts closed and that Dart opens only
+ * while the remote session's authority is confirmed. Closed, the projection keeps running and
+ * nothing reaches WebRTC.
+ *
  * Threads: [startCapture] and [stopCapture] are called from the main thread; frames, the
  * settle frame, the display listener and the projection callback all run on the
  * [SurfaceTextureHelper]'s thread, which is the only thread that reads or moves [framing]. A
@@ -81,6 +86,7 @@ class ScreenCapturer(
     private var framing: ScreenCaptureFraming? = null
     private var geometryRefresh: ScreenCaptureGeometryRefresh? = null
     private var settleFrame: ScreenCaptureSettleFrame? = null
+    private val transmission = ScreenCaptureTransmission()
 
     private val stopped = AtomicBoolean(false)
     private var mismatchLogged = false
@@ -214,6 +220,9 @@ class ScreenCapturer(
         if (stopped.get()) return
         val framing = framing ?: return
         val settleFrame = settleFrame ?: return
+        // Before anything else looks at the frame: a withheld frame is not a frame the settle
+        // logic should know about, since it never went out.
+        if (!transmission.admit()) return
 
         val buffer = frame.buffer
         val side = framing.virtualDisplaySide
@@ -262,6 +271,7 @@ class ScreenCapturer(
         ThreadUtils.invokeAtFrontUninterruptibly(
             helper.handler,
             Runnable {
+                transmission.stop()
                 settleFrame?.stop()
                 helper.stopListening()
                 displayManager.unregisterDisplayListener(displayListener)
@@ -271,6 +281,42 @@ class ScreenCapturer(
                 Log.i(TAG, "capture stopped")
             },
         )
+    }
+
+    /**
+     * Opens or closes the transmission gate. Returns false when the capture is already stopped,
+     * which leaves nothing to transmit either way.
+     *
+     * Run on the helper's thread and waited for: once this returns, a frame being processed
+     * there has finished, and every frame after it sees the new state. A frame that was already
+     * past the gate when it closed belongs to the authorised period. Called from the main
+     * thread; the helper's thread is disposed only from the main thread too
+     * ([ScreenCaptureSession.stop]), so it is alive for as long as this waits.
+     */
+    fun setTransmitting(open: Boolean): Boolean {
+        if (stopped.get() || !::helper.isInitialized) return false
+        var applied = false
+        ThreadUtils.invokeAtFrontUninterruptibly(
+            helper.handler,
+            Runnable {
+                if (stopped.get()) return@Runnable
+                applied = true
+                val change = (if (open) transmission.resume() else transmission.suspend())
+                    ?: return@Runnable
+                if (change.refresh) settleFrame?.redeliverNow()
+                // Counts only: never a frame, never a size that is not already logged.
+                Log.i(
+                    TAG,
+                    if (change.transmitting) {
+                        "transmission resumed (withheld while suspended: ${change.withheldBefore})"
+                    } else {
+                        "transmission suspended (admitted: ${change.admittedBefore}, " +
+                            "withheld: ${change.withheldBefore})"
+                    },
+                )
+            },
+        )
+        return applied
     }
 
     /** The size follows the display; there is nothing to change from outside. */

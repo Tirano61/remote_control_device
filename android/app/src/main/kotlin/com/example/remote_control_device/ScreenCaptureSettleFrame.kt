@@ -97,6 +97,22 @@ internal class ScreenCaptureSettleFrame(
         )
     }
 
+    /**
+     * Asks for the texture on screen now to be delivered again, at once, and lets that delivery
+     * through like a settle frame. Used when transmission resumes after a suspension
+     * ([ScreenCaptureTransmission]): a still screen produces no next frame, and the technician
+     * would otherwise go on looking at the image from before the suspension.
+     *
+     * If frames were held back meanwhile, the texture is newer than anything sent and arrives
+     * with a new timestamp, so it goes out as a real frame and starts the usual wait. If nothing
+     * changed, it is the last frame sent, repeated once. Nothing when stopped.
+     */
+    fun redeliverNow() {
+        if (stopped) return
+        redeliveryRequested = true
+        requestRedelivery()
+    }
+
     /** Cancels the wait. Nothing is sent afterwards, whatever is still on its way. Idempotent. */
     fun stop() {
         stopped = true

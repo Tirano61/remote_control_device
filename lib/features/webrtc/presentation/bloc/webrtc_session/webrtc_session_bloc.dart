@@ -91,6 +91,19 @@ part 'webrtc_session_state.dart';
 /// The accessibility service being enabled is not on that list. It stays enabled
 /// between assistances, so it says nothing about whether the user has authorised
 /// anyone today.
+///
+/// The screen has a gate of its own, separate from the capture: frames reach the
+/// technician only while
+///
+/// ```text
+/// the capture belongs to the live remote session
+/// the tablet can confirm that session's authority right now
+/// Android has not taken the screen away in it
+/// ```
+///
+/// Losing any of them keeps every new frame on the tablet at once, while
+/// MediaProjection and its consent stay for the recovery; see
+/// [_syncScreenTransmission].
 class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   WebRtcSessionBloc({
     required WebRtcPeerConnectionFactory peerConnectionFactory,
@@ -110,6 +123,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
        super(const WebRtcIdle()) {
     on<WebRtcScreenCaptureEndedByPlatform>(_onScreenCaptureEndedByPlatform);
     on<_WebRtcOrphanCaptureExpired>(_onOrphanCaptureExpired);
+    on<_WebRtcScreenTransmissionFailed>(_onScreenTransmissionFailed);
     _platformStopSubscription = _screenCapture.endedByPlatform.listen(
       (remoteSessionId) =>
           add(WebRtcScreenCaptureEndedByPlatform(remoteSessionId)),
@@ -284,6 +298,11 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   /// assistance that ends meanwhile abandon the request instead of finding a
   /// capture running for it later.
   String? _screenCaptureRequestId;
+
+  /// Whether frames of the running capture may reach the technician, as last
+  /// asked of the capture client. `false` whenever no capture runs: a new one
+  /// starts with nothing transmitted. See [_syncScreenTransmission].
+  bool _screenTransmissionAllowed = false;
 
   // ----------------------------------------------------------------- offer
 
@@ -564,6 +583,10 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
         // which remote session it belongs to.
         _screenCaptureSessionId = sessionId;
         _screenCaptureStatus = ScreenCaptureStatus.active;
+        // Decided now, from what is true now — not from what was true when the
+        // offer arrived, which may be a person's dialog ago. A new capture
+        // transmits nothing until this says so; a reused one is told again.
+        _syncScreenTransmission(capturedAnew: true);
 
         if (generation != _generation) {
           // The negotiation was replaced while the user was answering the
@@ -617,6 +640,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     _screenCaptureSessionId = null;
     _captureAttachedGeneration = null;
     _screenCaptureStatus = ScreenCaptureStatus.idle;
+    _screenTransmissionAllowed = false;
     try {
       await _screenCapture.stop();
     } catch (_) {
@@ -841,6 +865,9 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
       _activeRemoteSessionId = null;
     }
     if (!_isControlAuthorized) _commandQueue.discardPending();
+    // And the screen stops reaching anyone, before the peer and the capture
+    // are taken down.
+    _syncScreenTransmission();
 
     // 2. The assistance this peer connection belongs to is over, or it is a
     // different assistance now. Either way nothing of the old one may survive:
@@ -884,23 +911,99 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     if (!_isControlAuthorized) _commandQueue.discardPending();
   }
 
-  /// Recorded and nothing more. Losing it does not touch a negotiation already
-  /// under way — a recovery that was accepted has already closed the old peer,
-  /// and the new one is held exactly as the old one would have been: kept
-  /// through the suspension's grace period, obeying nothing, and taken down
-  /// with the session if the grace runs out. That is RemoteSessionBloc's
-  /// decision, and it reaches here as the live session going away.
+  /// Decides whether the screen is transmitted, and nothing else. Losing it
+  /// does not touch a negotiation already under way — a recovery that was
+  /// accepted has already closed the old peer, and the new one is held exactly
+  /// as the old one would have been: kept through the suspension's grace
+  /// period, obeying nothing, sending no frame, and taken down with the session
+  /// if the grace runs out. That is RemoteSessionBloc's decision, and it
+  /// reaches here as the live session going away.
+  ///
+  /// Synchronous on purpose: the frames are held back from the moment the
+  /// event is handled, before anything else is awaited.
   Future<void> _onAuthorityChanged(
     WebRtcRemoteSessionAuthorityChanged event,
     Emitter<WebRtcSessionState> emit,
   ) async {
     _confirmedRemoteSessionId = event.remoteSessionId;
+    _syncScreenTransmission();
   }
 
   bool get _isControlAuthorized =>
       _activeRemoteSessionId != null &&
       _activeRemoteSessionId == _negotiationSessionId &&
       _negotiationSessionId != _screenRevokedSessionId;
+
+  // ------------------------------------------------------ screen transmission
+
+  /// Whether the running capture's frames may reach the technician right now.
+  ///
+  /// Read from the session the *capture* belongs to, not from a peer
+  /// connection: the gate sits on the Android side between MediaProjection and
+  /// the encoder, so it holds for every sender the track is on — the current
+  /// peer, one being replaced, one still CONNECTED that the web gave up on.
+  /// `CONNECTING` counts as well as `ACTIVE`: the technician sees the screen
+  /// before activating, as always, but only with the session confirmed.
+  bool get _mayTransmitScreen {
+    final sessionId = _screenCaptureSessionId;
+    return sessionId != null &&
+        sessionId == _liveRemoteSessionId &&
+        sessionId == _confirmedRemoteSessionId &&
+        sessionId != _screenRevokedSessionId;
+  }
+
+  /// Brings the capture's transmission in line with [_mayTransmitScreen].
+  ///
+  /// Called synchronously from every handler that moves one of its inputs, and
+  /// it decides from the current fields alone. So a late callback — a read, an
+  /// offer, an answer, a peer's state — can never reopen it: it would need the
+  /// authority confirmed, which only the coordinator sets. Revocation always
+  /// wins because nothing else can open it.
+  ///
+  /// The client call is not awaited, and does not need to be: calls reach the
+  /// platform in the order they are made, so the last one made is the one that
+  /// holds. [capturedAnew] sends the decision even when it has not changed,
+  /// for a capture that has just been started or handed back.
+  void _syncScreenTransmission({bool capturedAnew = false}) {
+    final sessionId = _screenCaptureSessionId;
+    if (sessionId == null) {
+      _screenTransmissionAllowed = false;
+      return;
+    }
+    final allowed = _mayTransmitScreen;
+    if (allowed == _screenTransmissionAllowed && !capturedAnew) return;
+    if (allowed != _screenTransmissionAllowed) {
+      _log(
+        allowed
+            ? 'screen transmission resumed for $sessionId'
+            : 'screen transmission suspended for $sessionId: its authority is '
+                  'not confirmed',
+      );
+    }
+    _screenTransmissionAllowed = allowed;
+    unawaited(
+      _screenCapture.setTransmitting(allowed).then((applied) {
+        if (!applied && !isClosed) {
+          add(_WebRtcScreenTransmissionFailed(sessionId));
+        }
+      }),
+    );
+  }
+
+  /// The platform could not hold the frames back, or let them through; the
+  /// client has stopped the capture rather than leave it in doubt. Recorded as
+  /// a failed screen. The assistance carries on without it, as it does when
+  /// the capture cannot start.
+  Future<void> _onScreenTransmissionFailed(
+    _WebRtcScreenTransmissionFailed event,
+    Emitter<WebRtcSessionState> emit,
+  ) async {
+    if (_screenCaptureSessionId != event.remoteSessionId) return;
+    _log('screen capture stopped: its transmission could not be changed');
+    await _stopScreenCapture();
+    _screenCaptureStatus = ScreenCaptureStatus.failed;
+    if (!isClosed) emit(_restate());
+  }
 
   // ----------------------------------------------------- screen withdrawn
 
@@ -935,6 +1038,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     _commandQueue.discardPending();
     _screenCaptureSessionId = null;
     _captureAttachedGeneration = null;
+    _screenTransmissionAllowed = false;
     _screenCaptureStatus = ScreenCaptureStatus.stoppedBySystem;
     _log('screen capture stopped by Android for $sessionId: control withdrawn');
     // Said before anything is awaited: nothing may go on reading "sharing".

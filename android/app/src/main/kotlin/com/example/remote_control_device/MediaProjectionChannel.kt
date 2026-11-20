@@ -23,6 +23,10 @@ import io.flutter.plugin.common.MethodChannel
  *     -> startScreenCapture ... stopScreenCapture -> stopMediaProjectionForegroundService
  * ```
  *
+ * In between, `setScreenCaptureTransmission` opens or closes the running capture's
+ * transmission gate (a new capture starts closed); see [ScreenCaptureTransmission].
+ * Which state it should be in is Dart's decision.
+ *
  * What it does hold is what cannot cross the boundary: the projection grant (between the
  * dialog and the capture, never longer) and the one running capture.
  *
@@ -100,6 +104,25 @@ class MediaProjectionChannel(
                 result.success(null)
             }
 
+            SET_TRANSMISSION_METHOD -> {
+                val trackId = call.argument<String>(TRACK_ID)
+                val transmitting = call.argument<Boolean>(TRANSMITTING)
+                if (trackId == null || transmitting == null) {
+                    result.error(TRANSMISSION_FAILED, BAD_ARGUMENTS, null)
+                } else {
+                    try {
+                        // false: no such capture any more, or it is stopping. Either way it
+                        // transmits nothing, which is not a failure.
+                        val applied = capture.ifRunning(trackId) {
+                            it.setTransmitting(transmitting)
+                        }
+                        result.success(applied ?: false)
+                    } catch (error: Exception) {
+                        result.error(TRANSMISSION_FAILED, error.javaClass.simpleName, null)
+                    }
+                }
+            }
+
             else -> result.notImplemented()
         }
     }
@@ -172,15 +195,21 @@ class MediaProjectionChannel(
         const val START_CAPTURE_METHOD = "startScreenCapture"
         const val STOP_CAPTURE_METHOD = "stopScreenCapture"
 
+        /** `{ "trackId": "<id>", "transmitting": <bool> }`. Answers whether it was applied. */
+        const val SET_TRANSMISSION_METHOD = "setScreenCaptureTransmission"
+
         /** Android -> Dart. `{ "trackId": "<id>" }`, after the capture was released. */
         const val STOPPED_BY_PLATFORM_METHOD = "screenCaptureStoppedByPlatform"
 
         private const val TRACK_ID = "trackId"
+        private const val TRANSMITTING = "transmitting"
         private const val NO_GRANT = "NO_GRANT"
+        private const val BAD_ARGUMENTS = "BAD_ARGUMENTS"
 
         private const val CONSENT_FAILED = "SCREEN_CAPTURE_CONSENT_FAILED"
         private const val START_FAILED = "FOREGROUND_SERVICE_START_FAILED"
         private const val STOP_FAILED = "FOREGROUND_SERVICE_STOP_FAILED"
         private const val CAPTURE_FAILED = "SCREEN_CAPTURE_FAILED"
+        private const val TRANSMISSION_FAILED = "SCREEN_CAPTURE_TRANSMISSION_FAILED"
     }
 }

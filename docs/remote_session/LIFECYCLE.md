@@ -231,8 +231,9 @@ socket up, and a GET /current that STARTED after it came up says ACTIVE
                                         room is joined only now
 socket drops                        ──> suspended at once (synchronous):
                                         commands refused with session_not_active,
-                                        queued ones dropped, a touch abandoned.
-                                        Peer, channel and screen kept.
+                                        queued ones dropped, a touch abandoned,
+                                        screen frames held back (Prompt 40).
+                                        Peer, channel and capture kept.
                                         Grace period starts (75 s).
                                         GET /current re-read with backoff
                                         2, 4, 8, 8... s, socket up or down
@@ -240,7 +241,8 @@ socket back                         ──> still suspended, NOT rejoined; GET s
                                         backoff starts over at 2 s
   GET says ACTIVE, socket up,
     read started after it came up   ──> confirmed again; grace and re-reads
-                                        cancelled; room joined. Commands sent
+                                        cancelled; room joined; screen frames
+                                        let through again. Commands sent
                                         while suspended were refused, not
                                         queued: none of them runs.
   GET says ACTIVE, socket down      ──> stays suspended (never confirms)
@@ -285,8 +287,9 @@ the device has no joined socket. The two clocks are never compared; no backend
 timestamp is read.
 
 * control does not depend on the window at all: it is suspended from the
-  tablet's first instant of doubt. The window only bounds how long the screen may
-  keep flowing to a peer the tablet cannot vouch for;
+  tablet's first instant of doubt, and since Prompt 40 so is the screen. The
+  window only bounds how long the capture and the peer are kept for a recovery
+  (see [Video during an authority loss](#video-during-an-authority-loss-prompt-40));
 * it is a backstop. While the backend can be reached it decides: the re-reads
   see its `SYSTEM` close (60 s after it noticed) at most one backoff step (8 s)
   plus a round trip later;
@@ -299,8 +302,9 @@ timestamp is read.
   fails, or by a read answering ACTIVE while the socket is down.
 
 Worst case for the screen after a backend close the tablet cannot hear and cannot
-read (backend unreachable): the tablet's own detection delay (up to ~45 s for a
-half-open connection) plus 75 s, against 45 s before. A technician console that
+read (backend unreachable): since Prompt 40, the tablet's own detection delay
+only (up to ~45 s for a half-open connection); from then on no frame leaves the
+tablet, and the capture itself stops at 75 s. A technician console that
 received `remote-session:closed` closes its peer anyway, which stops the capture
 20 s later (orphan window); seen in C2 below. For control: only the detection
 delay, as before.
@@ -333,7 +337,7 @@ itself stays for FINALIZAR or the technician.
 | ACTIVE, confirmed | Asistencia en curso | Control remoto: habilitado |
 | CONNECTING | Conectando con el técnico... | Control remoto: disponible cuando la asistencia esté activa |
 | socket down | Reconectando... | Control remoto: suspendido hasta confirmar con el servidor |
-| socket back, not reconciled | Verificando la asistencia... | Control remoto: suspendido hasta confirmar con el servidor |
+| socket back, not reconciled | Verificando la asistencia... + "Pantalla: en pausa hasta confirmar con el servidor" | Control remoto: suspendido hasta confirmar con el servidor |
 | grace expired | Asistencia interrumpida + "Se perdió la conexión con el servidor y la asistencia se detuvo por seguridad." + "Podrás solicitar una nueva asistencia cuando el servidor registre el cierre." No REINTENTAR | (no panel line: torn down) |
 | afterwards, or a re-read made while suspended found it gone | the request panel with "La asistencia anterior terminó durante una pérdida de conexión con el servidor." | (torn down) |
 | closed by the backend | Asistencia finalizada + who closed it | (torn down) |
@@ -698,6 +702,8 @@ What these runs do not show:
   while the backend would still accept a rejoin. It then sends nothing, so the
   backend still records `SYSTEM`.
 * **Screen exposure while unreachable** grew from 45 s to 75 s after detection.
+  Closed by Prompt 40: frames are held back from detection; only the capture
+  is kept for 75 s.
 * **Default grace assumed.** A backend configured with a longer grace makes the
   tablet give up first; with a shorter one the backend simply closes first.
 
@@ -861,3 +867,219 @@ FINALIZAR (unit/app tests, and Prompt 37 on the device).
   one read, then the normal cues. With a backend that kept answering it, the
   marker would never clear and the backend would keep the session live until
   its own close.
+
+## Video during an authority loss (Prompt 40)
+
+B3 of the Prompt 37 audit: with the session's authority suspended, control
+stopped at once but the screen kept reaching the technician for the whole
+recovery window.
+
+### Root cause
+
+Since Prompt 30 the suspension reached `WebRtcSessionBloc` only as the
+**active** and **confirmed** ids going `null`. The first gates commands, the
+second gates a recovery offer. Nothing gated the video track: the peer, the
+sender and the capture were deliberately kept for the recovery, so the encoder
+went on sending whatever the screen showed. The design said so ("the window only
+bounds how long the screen may keep flowing to a peer the tablet cannot vouch
+for"). B3 is that sentence measured.
+
+Reproduced on `main` (`b318237`), session `27a4e2e4`, socket blocked 30 s in the
+relay with REST up and WebRTC untouched, quick settings opened and closed with
+adb every 2 s:
+
+```text
+15:00:21.72  authority suspended (tablet log, PC clock); commands refused
+15:00:23-47  web: +226 frames decoded, 3.0 MB, 2-23 fps while the screen changed
+15:00:48-01:12 web: +50 frames, 100 KB (screen mostly still)
+15:01:12.86  socket back + REST ACTIVE: confirmed again
+             -> 278 new frames reached the technician during the suspension
+```
+
+### Capturing is not transmitting
+
+```text
+capture     MediaProjection -> virtual display -> SurfaceTexture -> onFrame
+transmit    onFrame -> [gate] -> VideoSource -> encoder -> RTP sender -> peer
+control     DataChannel -> RemoteSessionActive + confirmed -> Android
+```
+
+The fix puts a gate between the two first lines, on the Android side, before the
+encoder: `ScreenCaptureTransmission`, checked first in `ScreenCapturer.onFrame`.
+Closed, MediaProjection keeps running and the user's consent and notification
+stay, but no frame reaches libwebrtc: no encoder input, no RTP video.
+
+### Policy
+
+| Situation | Capture | Transmission | Commands |
+| --- | --- | --- | --- |
+| live session, authority confirmed (`CONNECTING` or `ACTIVE`) | running | **open** | `ACTIVE` only |
+| socket down | kept | **closed at once** (same handler that suspends) | refused |
+| REST failing | kept | closed | refused |
+| socket back, REST pending | kept | closed | refused |
+| REST confirms the same session | kept, no new dialog | **reopened**, current frame resent | obeyed again |
+| REST `null` / another session / `CLOSED` | stopped | closed | gone |
+| FINALIZAR (also while suspended) | stopped | closed first | gone |
+| `remote-session:closed` (TECHNICIAN or SYSTEM) | stopped | closed first | gone |
+| 75 s grace expired | stopped | closed (was already) | gone |
+| Android stopped the projection | released by Android | closed | withdrawn for the session |
+| a new session | a new capture, new dialog | starts **closed**; opened when confirmed | per its own state |
+
+`CONNECTING` with confirmed authority transmits, as before: the technician sees
+the screen before activating. Unconfirmed, nothing does.
+
+### Mechanism
+
+* **Native gate** (`ScreenCaptureTransmission`, `ScreenCapturer.setTransmitting`).
+  Starts **closed** for every capture. Switched on the `SurfaceTextureHelper`'s
+  thread and waited for, so once the call returns no frame after it passes; a
+  frame already past the gate belongs to the authorised period. Counts frames
+  admitted and withheld and logs them on each switch, never per frame.
+* **Channel**: `setScreenCaptureTransmission {trackId, transmitting}`, applied
+  only to the running capture with that id (`RunningScreenCapture.ifRunning`); a
+  late call for a replaced capture reaches nothing.
+* **Client** (`ScreenCaptureClient.setTransmitting`): one platform call per
+  change, in the order made; a refusal stops the capture (last resort) and
+  answers `false`, which the bloc records as a failed screen.
+* **Decision** (`WebRtcSessionBloc._syncScreenTransmission`): open exactly when
+  the capture's session is live, confirmed and not revoked by Android. Called
+  synchronously from the authority, live-session and capture handlers; it reads
+  the current fields only, so no late callback (a read, an answer, an old peer's
+  state) can reopen it. Only the coordinator sets "confirmed".
+* **Resume**: opening asks the helper to deliver the current texture again
+  (`ScreenCaptureSettleFrame.redeliverNow`). A still screen produces no next
+  frame, and the technician would otherwise keep the image from before the
+  suspension.
+
+### Alternatives considered
+
+| Option | Why not |
+| --- | --- |
+| `track.enabled = false` | libwebrtc's `VideoBroadcaster` turns each frame of a disabled track into a black frame of the same size: frames keep flowing and show when the screen changes |
+| `sender.replaceTrack(null)` | per sender: every new or replaced peer (recovery) needs the same treatment, and a stale generation could put the track back; it also needs the Dart adapter to hold senders |
+| `RTCRtpEncodingParameters.active = false` | per sender too, same generation problem |
+| stopping MediaProjection | Android 14+ needs a new consent dialog to capture again: no recovery without asking the user |
+| **gate at the source (chosen)** | one switch per capture, whatever peer or sender the track is on; no frame, not even black; consent kept; testable on the JVM and in Dart |
+
+### Consent and Android
+
+* The suspension never stops the projection, so a confirmed recovery resumes
+  without a dialog, on the same track.
+* A projection Android stopped (`onStop`) is not restarted: that session's
+  control stays withdrawn and a later confirmation reopens nothing.
+* A new session never inherits a capture: the old one is stopped when its
+  session stops being live, and the new one asks Android and starts closed.
+
+### UI
+
+Back online but not confirmed ("Verificando la asistencia..."), the screen line
+says *Pantalla: en pausa hasta confirmar con el servidor* instead of
+"compartiendo". While "Reconectando..." there is still no screen line (Prompt 30
+decision); the control line already says suspended.
+
+### Tests
+
+* JVM: `ScreenCaptureTransmissionTest` (12: starts closed, counts, idempotent
+  switches, stop is final, the whole frame path with the settle frame: nothing
+  sent while suspended, resume sends the newest image as a real frame or repeats
+  the last one once, no redelivery before any frame); `RunningScreenCaptureTest`
+  (+2: a change reaches only the capture it names).
+* Dart: `test/app/video_authority_suspension_test.dart` (22, every bloc and
+  coordinator real): the prompt's 20 cases plus a late read, a loss during the
+  consent dialog, a platform refusal and the bloc closing.
+  `media_projection_screen_capture_client_test.dart` (+7),
+  `flutter_webrtc_screen_media_test.dart` (+3), panel (+1).
+
+### Seen on a device
+
+2026-11-20, T10A (`LSTT10M2026081504`, Android 16), debug build of
+`fix/device-video-authority-suspension` against the shared backend (PID 43164,
+untouched) through the Public dev tunnel port 3010 →
+`tool/realtime_harness/fault_relay.js` → 127.0.0.1:3000. Web console
+(`remote_control_web` main `57e36aa`, release build on `localhost:5173`) straight
+to 3000, with `RTCPeerConnection` wrapped from Claude in Chrome to sample
+`inbound-rtp` once a second (frames received and decoded, bytes, packets, RTX).
+Screen changes during each suspension: quick settings expanded and collapsed by
+`cmd statusbar` every 2 s. Tablet clock +1.23 s from the PC; times below are PC
+time. PERMITIR and the MediaProjection dialog by the user; SOLICITAR and
+FINALIZAR with `input tap` on the app's own buttons; no mobile-mcp, no
+UiAutomation, no `am force-stop`.
+
+```text
+A  normal, session 7bc32341
+   15:15:49.77  capture started, gate opened 4 ms later (authority confirmed)
+   10 s of changes: +103 frames, 1.37 MB; remote tap-1 completed
+
+B  socket blocked 40 s, REST up
+   15:16:54.46  suspended; gate closed 3 ms later (native: admitted 249)
+   51 s: web +0 frames, +0 decoded (52 packets, one burst of 8.6 KB, no
+        frame assembled); tap rejected session_not_active;
+        projection 1, foreground service up
+C  15:17:45.28  socket back; 15:17:46.41 REST ACTIVE -> gate reopened
+        (native: withheld while suspended 758); no dialog, same peer
+   next 8 s: +80 frames, 1.16 MB; tap-3 completed
+
+D  socket 10 s + GET /current 503 for 35 s
+   15:18:53.61  suspended; 7 reads answered 503 by the relay
+   41 s: web +0 frames (9.2 KB RTX payload padding: retransmitted packets)
+   15:19:37.01  REST ACTIVE -> reopened (withheld 744)
+
+F  FINALIZAR during a 90 s block
+   15:20:16.36  suspended; 15:20:31.68 FINALIZAR tapped
+   14 s: web +0 frames, +0 bytes; peer closed; capture stopped;
+   close 200, endedBy DEVICE; socket back 15:21:51.86: /current empty,
+   no join, projection 0, foreground service gone
+
+G  new assistance d46b7d7a: PERMITIR and the MediaProjection dialog again,
+   a new capture, gate opened once confirmed
+
+E  SYSTEM close: socket blocked, REST up
+   16:02:08.23  suspended
+   59 s: web +0 frames, +0 bytes, +0 packets
+   16:03:08.952 backend CLOSED, endedBy SYSTEM
+   16:03:11.81  tablet re-read null: peer closed, capture stopped,
+                projection 0 (2.9 s after the backend)
+```
+
+After every end: `dumpsys media_projection` with no projection, only the
+accessibility service running, `TouchStatesByDisplay: <no displays touched>`,
+accessibility still enabled and bound, credentials kept.
+
+The packets seen during B and D are RTX. Measured in D (the RTX counters were
+added to the sampler after B): every packet was counted by
+`retransmittedPacketsReceived`, all with `retransmittedBytesReceived` 0
+(padding) except one burst of 9 225 bytes that `retransmittedBytesReceived`
+accounts for byte for byte: libwebrtc's bandwidth probing resends packets
+already sent. B shows the same shape (padding plus one 8 649-byte burst).
+`framesReceived` and `framesDecoded` did not move in either, so no image, new
+or old, was assembled.
+
+What these runs do not show:
+
+* a silent half-open cut, detected only by the ping timeout: every run closed
+  the socket gracefully;
+* the projection stopped by Android while suspended, a recovery offer while
+  suspended, a DRAG during the drop: unit and coordinator tests only;
+* the exact last frame before the gate closed: frames already in the encoder
+  when it closes still go out. B: none counted after the suspension instant;
+  D: one frame in the one-second sample that contains it, not attributable
+  either way.
+
+### Residual risks
+
+* **Detection delay.** The gate closes when the tablet notices; until then (up
+  to ~45 s for a half-open connection) frames flow, as control did before
+  Prompt 30. Unchanged by this fix.
+* **In-flight frames.** A frame already past the gate when it closes is
+  encoded and sent: at most the frames of the last few tens of milliseconds
+  before the suspension, all captured while authorised.
+* **RTX padding and probing** keep sending already-sent packets while the gate
+  is closed. They carry nothing the technician had not received; it is
+  libwebrtc's bandwidth estimation and not configurable from here.
+* **The web keeps the last image** received before the suspension on screen.
+  That is not new content; the console has no indicator for "paused" (a WEB
+  change, separate prompt, if wanted).
+* **Resume quality.** The first frame after a long suspension is a delta on the
+  encoder's old reference. The web asked for keyframes as needed (`pliCount`
+  +2 across D) and decoding resumed at once (D: 14 frames decoded in the
+  second after resuming); the image itself was not inspected.

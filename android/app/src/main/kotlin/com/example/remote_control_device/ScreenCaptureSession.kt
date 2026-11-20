@@ -29,6 +29,12 @@ class ScreenCaptureSession private constructor(
     private var stopped = false
 
     /**
+     * Lets the capture's frames reach WebRTC, or keeps them back, without stopping the
+     * projection. See [ScreenCapturer.setTransmitting]. A new capture starts with them kept back.
+     */
+    fun setTransmitting(open: Boolean): Boolean = !stopped && capturer.setTransmitting(open)
+
+    /**
      * Releases everything, in the order the pieces depend on each other. Idempotent.
      *
      * The track is forgotten by the plugin first, so nothing on the Dart side can resolve it
