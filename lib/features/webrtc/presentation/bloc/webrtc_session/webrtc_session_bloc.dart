@@ -141,18 +141,38 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     on<WebRtcControlMessageReceived>(_onControlMessageReceived);
   }
 
-  /// How long a running screen capture may outlive the peer connection that
-  /// carried it — after that connection FAILED, was CLOSED by the other end,
-  /// or was abandoned while negotiating — before it is stopped.
+  /// How long a running screen capture may wait, *inside its session's
+  /// signaling room*, for a peer connection to carry it again — after the one
+  /// that carried it FAILED, was CLOSED by the other end, or was abandoned
+  /// while negotiating — before it is stopped.
   ///
   /// Within the window a new offer for the same live session reuses the
   /// capture without asking the user again, which is what a technician whose
-  /// browser reconnects needs. After it, nobody is receiving the screen and
+  /// browser recovers needs. After it, nobody is receiving the screen and
   /// nobody has said they will: MediaProjection is stopped, and a later offer
-  /// goes through Android's dialog again. 20 s is a browser reload or an ICE
-  /// restart on the web side; anything slower is a new negotiation in all but
-  /// name, and deserves a new consent.
-  static const Duration defaultOrphanCaptureTimeout = Duration(seconds: 20);
+  /// goes through Android's dialog again.
+  ///
+  /// The window only runs while a recovery offer could actually reach this
+  /// device — while it is joined to the room of the capture's session. Out of
+  /// the room (the socket is down, or back but the session not yet confirmed)
+  /// no offer can arrive, so none is being waited for: the window is cancelled
+  /// and starts again, in full, when the device rejoins. That time out of the
+  /// room is bounded elsewhere — by the authority grace (75 s, after which the
+  /// tablet ends the session and the capture with it) and by the backend's
+  /// disconnect grace (60 s, after which it closes the session as SYSTEM).
+  /// Nothing is transmitted meanwhile: there is no peer to transmit to, and
+  /// the transmission gate is closed while the authority is suspended.
+  ///
+  /// Until Prompt 41 it was 20 s counted from the peer's failure, wherever the
+  /// device was. On the T10A a 5 s Wi-Fi cut (scenario B) lost the capture
+  /// that way although the recovery was authorised: the web's first recovery
+  /// offer left while the tablet was still out of the room and was lost, the
+  /// web only tries again once its own answer deadline (30 s) and the next
+  /// step of its schedule (5 s) have passed — 32 s after the tablet was back
+  /// in the room — and the window had run out at 20 s. 45 s covers that
+  /// second attempt: 30 s + 5 s + a REST read and the relay of the offer,
+  /// with margin.
+  static const Duration defaultOrphanCaptureTimeout = Duration(seconds: 45);
 
   static const String _loggerName = 'webrtc';
 
@@ -781,6 +801,9 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     Emitter<WebRtcSessionState> emit,
   ) async {
     _joinedRemoteSessionId = event.remoteSessionId;
+    // Joining or leaving the room moves the orphan window whether or not the
+    // state changes below.
+    _syncOrphanCaptureTimer();
     if (event.remoteSessionId != null) return;
 
     // Signaling went away. What that costs depends entirely on whether the two
@@ -1062,10 +1085,36 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   @override
   void onChange(Change<WebRtcSessionState> change) {
     super.onChange(change);
+    _syncOrphanCaptureTimer();
+  }
+
+  /// Whether a recovery offer for the running capture's session could reach
+  /// this device right now: it is joined to that session's signaling room.
+  bool get _inCaptureSessionRoom {
+    final sessionId = _screenCaptureSessionId;
+    return sessionId != null && _joinedRemoteSessionId == sessionId;
+  }
+
+  /// Runs the orphan window exactly while the capture has no receiver *and*
+  /// a new one could be offered — see [defaultOrphanCaptureTimeout]. Called
+  /// after every state change and whenever the room membership changes, which
+  /// does not always change the state.
+  void _syncOrphanCaptureTimer() {
     final sessionId = _screenCaptureSessionId;
     if (sessionId == null || _captureHasReceiver) {
       _orphanCaptureTimer?.cancel();
       _orphanCaptureTimer = null;
+      return;
+    }
+    if (!_inCaptureSessionRoom) {
+      if (_orphanCaptureTimer != null) {
+        _log(
+          'screen capture has no receiver and no offer can reach this device '
+          'out of the room: its window starts again on the rejoin',
+        );
+        _orphanCaptureTimer!.cancel();
+        _orphanCaptureTimer = null;
+      }
       return;
     }
     if (_orphanCaptureTimer != null) return;

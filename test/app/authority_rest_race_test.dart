@@ -42,6 +42,10 @@ import '../fakes/signaling_fakes.dart';
 import '../fakes/support_fakes.dart';
 import '../fakes/webrtc_fakes.dart';
 
+/// A third `RTCPeerConnection` of the web: another origin than [testSdp] and
+/// [testSecondOfferSdp].
+const String testThirdOfferSdp = 'v=0\r\no=- 88888 2 IN IP4 127.0.0.1\r\n';
+
 /// Prompt 41 (D1), end to end: what a late `/current` answer used to do to a
 /// recovery. Every bloc and coordinator is the real one; the network is faked
 /// and every remote-session read is held until the test answers it.
@@ -323,7 +327,7 @@ void main() {
       expect(joined(), isTrue);
       expect(client.joinedSessionIds, hasLength(joins + 1));
 
-      // 15 s into the 20 s the capture may stay without a receiver.
+      // Some time back in the room, well inside the capture's window.
       await elapse(const Duration(seconds: 15));
       final answers = client.sentAnswers.length;
       final peer = await webOffersAgain();
@@ -340,6 +344,65 @@ void main() {
       // Well past the orphan deadline: the capture has its receiver.
       await elapse(const Duration(seconds: 30));
       expect(screenCapture.isActive, isTrue);
+      expect(remoteSessionRepository.closedIds, isEmpty);
+    });
+
+    test('B on the T10A: the web\'s first recovery offer is lost while the '
+        'tablet is out of the room, its second one comes 32 s after the '
+        'rejoin, and it still finds the capture', () async {
+      await s2UntilTheSocketIsBack();
+      // The web saw its own peer fail and offered at once. The tablet was not
+      // in the room: the offer is dropped, and the web waits out its 30 s
+      // answer deadline.
+      final created = peerFactory.createCount;
+      await client.deliver(offerReceived(sdp: testSecondOfferSdp));
+      await settle();
+      expect(peerFactory.createCount, created);
+      // Out of the room for as long as it takes: no window runs meanwhile.
+      await elapse(const Duration(seconds: 30));
+      expect(screenCapture.isActive, isTrue);
+
+      await answer(1, activatedRemoteSession);
+      await answer(0, activatedRemoteSession);
+      expect(joined(), isTrue);
+
+      // 08:06:00.757 rejoin, 08:06:32.536 second offer on the T10A.
+      await elapse(const Duration(seconds: 32));
+      expect(screenCapture.isActive, isTrue);
+      await client.deliver(offerReceived(sdp: testThirdOfferSdp));
+      await settle();
+      expect(peerFactory.createCount, created + 1);
+      final channel = await connect(peerFactory.last);
+      expect(screenCapture.dialogs, [testRemoteSessionId], reason: 'no dialog');
+      expect(screenCapture.transmitting, isTrue);
+      expect(await tapRuns(channel, 'after B'), isTrue);
+    });
+
+    test('the window still ends a capture nobody takes: in the room, with the '
+        'session confirmed, and no offer for 45 s', () async {
+      await s2UntilTheSocketIsBack();
+      await answer(1, activatedRemoteSession);
+      await elapse(
+        WebRtcSessionBloc.defaultOrphanCaptureTimeout -
+            const Duration(milliseconds: 1),
+      );
+      expect(screenCapture.isActive, isTrue);
+      await elapse(const Duration(milliseconds: 1));
+      expect(screenCapture.isActive, isFalse);
+      // A later offer is a new consent.
+      await client.deliver(offerReceived(sdp: testThirdOfferSdp));
+      await settle();
+      expect(screenCapture.dialogs, [testRemoteSessionId, testRemoteSessionId]);
+    });
+
+    test('out of the room for good: the capture is not kept past the '
+        'authority grace', () async {
+      await s2UntilTheSocketIsBack();
+      await client.emit(const RealtimeDisconnected());
+      await settle();
+      await elapse(RemoteSessionBloc.defaultAuthorityGracePeriod);
+      expect(remoteSessionBloc.state, isA<RemoteSessionEndedLocally>());
+      expect(screenCapture.isActive, isFalse);
       expect(remoteSessionRepository.closedIds, isEmpty);
     });
 
