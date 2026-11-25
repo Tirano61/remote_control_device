@@ -43,6 +43,17 @@
  *   holdCloseMs ms       the next device close is held ms before it is
  *                        forwarded, so the other side can close first while it
  *                        is in flight (Prompt 39)
+ *   holdCurrentMs ms     the next GET /device/remote-sessions/current is
+ *                        forwarded at once, and the backend's answer is held
+ *                        here ms before it reaches the tablet: a read served
+ *                        now that answers after the reads made behind it, as
+ *                        the late answer of D1 did (Prompt 41). Keep it under
+ *                        the client's 15 s receive timeout
+ *
+ * Every GET /device/remote-sessions/current is numbered (`current#n`, in the
+ * order it reached the relay) and its answer summarised like a device close,
+ * with the moment it was sent back, so the order in which the tablet received
+ * the answers can be read from the log (Prompt 41).
  *
  * Diagnostic requests made AS the tablet, with the last Device JWT this relay
  * saw on a /device/ request (Prompt 39). The token is kept in memory only and
@@ -58,9 +69,13 @@
  * order in which this relay first saw it; the mapping lives in memory and dies
  * with the process.
  *
- * Needs the `ws` package (remote_control_backend's node_modules has it):
+ * Needs the `ws` package. Install it in a directory of its own
+ * (`npm install ws@8` in a scratch folder) and point NODE_PATH there. Do not
+ * load it from remote_control_backend/node_modules while that checkout is
+ * served by `nest start --watch`: reading that tree has coincided with the
+ * watcher restarting the shared backend (Prompts 35 and 37).
  *
- *   NODE_PATH=../remote_control_backend/node_modules node tool/realtime_harness/fault_relay.js
+ *   NODE_PATH=<scratch>/node_modules node tool/realtime_harness/fault_relay.js
  *
  * Env: RELAY_PORT (3010), CTL_PORT (3011), UPSTREAM (http://127.0.0.1:3000).
  */
@@ -98,7 +113,9 @@ const faults = {
   failCurrentUntil: 0,
   loseCloseResponses: 0,
   holdCloseMs: 0,
+  holdCurrentMs: 0,
 };
+let currentCount = 0;
 // The Authorization header of the last /device/ request, for the diagnostics.
 // Never logged, never returned.
 let lastDeviceAuthorization = null;
@@ -201,6 +218,42 @@ const server = http.createServer((req, res) => {
   }
   const closeMatch = req.method === 'POST' ? CLOSE_PATH.exec(req.url) : null;
   const headers = { ...req.headers, host: UPSTREAM.host };
+
+  if (isCurrentSession) {
+    const n = ++currentCount;
+    const hold = faults.holdCurrentMs;
+    faults.holdCurrentMs = 0;
+    const auth = bearer(req.headers);
+    log({ ev: 'current-in', n: `current#${n}`, auth, ...(hold > 0 ? { holdMs: hold } : {}) });
+    const up = http.request(
+      { hostname: UPSTREAM.hostname, port: UPSTREAM.port, path: req.url, method: req.method, headers },
+      (upRes) => {
+        const body = [];
+        upRes.on('data', (c) => body.push(c));
+        upRes.on('end', () => {
+          const buffer = Buffer.concat(body);
+          const answer = summarise(buffer);
+          if (hold > 0) log({ ev: 'current-held', n: `current#${n}`, status: upRes.statusCode, answer, ms: hold });
+          setTimeout(() => {
+            if (res.destroyed || req.socket.destroyed) {
+              log({ ev: 'current-out', n: `current#${n}`, note: 'tablet connection already gone' });
+              return;
+            }
+            res.writeHead(upRes.statusCode, upRes.headers);
+            res.end(buffer);
+            log({ ev: 'current-out', n: `current#${n}`, status: upRes.statusCode, answer, auth });
+          }, hold);
+        });
+      },
+    );
+    up.on('error', (e) => {
+      res.writeHead(502);
+      res.end();
+      log({ ev: 'current-out', n: `current#${n}`, status: 502, error: e.code });
+    });
+    req.pipe(up);
+    return;
+  }
 
   if (closeMatch) {
     const hold = faults.holdCloseMs;
@@ -396,6 +449,7 @@ http
         }
         if (typeof cmd.loseCloseResponses === 'number') faults.loseCloseResponses = cmd.loseCloseResponses;
         if (typeof cmd.holdCloseMs === 'number') faults.holdCloseMs = cmd.holdCloseMs;
+        if (typeof cmd.holdCurrentMs === 'number') faults.holdCurrentMs = cmd.holdCurrentMs;
         if (typeof cmd.deviceClose === 'string' || cmd.deviceCurrent === true) {
           const isClose = typeof cmd.deviceClose === 'string';
           if (isClose && !/^[0-9a-f-]{36}$/i.test(cmd.deviceClose)) return reply(400, { error: 'not a UUID' });
