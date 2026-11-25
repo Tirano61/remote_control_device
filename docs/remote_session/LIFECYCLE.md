@@ -277,6 +277,13 @@ A failure never upgrades: a confirmed session stays confirmed through a failed
 read only while the socket stays up (the channel that would carry a close is
 still there); a suspended one stays suspended.
 
+Read order (Prompt 41). Epochs say whether a read *may* confirm; they do not say
+whether its answer is newer than one already applied. Reads are also numbered
+when they leave, and an answer overtaken by a newer one never takes a
+confirmation away and never grants anything; an answer without the session
+still ends it when it proves the session over. See
+[Stale answers (Prompt 41)](#stale-answers-and-the-screen-after-a-micro-cut-prompt-41).
+
 ### Why 75 s, and when it starts
 
 `RemoteSessionBloc.defaultAuthorityGracePeriod` = 75 s =
@@ -306,17 +313,21 @@ read (backend unreachable): since Prompt 40, the tablet's own detection delay
 only (up to ~45 s for a half-open connection); from then on no frame leaves the
 tablet, and the capture itself stops at 75 s. A technician console that
 received `remote-session:closed` closes its peer anyway, which stops the capture
-20 s later (orphan window); seen in C2 below. For control: only the detection
-delay, as before.
+once the orphan window runs out (20 s until Prompt 41; since then 45 s, and only
+while the tablet is in the session's room); seen in C2 below. For control: only
+the detection delay, as before.
 
 ### Peer connection FAILED or CLOSED
 
 Not a backend matter, but the same principle: when the peer that carried the
 screen fails, is closed by the other end, or is abandoned mid-negotiation,
 control of it is gone with it (generation bumped, queue dropped, touch
-abandoned), and the capture is stopped after 20 s
-(`WebRtcSessionBloc.defaultOrphanCaptureTimeout`) unless a new offer for the
-same live session attaches it. The device never renegotiates by itself.
+abandoned), and the capture is stopped after
+`WebRtcSessionBloc.defaultOrphanCaptureTimeout` unless a new offer for the
+same live session attaches it. Since Prompt 41 that window is 45 s and runs
+only while the tablet is joined to the session's signaling room, starting again
+in full on every rejoin; see "Stale answers and the screen after a micro-cut (Prompt 41)" below.
+The device never renegotiates by itself.
 
 The web may also give up on its connection before this side notices, and
 offer from a new one while the tablet's peer still reads CONNECTED. That offer
@@ -580,7 +591,8 @@ tablet stopped it (75 s, authority lost)  nothing sent                    -> SYS
 backend: a side away > grace              automatic                       -> SYSTEM
 technician FINALIZAR                      POST /remote-sessions/:id/close -> TECHNICIAN
 Android stopped MediaProjection           session kept for FINALIZAR / technician
-irreversible WebRTC failure               session kept; capture stops after 20 s
+irreversible WebRTC failure               session kept; capture stops after 45 s
+                                          in the room (20 s before Prompt 41)
 ```
 
 The tablet never sends a close the user did not ask for. The cost: the
@@ -1083,3 +1095,233 @@ What these runs do not show:
   encoder's old reference. The web asked for keyframes as needed (`pliCount`
   +2 across D) and decoding resumed at once (D: 14 frames decoded in the
   second after resuming); the image itself was not inspected.
+
+## Stale answers and the screen after a micro-cut (Prompt 41)
+
+D1 of the BACKEND Prompt 35 audit, reproduced there as S2 on the T10A: a 5 s
+Wi-Fi cut during an `ACTIVE` session ended with Android asking for the screen
+again. Two defects were behind it; only the first was known when the prompt
+was written.
+
+### D1: an overtaken `/current` answer took the confirmation away
+
+`RemoteSessionBloc` handles events concurrently, so `/current` reads overlap:
+the re-read of a suspended session (Prompt 38) can still be on the wire when the
+socket's return causes another. Before this prompt `_adopt` applied every answer
+as it arrived, with `_authorityFor(epoch)` of the epoch the read *started* in.
+The order that broke S2:
+
+```text
+socket drops            suspended; room left; video held
+re-read #n leaves       (Wi-Fi still coming back; the request lingers)
+socket back             epoch moves; read #n+1 leaves
+#n+1 answers ACTIVE     confirmed; room joined again
+#n answers ACTIVE       _authorityFor(old epoch) = suspended   <- D1
+                        -> SignalingSessionEnded: the room is left again
+web's recovery offer    reaches a device that is not in the room: dropped
+web                     waits for its 30 s answer deadline
+capture                 20 s without a receiver: stopped -> new consent
+```
+
+The same happens with two reads of the same epoch answering in reverse order
+(an older `CONNECTING` taking `ACTIVE` back and, with it, command authority),
+and, worse, an older `ACTIVE` arriving after a newer "no session" brought a
+session the backend had closed back to life.
+
+### Freshness policy
+
+Every read is numbered when it leaves (`_readSequence`). For each session a
+read returned live, the tablet remembers the number reached when that answer
+arrived (`_knownSince`): every read numbered above it left after the backend
+already had the session. An answer is weighed by what it proves, not by when
+it arrives:
+
+```text
+the session held, live                  consistent: nothing changes. Authority is
+                                        taken away only by the socket dropping and
+                                        by a closure, never by a read about the
+                                        same session. The newest read may refresh
+                                        it, never move ACTIVE back to CONNECTING
+without the session held, from a read
+  numbered above _knownSince            proof it is over (CLOSED is terminal):
+                                        torn down at once, even if overtaken, and
+                                        recorded in _goneAtBackend
+  numbered at or below it               may predate the session: proves nothing.
+                                        The session is suspended (never confirmed
+                                        on that answer) and a fresh read decides
+a session in _goneAtBackend,
+  _closedRemotely or ended here, live   ignored or mapped to over: never live again
+overtaken (an answer newer than it
+  was already applied) and it would
+  grant something                       not applied; one fresh read, which grants
+                                        it if it holds
+the newest answer, anything else        applied as before (epoch rule unchanged)
+a failure overtaken by an answer        ignored
+```
+
+Granting is done only by the newest answer, and confirmation still needs the
+read to have started after the socket last came up, with the socket up now.
+Withdrawing is done by any answer that proves it. The fresh read made after an
+ambiguous answer leaves after the session is known, so its own answer is never
+ambiguous about it: this cannot loop.
+
+`CLOSED` and `null` are never discarded just for being late: if the read left
+after the session was known, the session is over whatever the order. A
+confirmed close of this device (`200 CLOSED` for that id) is the same proof:
+a read still on the wire that answers the session `ACTIVE` no longer flips the
+state from Idle back to ended-here, and no second close follows from it.
+FINALIZAR, `remote-session:closed` and the 75 s grace are unchanged and still
+win over any answer. A "no session" that may predate the session does not
+clear the FINALIZAR marker either: only a proving answer or the close confirms.
+
+### The screen: the orphan window only runs while an offer can arrive
+
+With D1 fixed, scenario B (below) still asked for MediaProjection again, for a
+reason independent of D1. The tablet's peer failed while it was out of the
+signaling room; the web's first recovery offer went out at the same moment and
+was lost (the device was not joined); the web only offers again when its own
+30 s answer deadline and the next step of its schedule (`[0, 5, 15, 30] s`) have
+passed, 32 s after the tablet was back in the room. The 20 s orphan window,
+counted from the failure, had already stopped the capture.
+
+`WebRtcSessionBloc.defaultOrphanCaptureTimeout` is now **45 s** and runs **only
+while the tablet is joined to the room of the capture's session**, the only time
+an offer can reach it. Leaving the room cancels it; rejoining starts it again
+in full. Out of the room the capture is held, with the transmission gate closed
+while the authority is suspended and no peer to transmit to, and that time is
+bounded elsewhere: the 75 s authority grace ends the session (and the capture),
+and the backend's 60 s grace closes it as `SYSTEM`. 45 s = the web's 30 s answer
+deadline + its 5 s step + a REST read and the relay of the offer, with margin.
+
+The 60 s and 75 s deadlines are unchanged. A new session never reuses a capture:
+the capture client hands back a running capture only for the same session id,
+and `WebRtcRemoteSessionChanged` stops it when its session is gone.
+
+### Tests
+
+* `test/features/remote_session/presentation/remote_session_stale_read_test.dart`
+  (24): every read is held by the fake (`holdReads`) and answered in the order
+  the test chooses, no clock. S2, normal and reverse order, new confirmation /
+  old suspension, new suspension / old confirmation, old socket against new,
+  same epoch (CONNECTING after ACTIVE, and an older read that knows more), REST
+  ACTIVE after FINALIZAR and after `remote-session:closed`, `null`, `CLOSED`,
+  503, timeout, consecutive cuts, retries of old generations, a later session,
+  the grace with only stale answers, and the revocations that must not be
+  ignored: an overtaken proving `null`, no resurrection, ambiguous `null`
+  settled both ways, a confirmed close, a FINALIZAR marker kept by an ambiguous
+  `null`. 11 of them fail on the previous bloc.
+* `test/app/authority_rest_race_test.dart` (12), every bloc and coordinator
+  real: the room stays joined after the late answer, the web's offer is
+  accepted, the same capture goes on the new peer without a dialog, video and
+  commands come back; B as seen on the T10A (first offer lost out of the room,
+  second 32 s after the rejoin); the window still ends a capture nobody takes;
+  out of the room for good ends at the grace; a replaced peer reports nothing;
+  consecutive cuts; an overtaken proof, a later offer, SYSTEM and FINALIZAR
+  during the recovery; a new assistance asks again. S2, the replaced peer,
+  consecutive cuts and FINALIZAR fail on the previous bloc; B fails on the
+  previous window.
+* `test/features/webrtc/presentation/webrtc_authority_loss_test.dart` (+2): the
+  window pauses out of the room and restarts in full; it covers the web's
+  second attempt.
+* One existing expectation changed: `video_authority_suspension_test` 9
+  expected ended-here right after a confirmed FINALIZAR because the fake's next
+  read still said `ACTIVE`; it is now Idle (not live either way).
+
+### Seen on a device
+
+T10A (`LSTT10M2026081504`), shared backend on :3000 untouched (same PID before
+and after), web console `main` (f88e9d3) served on `localhost:5173` in an
+isolated Chrome driven over CDP, which also sampled `inbound-rtp` every second.
+The tablet reached the backend through the dev tunnel's port 3010 and
+`tool/realtime_harness/fault_relay.js` (new `holdCurrentMs`, every `/current`
+numbered). Dart logs from the VM service; times relative to the cut, tablet
+clock converted (-0.06 s).
+
+```text
+A  session 93479e12          video, ACTIVE, tap on Android.
+B  5 s Wi-Fi, D1 fix only    suspended +0.37; Wi-Fi back +5.2; tablet peer FAILED
+   (APK abf939d)             +15.3 (20 s window starts); web offer +16.1, lost (not
+                             in the room); socket +19.9; confirmed +21.1; joined
+                             +21.4; capture STOPPED +35.4; web offer +53.2 ->
+                             Android dialog again. No stale answer this time: the
+                             second defect alone.
+B  5 s Wi-Fi, both fixes     session da1ddd06. Suspended +0.27; a re-read answered
+   (APK 6b20c7d)             ACTIVE at +15.6 with the socket down: stayed suspended;
+                             peer FAILED +16.7; web offer +16.0 lost; socket +18.8;
+                             confirmed +20.3; joined +20.6 (45 s window starts);
+                             web offer +53.0: "capture reused", no dialog; peer
+                             connected +55.2; video and tap back. Web frames
+                             27 -> 27 during the suspension.
+C  9 s Wi-Fi                 suspended +0.19; Wi-Fi back +9.2; peer FAILED +16.9;
+                             web offer +16.4 lost; socket +17.6; confirmed +19.8;
+                             joined +20.1; web offer +53.2: capture reused; peer
+                             connected +55.3; tap back. Frames 149 -> 149.
+D  relay: socket closed,     re-read current#17 left +2.0 (served +3.1, answer held
+   2.5 s block, next         12 s); socket +5.7; reconnection read current#18
+   /current answer held 12 s confirmed +8.2, joined +8.5; current#17 delivered
+                             +15.1: "read #13 overtaken: it repeats ..., nothing
+                             changes". No re-suspension, no signaling reset, gate
+                             not closed again; frames 174 -> 174 while suspended,
+                             then 177, 179 ... 189, 191 across the late answer.
+                             P2P stayed up throughout.
+E  3 relay cuts 7 s apart,   cut 1's held re-read arrived during cut 2's
+   each with a held read,    suspension: confirmed nothing. The reconnection read
+   then 3+4+3 s Wi-Fi        of cut 2's socket (killed by cut 3) arrived after cut
+                             3's confirmation: nothing changes. Wi-Fi: peer FAILED,
+                             socket back, confirmed, joined; web offer lost by
+                             0.33 s; next one 36.6 s after the rejoin: capture
+                             reused, video and tap back.
+F  FINALIZAR on the tablet   socket blocked 40 s by the relay. Ended here +0.12 s
+   during the suspension     after the tap, peer closed, capture stopped +0.21 s;
+                             POST close 200 CLOSED endedBy DEVICE; /current null
+                             before and after the socket came back; no rejoin.
+                             The held re-read answered before the tap (the poll
+                             of the script missed it): an ACTIVE arriving after
+                             FINALIZAR is covered by tests only.
+G  SYSTEM (two ways)         CONNECTING never shared (dialog unanswered): backend
+                             SYSTEM at 120 s; tablet withdrew at once and
+                             abandoned the capture request; the stale dialog,
+                             accepted later, started nothing ("capture start
+                             abandoned"). ACTIVE, socket blocked 100 s, REST up:
+                             frames 249 -> 249; backend SYSTEM 60.6 s after it
+                             saw the socket go; tablet's re-read null at +63.9
+                             (before its 75 s grace): peer and capture down; socket
+                             back at +110: null, no rejoin. endedBy SYSTEM.
+H  new assistance            session 735cf004: a new Android dialog, a new capture
+                             (not reused), video, ACTIVE, tap.
+```
+
+`endedBy` read from the backend afterwards: 93479e12 TECHNICIAN, da1ddd06
+DEVICE, 6073009b SYSTEM, 735cf004 SYSTEM.
+
+Compared with S2 (Prompt 35, before both fixes): capture lost at 36.3 s and a
+new consent; now B and C keep the same capture and recover at +55 s, with the
+room joined once per reconnection and never left by a late answer.
+
+### Residual risks
+
+* **The web's first recovery offer is usually lost** after a Wi-Fi cut: its peer
+  fails about when the tablet's does, before the tablet has rejoined, and the
+  backend relays into a room the tablet is not in. Recovery then waits for the
+  web's 30 s answer deadline + 5 s: ~53 s from the cut. A WEB change (offer
+  again when the device's join notice arrives, or a shorter answer deadline)
+  would cut that to seconds.
+* **The 45 s window is coupled to WEB's constants** (30 s deadline, 5 s step).
+  If both the first and the second offer are lost (outage over ~35 s after the
+  web's failure), the third attempt (+15 s) may miss the window.
+* **A rejoin restarts the window**: a socket that keeps flapping keeps a
+  capture without receiver alive longer; every rejoin needs a fresh REST
+  confirmation, and no frame leaves without a peer.
+* **An ambiguous "no session"** (a read that may predate the session) suspends
+  a confirmed session for one round trip and makes the device leave and rejoin
+  the room; an offer sent in that gap is lost. Only possible when two reads
+  overlap the creation of a session.
+* **The proof that a session is over** assumes `/current` reflects one ordered
+  history (one backend, one database). With read replicas a stale "no session"
+  could end a live session early: failing safe, never granting.
+* **An overtaken `ACTIVE` after an unconfirmed FINALIZAR** no longer causes an
+  extra close; the owed close is sent again on the next cue that makes a fresh
+  read, as before.
+* **Unchanged:** detection of a half-open socket (up to ~45 s), the backend
+  heartbeat and the connectivity watcher proposed by the audit, out of scope
+  for this prompt.

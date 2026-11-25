@@ -82,8 +82,17 @@ backend itself sends:
 | `closeDevices: true` | closes every open `/devices` WebSocket gracefully; behind a dev tunnel the tablet notices in seconds instead of after the ping timeout |
 | `blockDevicesMs: ms` | `closeDevices`, then every WebSocket upgrade is answered `503` for *ms* while HTTP keeps passing: socket down, REST up |
 | `failCurrentMs: ms` | `GET /device/remote-sessions/current` is answered `503` for *ms* without reaching the backend; everything else passes |
+| `holdCurrentMs: ms` | the next `GET /device/remote-sessions/current` is served by the backend at once and its answer held *ms* before it reaches the tablet, so it arrives after the reads made behind it (D1, Prompt 41). Keep it under the client's 15 s receive timeout |
 
-Bodies are never logged, and tokens appear only as `tok#n`. Run it with
-`NODE_PATH=../remote_control_backend/node_modules node tool/realtime_harness/fault_relay.js`.
+Every `GET /device/remote-sessions/current` is logged as `current-in` and
+`current-out` with a number (`current#n`) and the answer's id and status, so
+the order in which the tablet received the answers can be read from `/log`.
+
+Bodies are never logged, and tokens appear only as `tok#n`. It needs the `ws`
+package, installed in a folder of its own (`npm install ws@8` in a scratch
+directory): `NODE_PATH=<that folder>/node_modules node tool/realtime_harness/fault_relay.js`.
+Do not load it from `remote_control_backend/node_modules` while that checkout is
+served by `nest start --watch`; reading that tree has coincided with the watcher
+restarting the shared backend.
 The tablet needs a build whose `BACKEND_BASE_URL` points at the forwarded relay
 port.

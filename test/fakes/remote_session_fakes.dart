@@ -132,9 +132,24 @@ class FakeRemoteSessionRepository implements RemoteSessionRepository {
   /// a response still on the wire while other things happen.
   Completer<void>? currentGate;
 
+  /// When true, every read waits on a completer of its own, appended to
+  /// [heldReads] in the order the reads were made, and answers whatever the
+  /// test completes it with — in any order. This is how two reads on the wire
+  /// at once are made to answer in the opposite order to the one they left
+  /// in, with no clock involved.
+  bool holdReads = false;
+
+  /// The reads waiting for an answer while [holdReads] is set, oldest first.
+  final List<Completer<Result<RemoteSession?>>> heldReads = [];
+
   @override
   Future<Result<RemoteSession?>> current() async {
     currentCount++;
+    if (holdReads) {
+      final held = Completer<Result<RemoteSession?>>();
+      heldReads.add(held);
+      return held.future;
+    }
     final answer = currentQueue.isNotEmpty
         ? currentQueue.removeAt(0)
         : currentResult;

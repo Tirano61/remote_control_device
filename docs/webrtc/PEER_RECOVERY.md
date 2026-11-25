@@ -124,8 +124,12 @@ still awaiting a send cannot keep the new one from draining.
 
 * **Still running** for this session: the capture client hands back the same
   track, no Android dialog, and it is attached to the new peer's offered video
-  transceiver. Between the close and the attach the orphan-capture timer (20 s)
-  runs; the attach cancels it.
+  transceiver. Between the close and the attach the orphan-capture timer runs
+  (45 s since Prompt 41, and only while the tablet is in the session's room:
+  leaving it cancels the timer, rejoining starts it again in full; 20 s from
+  the failure before); the attach cancels it. See
+  [LIFECYCLE.md](../remote_session/LIFECYCLE.md), "Stale answers and the screen after
+  a micro-cut (Prompt 41)".
 * **Not running** (stopped by the orphan timer, never granted, denied): the
   recovery asks Android again, with the system dialog. Nothing restarts a
   capture without it.

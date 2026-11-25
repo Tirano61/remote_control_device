@@ -230,6 +230,32 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
   /// in flight schedules the next retry when it answers.
   int _readsInFlight = 0;
 
+  /// The number of the last `/current` read started. Every read takes the
+  /// next one just before it goes on the wire, so the numbers are the order in
+  /// which the reads *left* — not the order in which they answer, which
+  /// nothing guarantees. See [_adoptAnswer].
+  int _readSequence = 0;
+
+  /// The newest read, by that number, whose answer reached the backend and was
+  /// taken into account. An answer from a read older than this one has been
+  /// overtaken: what it says is at most as recent as what is already known.
+  int _newestAnsweredRead = 0;
+
+  /// For every session a read returned live, the value [_readSequence] had
+  /// when that answer arrived. A read numbered above it left after this tablet
+  /// already knew the session, so the backend served it while the session
+  /// existed; if that read answers without the session, the session is over
+  /// (`CLOSED` is terminal), whatever order the answers come in. A read
+  /// numbered at or below it may have been served before the session was
+  /// created, and its "no session" proves nothing.
+  final Map<String, int> _knownSince = {};
+
+  /// Sessions an answer *proved* are no longer live at the backend: a read
+  /// that left after the session was known came back without it, or this
+  /// device's close was confirmed. Like [_closedRemotely], only ever added to:
+  /// no later answer — however it was ordered — makes one of them live again.
+  final Set<String> _goneAtBackend = {};
+
   // ------------------------------------------------------------- authority
 
   /// The realtime channel came up or went down.
@@ -566,6 +592,7 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
     if (generation != _generation) return false;
 
     final epoch = _authorityEpoch;
+    final sequence = ++_readSequence;
     final Result<RemoteSession?> result;
     _readsInFlight++;
     try {
@@ -575,7 +602,7 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
     }
     if (generation != _generation) return false;
     try {
-      return await _adopt(emit, result, epoch, generation, reason);
+      return await _adopt(emit, result, epoch, sequence, generation, reason);
     } finally {
       // Whatever the answer, a session still suspended gets its next re-read.
       _ensureRetry(state);
@@ -586,23 +613,20 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
     Emitter<RemoteSessionState> emit,
     Result<RemoteSession?> result,
     int epoch,
+    int sequence,
     int generation,
     Failure? reason,
   ) async {
     switch (result) {
       case Ok<RemoteSession?>(:final value):
-        await _settleConfirmation(value);
-        if (generation != _generation) return false;
-        _noteDeparture(value);
-        emit(
-          _stateFor(
-            value,
-            lastFailure: reason,
-            authority: _authorityFor(epoch),
-          ),
-        );
-        return true;
+        return _adoptAnswer(emit, value, epoch, sequence, generation, reason);
       case Err<RemoteSession?>(:final failure):
+        if (sequence < _newestAnsweredRead) {
+          // A newer read has already reached the backend; this one failing
+          // says nothing about what that one established.
+          _log('a failed read overtaken by a newer answer: ignored');
+          return false;
+        }
         // Read *now*, not before the call: a FINALIZAR or a closure that
         // happened while this read was in flight has already moved the state,
         // and that is what stands.
@@ -638,6 +662,209 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
         return false;
     }
   }
+
+  /// Takes a successful `/current` answer into account — or does not.
+  ///
+  /// Reads overlap: a re-read of a suspended session may still be on the wire
+  /// when the socket's return causes another, and a cue may race a retry. They
+  /// answer in no particular order, and an answer is not newer because it
+  /// arrived later. Before Prompt 41 every answer was applied as it came, and
+  /// one that had left before the socket came back, answering after the read
+  /// that confirmed the session, put it back to suspended: the signaling room
+  /// was left, the web's recovery offer found nobody, and the screen capture
+  /// ran out of receiver and had to be granted again (D1, seen on the T10A in
+  /// S2 of the BACKEND Prompt 35 audit).
+  ///
+  /// So every read is numbered when it leaves ([_readSequence]), and an answer
+  /// is weighed by what it can prove, not by when it arrived:
+  ///
+  /// ```text
+  /// the answer is the session held, live      consistent: nothing changes,
+  ///                                           least of all authority — only
+  ///                                           the socket and a closure take
+  ///                                           that away. The newest read may
+  ///                                           refresh the session, never move
+  ///                                           it back from ACTIVE to CONNECTING
+  /// the answer is without the session held,
+  ///   from a read that left after this
+  ///   tablet knew the session                 proof it is over (CLOSED is
+  ///                                           terminal): withdrawn, whatever
+  ///                                           the order — even from a read
+  ///                                           that was overtaken
+  ///   from a read that may have been served
+  ///   before the session existed              proves nothing either way: the
+  ///                                           session is suspended (never
+  ///                                           confirmed on that answer) and a
+  ///                                           fresh read decides
+  /// the answer is a session already over      ignored: never live again
+  /// an overtaken read that would *grant*
+  ///   anything — a session, a status          not applied; a fresh read is
+  ///                                           made, and grants it if it holds
+  /// the newest read, anything else            applied as always
+  /// ```
+  ///
+  /// Granting is only ever done by the newest answer, and confirmation still
+  /// needs the read to have started after the socket last came up
+  /// ([_authorityFor]). Withdrawing is done by any answer that proves it.
+  /// Returns whether the answer was applied.
+  Future<bool> _adoptAnswer(
+    Emitter<RemoteSessionState> emit,
+    RemoteSession? value,
+    int epoch,
+    int sequence,
+    int generation,
+    Failure? reason,
+  ) async {
+    final answeredLive = value != null && _isLiveStatus(value.status)
+        ? value
+        : null;
+    if (answeredLive != null) {
+      // Whatever becomes of this answer, the backend had this session when it
+      // served it; any read that leaves from now on was served after that.
+      _knownSince.putIfAbsent(answeredLive.id, () => _readSequence);
+    }
+    final overtaken = sequence < _newestAnsweredRead;
+    if (!overtaken) _newestAnsweredRead = sequence;
+
+    // What this answer proves is over: the session held, and the one ended
+    // here that the backend has not confirmed yet.
+    for (final id in {_heldSessionId(state), _pendingConfirmation}) {
+      if (id == null || answeredLive?.id == id) continue;
+      if (_isOverAtBackend(id) || !_answerProvesGone(id, sequence)) continue;
+      _goneAtBackend.add(id);
+      _log('session $id is no longer live at the backend (read #$sequence)');
+    }
+    final pending = _pendingConfirmation;
+    if (pending != null &&
+        answeredLive?.id != pending &&
+        _isOverAtBackend(pending)) {
+      _log('session $pending ended here is no longer live: confirmed');
+      await _forgetPending(pending);
+      if (generation != _generation) return false;
+    }
+
+    // Read now: the state may have moved while the marker was being cleared.
+    final current = state;
+    final heldId = _heldSessionId(current);
+
+    if (answeredLive != null && _goneAtBackend.contains(answeredLive.id)) {
+      _log(
+        'read #$sequence answered ${answeredLive.id} live after it was seen '
+        'over: ignored',
+      );
+      return false;
+    }
+
+    if (heldId != null &&
+        answeredLive?.id != heldId &&
+        !_isOverAtBackend(heldId)) {
+      // Without the session held, from a read that may have been served
+      // before the session existed. Not proof that it is over — and not a
+      // reason to keep vouching for it either.
+      _log(
+        'read #$sequence answered without $heldId but may predate it: '
+        'authority suspended until a fresh read decides',
+      );
+      if (current is RemoteSessionLive && !current.isSuspended) {
+        emit(_withAuthority(current, RemoteSessionAuthority.suspended));
+      }
+      _requestFreshRead();
+      return false;
+    }
+
+    if (current is RemoteSessionLive &&
+        answeredLive != null &&
+        answeredLive.id == heldId) {
+      final heldRank = _statusRank(current.session.status);
+      final answeredRank = _statusRank(answeredLive.status);
+      if (overtaken) {
+        if (answeredRank > heldRank) {
+          // Newer than what is held, but from a read that cannot grant.
+          _requestFreshRead();
+        }
+        _log('read #$sequence overtaken: it repeats $heldId, nothing changes');
+        return false;
+      }
+      // A session never goes back from ACTIVE to CONNECTING at the backend;
+      // an answer saying so was served before the one already applied.
+      final session = answeredRank < heldRank ? current.session : answeredLive;
+      // Confirmation is lost to the socket going down and to a closure, both
+      // of which suspend at once. A read about the same session never takes
+      // it away.
+      final authority =
+          current.authority == RemoteSessionAuthority.confirmed &&
+              _authorityChannelUp
+          ? RemoteSessionAuthority.confirmed
+          : _authorityFor(epoch);
+      _noteDeparture(session);
+      emit(_stateFor(session, lastFailure: reason, authority: authority));
+      return true;
+    }
+
+    if (overtaken) {
+      if (heldId != null && _isOverAtBackend(heldId)) {
+        // A withdrawal the answer proves; what it may say about another
+        // session is left to a read that can grant it.
+        _noteDeparture(null);
+        emit(_stateFor(null, lastFailure: reason));
+        if (answeredLive != null && !_isOver(answeredLive.id)) {
+          _requestFreshRead();
+        }
+        return true;
+      }
+      if (answeredLive != null &&
+          answeredLive.id != heldId &&
+          !_isOver(answeredLive.id)) {
+        _log('read #$sequence overtaken: it shows a session not held');
+        _requestFreshRead();
+      }
+      return false;
+    }
+
+    _noteDeparture(value);
+    emit(
+      _stateFor(value, lastFailure: reason, authority: _authorityFor(epoch)),
+    );
+    return true;
+  }
+
+  /// Whether a read numbered [sequence] that answered without session [id]
+  /// proves the session is over: it left after this tablet first saw [id]
+  /// live. A session never seen live in this run (one recovered from the
+  /// marker) existed before any read of this run left.
+  bool _answerProvesGone(String id, int sequence) =>
+      sequence > (_knownSince[id] ?? 0);
+
+  /// Over at the backend for good: closed by an event, or proven by a read or
+  /// by this device's confirmed close.
+  bool _isOverAtBackend(String id) =>
+      _goneAtBackend.contains(id) || _closedRemotely.containsKey(id);
+
+  /// Over for this tablet, at the backend or here.
+  bool _isOver(String id) => _isOverAtBackend(id) || _endedHere.contains(id);
+
+  /// The session the state is about, live or not.
+  static String? _heldSessionId(RemoteSessionState state) => switch (state) {
+    RemoteSessionLive(:final session) => session.id,
+    RemoteSessionEndedLocally(:final remoteSessionId) => remoteSessionId,
+    RemoteSessionClosedRemotely(:final remoteSessionId) => remoteSessionId,
+    _ => null,
+  };
+
+  /// One more read, made now, to settle what an answer could not. It leaves
+  /// after everything known so far, so its own answer is never "may predate
+  /// it" about the session held: this cannot chain.
+  void _requestFreshRead() {
+    if (isClosed) return;
+    add(const RemoteSessionSyncRequested());
+  }
+
+  static int _statusRank(RemoteSessionStatus status) => switch (status) {
+    RemoteSessionStatus.connecting => 1,
+    RemoteSessionStatus.active => 2,
+    RemoteSessionStatus.closed => 3,
+    RemoteSessionStatus.unknown => 0,
+  };
 
   /// Keeps [_lastClosure] in step with a successful read: the session the
   /// tablet was taking part in is gone without FINALIZAR here, or a new one has
@@ -779,6 +1006,9 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
             'close of $remoteSessionId confirmed by the backend '
             '(endedBy ${value.endedBy?.name ?? 'absent'})',
           );
+          // Proof it is over, like a read that comes back without it: a read
+          // still on the wire that answers it live was served before this.
+          _goneAtBackend.add(remoteSessionId);
           await _forgetPending(remoteSessionId);
           if (generation != _generation) return;
           done();
@@ -902,20 +1132,6 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
       // holds live, and the next read that shows that clears it again.
       _log('the ended-session marker could not be cleared');
     }
-  }
-
-  /// A `/current` answer is the other way an end gets confirmed: if the session
-  /// ended here is not what the backend returns as live, the backend no longer
-  /// holds it live for this device. A device has at most one live session, so
-  /// another one being returned says the same thing.
-  Future<void> _settleConfirmation(RemoteSession? live) async {
-    final pending = _pendingConfirmation;
-    if (pending == null) return;
-    if (live != null && live.id == pending && _isLiveStatus(live.status)) {
-      return;
-    }
-    _log('session $pending ended here is no longer live: confirmed');
-    await _forgetPending(pending);
   }
 
   // ---------------------------------------------------------------- plumbing
