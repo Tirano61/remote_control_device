@@ -469,9 +469,17 @@ deshabilitado en esta asistencia*.
 `MediaProjection` belongs to the remote session and survives a peer connection
 being rebuilt, but not indefinitely. When the peer that carried it fails, is
 closed by the other end, or is abandoned while negotiating, the capture is
-stopped after `WebRtcSessionBloc.defaultOrphanCaptureTimeout` (20 s) unless a
-new offer for the same live session attaches it first. After that a new offer
-goes through Android's dialog again. The device never renegotiates on its own.
+stopped after `WebRtcSessionBloc.defaultOrphanCaptureTimeout` unless a new
+offer for the same live session attaches it first. After that a new offer goes
+through Android's dialog again. The device never renegotiates on its own.
+
+The window is 45 s and runs only while the device is joined to the session's
+signaling room — the only time an offer can reach it. Leaving the room cancels
+it and rejoining starts it again in full; time out of the room is bounded by the
+75 s authority grace and the backend's 60 s `SYSTEM` close. Until Prompt 41 it
+was 20 s counted from the failure, which lost the capture after a 5 s Wi-Fi cut
+on the T10A: see [LIFECYCLE.md](../remote_session/LIFECYCLE.md), "Stale answers and
+the screen after a micro-cut (Prompt 41)".
 
 ## Capturing is not transmitting
 
