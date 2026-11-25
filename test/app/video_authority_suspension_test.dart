@@ -441,7 +441,11 @@ void main() {
       final mark = screenCapture.transmissions.length;
 
       await finalizar();
-      expect(remoteSessionBloc.state, isA<RemoteSessionEndedLocally>());
+      // The close is confirmed at once (the fake answers 200 CLOSED). Since
+      // Prompt 41 a confirmed close is proof the session is over, so the read
+      // that follows it, still answering ACTIVE, no longer flips the state
+      // back from Idle to ended-here: either way it is not live.
+      expect(remoteSessionBloc.state, isNot(isA<RemoteSessionLive>()));
       expectNothingLeft(peer, channel);
 
       // The backend still says ACTIVE when the socket comes back.

@@ -258,6 +258,43 @@ void main() {
       expect(factory.createCount, 1);
       expect(signaling.sentAnswers, hasLength(1));
     });
+
+    test('Prompt 41: the window runs only inside the room; leaving it '
+        'cancels the window and the rejoin starts it again in full', () async {
+      final (peer, _) = await reachActive();
+      peer.pushConnectionState(WebRtcConnectionState.failed);
+      await settle();
+      timers.elapse(orphanTimeout - const Duration(seconds: 1));
+      await settle();
+
+      // Out of the room: no recovery offer can reach the device, so none is
+      // being waited for.
+      bloc.add(const WebRtcSignalingAvailabilityChanged(null));
+      await settle();
+      timers.elapse(orphanTimeout * 3);
+      await settle();
+      expect(screenCapture.isActive, isTrue);
+      expect(timers.pending, isEmpty);
+
+      // Back in: a whole window again, and then it ends.
+      bloc.add(const WebRtcSignalingAvailabilityChanged(testRemoteSessionId));
+      await settle();
+      timers.elapse(orphanTimeout - const Duration(milliseconds: 1));
+      await settle();
+      expect(screenCapture.isActive, isTrue);
+      timers.elapse(const Duration(milliseconds: 1));
+      await settle();
+      expect(screenCapture.isActive, isFalse);
+      expect(screenCapture.stopCount, 1);
+    });
+
+    test('Prompt 41: the window is long enough for the web\'s second attempt '
+        'after a lost offer (30 s answer deadline + 5 s)', () {
+      expect(
+        orphanTimeout,
+        greaterThan(const Duration(seconds: 30 + 5 + 3)),
+      );
+    });
   });
 
   group('suspended authority', () {

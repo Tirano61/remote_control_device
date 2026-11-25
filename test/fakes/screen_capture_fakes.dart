@@ -190,6 +190,12 @@ class FakeScreenCaptureClient implements ScreenCaptureClient {
   /// for one session is a second Android dialog the user should not have seen.
   final List<String> requests = [];
 
+  /// The requests that would have shown Android's dialog: no capture of that
+  /// session was running. A request for the session already captured is
+  /// handed the running capture back, as the real client does, and is not in
+  /// here.
+  final List<String> dialogs = [];
+
   int stopCount = 0;
 
   /// What the next start produces. Replaced wholesale by a test that wants a
@@ -243,6 +249,9 @@ class FakeScreenCaptureClient implements ScreenCaptureClient {
   @override
   Future<ScreenCaptureResult> requestAndStart(String remoteSessionId) async {
     requests.add(remoteSessionId);
+    if (!_active || _remoteSessionId != remoteSessionId) {
+      dialogs.add(remoteSessionId);
+    }
     await startGate?.future;
 
     final outcome = result;
