@@ -364,7 +364,10 @@ The accessibility service being enabled is never enough for "habilitado".
   timeout (up to ~45 s). Control keeps running in that interval if the backend
   closed the session without the event reaching the tablet. Closing it needs
   something the backend does not offer today (a heartbeat or an expiry the tablet
-  can check), or a shorter ping configuration on both sides.
+  can check), or a shorter ping configuration on both sides. Since BACKEND
+  Prompt 36 the transport notices ~20 s after the last `PING`, and since
+  Prompt 42 the tablet suspends 13 s after it: see
+  [Heartbeat watchdog](#heartbeat-watchdog-prompt-42).
 * **Socket up, HTTP down.** A confirmed session stays confirmed while the socket
   is up, even if `/current` fails: the socket is what would carry a close. If the
   backend could close a session without emitting the event on a live socket, the
@@ -1324,4 +1327,237 @@ room joined once per reconnection and never left by a late answer.
   read, as before.
 * **Unchanged:** detection of a half-open socket (up to ~45 s), the backend
   heartbeat and the connectivity watcher proposed by the audit, out of scope
-  for this prompt.
+  for this prompt. (Since then: BACKEND Prompt 36 and the heartbeat watchdog
+  below.)
+
+## Heartbeat watchdog (Prompt 42)
+
+From the BACKEND Prompt 35 audit, after BACKEND Prompt 36 set the Engine.IO
+heartbeat to 10 s / 10 s: a half-open `/devices` connection kept the session's
+authority (commands and, since Prompt 40, the screen) until socket_io_client's
+own `ping timeout`, `pingInterval + pingTimeout` = 20 s after the last `PING`.
+The tablet now suspends **13 s** after the last `PING`, on a socket the
+transport still calls connected.
+
+### The signal
+
+socket_io_client 3.1.6 does expose the heartbeat, one layer below the namespace
+socket:
+
+```text
+engine Socket.onPacket('ping')   answers PONG, emitReserved('ping')
+Manager.onping                   emitReserved('ping')        (manager.dart)
+io.Socket.onPing(handler)        Manager.on('ping')          (darty.dart)
+engine.pingInterval/pingTimeout  the Engine.IO OPEN packet of this connection
+```
+
+`SocketIoDeviceRealtimeClient` emits `RealtimeHeartbeat` for every `PING` of
+its current socket (dropped for a released one, like every other callback) and
+puts the handshake values on `RealtimeConnected.heartbeat`. No Socket.IO
+application event is used: the backend has none for liveness (REALTIME.md,
+"Heartbeat"). WebRTC and data-channel traffic prove nothing about `/devices`
+and are not used.
+
+The engine resets its own timer on *any* packet; the watchdog counts only the
+connection coming up and each `PING`. The server sends the next `PING`
+`pingInterval` after the previous `PONG` reached it, so on a healthy connection
+the gap seen here is 10 s plus a round trip.
+
+### Policy
+
+```text
+overdue   no PING for pingInterval + min(3 s, pingTimeout)    13 s with 10/10
+stalled   no PING for pingInterval + pingTimeout + 5 s         25 s with 10/10
+```
+
+* The interval is never configured here: it comes from each handshake, so a
+  backend with other values (the old 25/20 gives 28 s) is watched correctly.
+  Without readable values a connection is not watched (the behaviour before
+  this prompt); with 3.1.6 they are always there once the namespace accepted.
+* The first `PING` of a connection is due `pingInterval` after the Engine.IO
+  handshake, which precedes the namespace `connect`; the watch starts at the
+  `connect`, so the first gap is never longer than the others (seen on the
+  T10A: 5.5 s for a connection opened during a block).
+* **3 s tolerance, measured**: 158 steady gaps on the T10A through the dev
+  tunnel, median 10.11 s, p99 10.20 s, max 10.21 s; no false suspension in
+  ~45 min. The margin covers the round trip and a busy isolate.
+
+### Mechanism (`HeartbeatWatchdog`)
+
+* **Evidence age** = the larger of the monotonic and the wall-clock interval.
+  The Dart VM reads `CLOCK_MONOTONIC` on Android, which stops in deep sleep (so
+  do Dart timers); the wall clock counts the sleep but can be set back. With
+  the larger of both, neither sleeping nor setting the clock back makes old
+  evidence look fresh; setting it forward can only suspend, then reconcile.
+* **One timer, never periodic.** A `PING` only records the instant. The pending
+  check fires at the previous deadline, measures the newest evidence and
+  re-arms for what is left, so it decides from the real age whenever it runs,
+  late or not, and never oscillates with the `PING` cycle.
+* **One more turn** before declaring overdue (a zero-delay timer, queued behind
+  anything the isolate already received), so a `PING` that arrived in time but
+  waited behind the timer is counted.
+* **Watches.** Every connection starts one; every loss, stop and generation ends
+  it. Timers and callbacks carry the watch and do nothing for another one.
+* `confirmFresh()` answers synchronously from the clocks; see "Commands".
+
+### Authority: the existing C2 path, no second authority
+
+`DeviceRealtimeBloc` reports `DeviceRealtimeHeartbeatOverdue`. Every coordinator
+reads "connected" as `state is DeviceRealtimeConnected`, so for all of them it
+is the channel going down:
+
+```text
+heartbeat overdue     RemoteSessionAuthorityChannelChanged(available: false,
+                      heartbeatOverdue: true): suspended at once. Epoch moved,
+                      commands refused, queue dropped, touch abandoned (DRAG
+                      cancelled, never released), video gate closed, room left
+                      locally, re-reads 2/4/8 s, 75 s grace started. Peer and
+                      MediaProjection kept.
+a PING on the same    DeviceRealtimeConnected again = "channel up", exactly as a
+socket                reconnection. Nothing is granted: a GET /current that
+                      STARTED after it must answer ACTIVE; only then is the
+                      session confirmed, remote-session:join sent again (on the
+                      same socket; the backend accepts a join of the joined
+                      session) and the gate reopened.
+transport gives up    DeviceRealtimeReconnecting, as always (20 s).
+neither by 25 s       backstop: the socket is replaced (same token), so a stuck
+                      transport cannot leave the tablet suspended for ever.
+```
+
+The states stay distinct: real disconnection (`Reconnecting`), suspicion
+(`HeartbeatOverdue`, logged as "the realtime channel is silent"), recovery
+pending (live, suspended), recovery confirmed (live, confirmed), definitive
+close (`EndedLocally`, `ClosedRemotely`, `Idle`). FINALIZAR,
+`remote-session:closed`, a "no session" answer and the 75 s grace win exactly
+as before. The watchdog never sends a close, so a session the tablet gives up on
+is still closed by the backend as `SYSTEM`.
+
+The 60 s backend grace and the 75 s local grace are unchanged. With the watchdog
+the tablet suspends up to ~7 s before the backend notices a half-open loss, so
+its 75 s now end ~8 s (instead of ~15 s) after the backend's `SYSTEM` close; the
+last re-read before the grace still lands after that close when REST is
+reachable. Seen in G below.
+
+UI: the connection line and the session headline say "Reconectando..." and the
+control line "suspendido hasta confirmar con el servidor".
+
+### Commands, and a tablet that runs late
+
+The suspension reaches `WebRtcSessionBloc` a few event-loop turns after the
+deadline, and after a deep sleep the timer itself may not have run yet. So right
+before a command (tap, swipe, text, keys and every touch message) is let
+through, `WebRtcSessionBloc` asks the same watchdog (`RealtimeLiveness`) and
+refuses it with `session_not_active` if the evidence is too old; the declaration
+follows by itself. When the app returns to the foreground the age is measured
+again at once (`didChangeAppLifecycleState(resumed)` calls `checkNow`).
+
+Android in the background: a remote session runs with a foreground service
+(MediaProjection), so its process is not frozen like a cached app. Doze and the
+deep sleep of a screen-off tablet stop the CPU, and with it Dart and the native
+capture alike. What Dart cannot guarantee is a **live process whose isolate is
+stalled** (a long jank, a debugger): the native capture keeps producing frames
+and the gate stays as Dart last set it until Dart runs again. Proposed, not
+implemented: a native lease on `ScreenCaptureTransmission` (Dart renews
+`transmitUntil = elapsedRealtime + 13 s` on every `PING`; the gate closes
+itself when it lapses, on `SystemClock.elapsedRealtime`, which counts sleep).
+It needs its own JVM and device tests.
+
+### Tests
+
+* `test/features/device/domain/heartbeat_watchdog_test.dart` (24): handshake
+  10/10 gives 13 s / 25 s, malformed values, tolerance clamp, 60 PINGs on one
+  timer, late first PING, the 12.999/13 s edge, the extra turn, stalled once,
+  repeated suspensions and recoveries, old watches, stop, no policy, a blocked
+  isolate (late timer), deep sleep, the wall clock set back and forward.
+* `test/features/device/presentation/device_realtime_heartbeat_test.dart` (10).
+* `test/app/heartbeat_authority_watchdog_test.dart` (25), every bloc and
+  coordinator real, covering the prompt's 30 cases. Without the overdue state 19
+  fail; without the command check the two late-tablet ones fail.
+* `test/integration/heartbeat_watchdog_isolated_test.dart` (4, opt-in with
+  `HEARTBEAT_HARNESS=1`): the real socket_io_client against socket.io 4.8.1
+  with a 2 s / 5 s heartbeat behind `half_open_relay.js`. Handshake values read,
+  PINGs 2.01 s apart, overdue at +5.000 s against the transport's +7.003 s, a
+  held PING bringing the same socket back, the one-way case.
+
+### Seen on a device
+
+2026-11-26, T10A (`LSTT10M2026081504`). Isolated environment, nothing shared
+touched: a second installation `com.example.remote_control_device.p42test`
+("P42 prueba vigilante", its own enrolment, device `877-208-548`), a
+`git archive` of `remote_control_backend` `main` (18a413f, heartbeat 10/10)
+with its own `node_modules` on 127.0.0.1:3200 and a disposable embedded
+PostgreSQL, `remote_control_web` `main` (f88e9d3) built against it on
+localhost:5173 in Chrome (`inbound-rtp` sampled each second), and
+`tool/realtime_harness/half_open_relay.js` on port 3010 behind the Public dev
+tunnel. WebRTC went P2P over the LAN, not through the relay. Dart logs from the
+VM service; tablet clock -0.47 s, converted. PERMITIR, the capture dialog and
+the accessibility toggle by the user; SOLICITAR, FINALIZAR, the enrolment input
+and screen changes with adb; no mobile-mcp, no UiAutomation, no
+`am force-stop`. Times from the cut; "PING" is the last one the tablet received.
+
+```text
+A  normal (whole run)        158 gaps: median 10.11 s, max 10.21 s. No suspension
+                             but the induced ones; remote tap completed.
+B  half-open 15 s, 7.0 s     suspended +5.99 (PING +13.00), gate closed +6.00;
+   after a PING              transport disconnect +12.99 (PING +20.0), backend
+                             OFFLINE ~+13. Restore: reconnected +0.33, REST
+                             ACTIVE +0.65, rejoined, gate reopened. Web frames
+                             1175 -> 1175 while suspended; 242 withheld natively.
+C  half-open 25 s, 1.0 s     suspended +11.97 (PING +13.00), transport +18.97. A
+   after a PING              re-read held by the cut answered ACTIVE with the
+                             channel down: not confirmed. Restore: reconnected
+                             +0.21, confirmed +0.68. Frames 1713 -> 1713.
+D1 receives, cannot send     last PING +7.07; the server missed the PONG and
+                             closed 10 s later; its close frame reached the
+                             tablet and the transport disconnected at once
+                             (+17.08, PING +10.0), before the watchdog.
+D2 sends, cannot receive     suspended +10.98 (PING +13.00); transport and backend
+                             OFFLINE +17.98, 7.0 s later. Frames 2429 -> 2429.
+E  Wi-Fi off 5 s             Android closed the socket (+0.22, real disconnect);
+   (svc wifi)                reconnected +14.0, confirmed and rejoined +14.5; web
+                             recovery offer +16.1: capture reused, no dialog;
+                             peer connected +16.4.
+F  three cuts in a row       a PING held to 15.03 s (twice): overdue at 13 s, the
+                             PING back on the SAME socket, REST, rejoin, gate
+                             open, no disconnection; between them a 15 s
+                             half-open recovered by reconnection. One suspension
+                             per cut, nothing left over. A tap during a
+                             suspension was refused ("La asistencia no está
+                             activa en el dispositivo"); the next one, after it,
+                             completed.
+G  permanent (120 s)         suspended +11.96; backend OFFLINE ~+19, CLOSED
+                             endedBy SYSTEM (DEVICE_ABSENT) +79; the tablet ended
+                             at its 75 s (+86.97), capture stopped, no close sent;
+                             after restore /current confirmed it gone, no rejoin.
+H  FINALIZAR while           ended here 66 ms after the tap, capture stopped
+   suspended (cut 60 s)      +0.2 s; the POST was held by the cut, timed out, and
+                             was delivered on restore: CLOSED endedBy DEVICE.
+                             /current confirmed it; no rejoin; projection 0.
+I  new assistance            89b2d664 and 3ac56e79: PERMITIR and the capture dialog
+                             again each time. 89b2d664 expired by the CONNECTING
+                             TTL (SYSTEM) before the dialog was accepted;
+                             3ac56e79 went ACTIVE with a new capture.
+```
+
+Unplanned: restarting the relay left the tunnel side half-open; the watchdog
+suspended 13.01 s after the last `PING` and the transport noticed 7 s later.
+
+Not shown on the device: a deep sleep or a stalled isolate during a session
+(tests only), the stalled backstop (the transport always gave up first), a
+backend with other heartbeat values.
+
+### Residual risks
+
+* **Detection is still bounded by the heartbeat**: up to 13 s after the last
+  `PING` (3-13 s after a cut) instead of 20 s. Commands and the screen flow
+  until then. Shorter needs a shorter `pingInterval` on the backend.
+* **One-way loss where the tablet still receives** is detected by the server
+  (its `pingTimeout`) and reached the tablet as a close frame 10 s after the
+  last `PING` through the tunnel. Had the close frame been lost too, the
+  watchdog would act at 13 s.
+* **False suspension** when a `PING` is more than 3 s late (a congested network,
+  an isolate blocked for seconds): costs one REST round trip and a rejoin; the
+  peer and the capture are kept.
+* **A stalled isolate in a live process** keeps the gate as it was; see the
+  native lease proposed above.
+* **The wall clock set forward** suspends once.
