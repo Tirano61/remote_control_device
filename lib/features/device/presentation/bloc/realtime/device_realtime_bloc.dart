@@ -1,13 +1,17 @@
 import 'dart:async';
+import 'dart:developer' as developer;
 import 'dart:math' as math;
 
 import 'package:equatable/equatable.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:remote_control_device/core/async/timer_factory.dart';
 import 'package:remote_control_device/core/session/device_token_store.dart';
 import 'package:remote_control_device/features/device/domain/entities/device_realtime_confirmation.dart';
 import 'package:remote_control_device/features/device/domain/realtime/device_realtime_client.dart';
 import 'package:remote_control_device/features/device/domain/realtime/device_realtime_signal.dart';
+import 'package:remote_control_device/features/device/domain/realtime/heartbeat_watchdog.dart';
+import 'package:remote_control_device/features/device/domain/realtime/realtime_heartbeat_policy.dart';
 import 'package:remote_control_device/features/device/domain/usecases/renew_device_token.dart';
 
 part 'device_realtime_event.dart';
@@ -98,6 +102,29 @@ part 'device_realtime_state.dart';
 ///
 /// Logins are also serialised, across generations: a renewal never starts
 /// while another one is still waiting for its answer.
+///
+/// ## Heartbeat
+///
+/// A connection the transport still calls up may be dead: a half-open TCP
+/// connection is only noticed by socket_io_client's own `ping timeout`,
+/// `pingInterval + pingTimeout` (20 s) after the last `PING`. The
+/// [HeartbeatWatchdog] notices sooner (13 s with the backend's 10/10), and
+/// this bloc then reports [DeviceRealtimeHeartbeatOverdue] — which everything
+/// downstream reads as "not connected", so the session's authority is
+/// suspended through its usual path. Nothing here closes the socket for that:
+///
+/// ```text
+/// connected ──(no PING for pingInterval + 3 s)──> heartbeat overdue
+///   overdue ──(a PING on the same socket)───────> connected (and the session
+///                                                 must be confirmed again)
+///   overdue ──(the transport gives up)──────────> reconnecting, as always
+///   overdue ──(pingInterval + pingTimeout + 5 s
+///              and the transport has not)──────> a new socket, same token
+/// ```
+///
+/// The watch belongs to the connection: every connection starts one, and
+/// every loss, stop and generation ends it, so a timer or a `PING` of a
+/// previous connection cannot speak for the current one.
 class DeviceRealtimeBloc
     extends Bloc<DeviceRealtimeEvent, DeviceRealtimeState> {
   DeviceRealtimeBloc({
@@ -109,6 +136,7 @@ class DeviceRealtimeBloc
     Duration stableConnectionPeriod = defaultStableConnectionPeriod,
     TimerFactory timerFactory = systemTimerFactory,
     DateTime Function() clock = DateTime.now,
+    HeartbeatWatchdog? heartbeatWatchdog,
   }) : assert(recoveryBackoff.isNotEmpty, 'the backoff needs a step'),
        _client = client,
        _tokenStore = tokenStore,
@@ -118,11 +146,14 @@ class DeviceRealtimeBloc
        _stableConnectionPeriod = stableConnectionPeriod,
        _timerFactory = timerFactory,
        _clock = clock,
+       _watchdog = heartbeatWatchdog ?? HeartbeatWatchdog(),
        super(const DeviceRealtimeDisconnected()) {
     on<DeviceRealtimeStartRequested>(_onStartRequested);
     on<DeviceRealtimeStopRequested>(_onStopRequested);
     on<_SignalReceived>(_onSignalReceived);
     on<_RetryDue>(_onRetryDue);
+    on<_HeartbeatOverdue>(_onHeartbeatOverdue);
+    on<_HeartbeatStalled>(_onHeartbeatStalled);
 
     _signals = _client.signals.listen((signal) => add(_SignalReceived(signal)));
   }
@@ -147,6 +178,9 @@ class DeviceRealtimeBloc
   final Duration _stableConnectionPeriod;
   final TimerFactory _timerFactory;
   final DateTime Function() _clock;
+  final HeartbeatWatchdog _watchdog;
+
+  static const String _loggerName = 'realtime';
 
   late final StreamSubscription<DeviceRealtimeSignal> _signals;
 
@@ -223,11 +257,15 @@ class DeviceRealtimeBloc
     if (_activeToken == null) return;
 
     switch (event.signal) {
-      case RealtimeConnected():
+      case RealtimeConnected(:final heartbeat):
         _hasConnected = true;
         _cancelRetry();
         _connectedSince = _clock();
+        _watchHeartbeat(heartbeat);
         emit(const DeviceRealtimeConnected());
+
+      case RealtimeHeartbeat():
+        _onHeartbeat(emit);
 
       case RealtimeIdentityConfirmed(:final confirmation):
         // A confirmation annotates a live connection; it never establishes one.
@@ -264,6 +302,94 @@ class DeviceRealtimeBloc
         _noteConnectionLost();
         await _recover(emit, renew: false);
     }
+  }
+
+  // ------------------------------------------------------------ heartbeat
+
+  void _watchHeartbeat(RealtimeHeartbeatPolicy? policy) {
+    _watchdog.start(
+      policy,
+      onOverdue: (watch) {
+        if (!isClosed) add(_HeartbeatOverdue(watch));
+      },
+      onStalled: (watch) {
+        if (!isClosed) add(_HeartbeatStalled(watch));
+      },
+    );
+    if (policy == null) {
+      _log('heartbeat not announced: this connection is not watched');
+    }
+  }
+
+  void _onHeartbeat(Emitter<DeviceRealtimeState> emit) {
+    final current = state;
+    // A PING before the namespace accepted the connection, or after it was
+    // lost: nothing is being watched, and nothing is learnt from it.
+    if (current is! DeviceRealtimeConnected &&
+        current is! DeviceRealtimeHeartbeatOverdue) {
+      return;
+    }
+    final gap = _watchdog.beat();
+    if (gap == null) return;
+    if (current is DeviceRealtimeHeartbeatOverdue) {
+      // The channel counts as up again, and only that. The coordinator reads
+      // it as a reconnection: the session stays suspended until a REST read
+      // made after this instant confirms it, and the room is joined again
+      // only then.
+      _log(
+        'heartbeat back: PING after ${_seconds(gap)}; the channel is up '
+        'again, the session must be confirmed again',
+      );
+      emit(DeviceRealtimeConnected(confirmation: current.confirmation));
+    } else {
+      _log('heartbeat: PING after ${_seconds(gap)}');
+    }
+  }
+
+  Future<void> _onHeartbeatOverdue(
+    _HeartbeatOverdue event,
+    Emitter<DeviceRealtimeState> emit,
+  ) async {
+    // Raised for a connection since replaced, or already settled by a PING
+    // that arrived while this event was queued.
+    if (event.watch != _watchdog.watch || !_watchdog.isOverdue) return;
+    final current = state;
+    if (current is! DeviceRealtimeConnected) return;
+    final policy = _watchdog.policy!;
+    _log(
+      'heartbeat overdue: no PING for ${_seconds(_watchdog.evidenceAge!)} '
+      '(limit ${_seconds(_watchdog.thresholdFor(policy))}, heartbeat '
+      '$policy); the channel counts as down until the next PING',
+    );
+    emit(DeviceRealtimeHeartbeatOverdue(confirmation: current.confirmation));
+  }
+
+  Future<void> _onHeartbeatStalled(
+    _HeartbeatStalled event,
+    Emitter<DeviceRealtimeState> emit,
+  ) async {
+    if (event.watch != _watchdog.watch) return;
+    if (state is! DeviceRealtimeHeartbeatOverdue) return;
+    final token = _activeToken;
+    if (token == null) return;
+    // socket_io_client should have closed it on its own `ping timeout` by
+    // now. It has not, and the tablet would otherwise stay suspended on a
+    // socket that can never be confirmed again. The token was not judged: the
+    // same one opens the next socket, and a refusal of it renews as usual.
+    _log(
+      'heartbeat stalled: no PING for ${_seconds(_watchdog.evidenceAge!)} and '
+      'the transport has not given up; a new socket replaces it',
+    );
+    _noteConnectionLost();
+    emit(const DeviceRealtimeReconnecting());
+    _client.connect(token);
+  }
+
+  static String _seconds(Duration duration) =>
+      '${(duration.inMilliseconds / 1000).toStringAsFixed(2)} s';
+
+  void _log(String message) {
+    if (kDebugMode) developer.log(message, name: _loggerName);
   }
 
   // ------------------------------------------------------------- recovery
@@ -407,6 +533,7 @@ class DeviceRealtimeBloc
     _renewing = false;
     _cancelRetry();
     _connectedSince = null;
+    _watchdog.stop();
   }
 
   void _stop(Emitter<DeviceRealtimeState> emit, DeviceRealtimeState next) {
@@ -444,6 +571,9 @@ class DeviceRealtimeBloc
   /// A connection that had stayed up for [_stableConnectionPeriod] earns the
   /// next recovery an immediate start again.
   void _noteConnectionLost() {
+    // Nothing is watched without a connection: a later PING of a socket the
+    // transport is retrying cannot count for it.
+    _watchdog.stop();
     final since = _connectedSince;
     _connectedSince = null;
     if (since != null &&
