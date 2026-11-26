@@ -7,6 +7,7 @@ import 'package:remote_control_device/app/remote_session_coordinator.dart';
 import 'package:remote_control_device/app/signaling_coordinator.dart';
 import 'package:remote_control_device/app/support_coordinator.dart';
 import 'package:remote_control_device/app/webrtc_coordinator.dart';
+import 'package:remote_control_device/core/async/android_elapsed_realtime_clock.dart';
 import 'package:remote_control_device/features/device/domain/realtime/heartbeat_watchdog.dart';
 import 'package:remote_control_device/features/device/presentation/bloc/realtime/device_realtime_bloc.dart';
 import 'package:remote_control_device/features/device/presentation/bloc/session/device_session_bloc.dart';
@@ -34,9 +35,10 @@ class RemoteControlApp extends StatefulWidget {
 class _RemoteControlAppState extends State<RemoteControlApp>
     with WidgetsBindingObserver {
   /// One watchdog for the one `/devices` socket. The realtime bloc feeds it
-  /// (connections, PINGs, losses) and acts on it; the WebRTC bloc only asks it,
+  /// (connections, PINGs, losses) and acts on it; the WebRTC bloc asks it,
   /// right before a command runs, whether the heartbeat still vouches for the
-  /// authority (see `RealtimeLiveness`).
+  /// authority (see `RealtimeLiveness`), and takes from it the evidence the
+  /// screen's native lease runs on (see `HeartbeatEvidenceSource`).
   late final HeartbeatWatchdog _heartbeatWatchdog;
   late final DeviceSessionBloc _sessionBloc;
   late final DeviceRealtimeBloc _realtimeBloc;
@@ -58,6 +60,9 @@ class _RemoteControlAppState extends State<RemoteControlApp>
     WidgetsBinding.instance.addObserver(this);
     _heartbeatWatchdog = HeartbeatWatchdog(
       tolerance: dependencies.config.realtimeHeartbeatTolerance,
+      // The clock the native transmission lease runs on. Without it no
+      // evidence is offered, and the screen is never transmitted.
+      elapsedRealtimeClock: androidElapsedRealtimeClock(),
     );
 
     _sessionBloc = DeviceSessionBloc(
@@ -110,6 +115,10 @@ class _RemoteControlAppState extends State<RemoteControlApp>
       // Asked, not fed: a command arriving after the heartbeat went quiet, and
       // before the suspension reached this bloc, is refused from the clock.
       channelLiveness: _heartbeatWatchdog,
+      // And the screen's native lease: opened with the newest heartbeat
+      // evidence, renewed with every PING, run out on the Android side by
+      // itself when the evidence is too old.
+      transmissionEvidence: _heartbeatWatchdog,
     );
     _remoteControlAccessibilityBloc = RemoteControlAccessibilityBloc(
       client: dependencies.remoteControlAccessibility,

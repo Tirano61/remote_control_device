@@ -3,6 +3,7 @@ import 'dart:developer' as developer;
 
 import 'package:flutter/foundation.dart';
 import 'package:remote_control_device/features/screen_capture/domain/entities/screen_capture_result.dart';
+import 'package:remote_control_device/features/screen_capture/domain/entities/screen_transmission.dart';
 import 'package:remote_control_device/features/screen_capture/domain/entities/screen_video_track.dart';
 import 'package:remote_control_device/features/screen_capture/domain/screen_capture_client.dart';
 import 'package:remote_control_device/features/screen_capture/domain/screen_capture_platform.dart';
@@ -66,6 +67,14 @@ class MediaProjectionScreenCaptureClient implements ScreenCaptureClient {
   /// it. Set before the platform is called, so that calls made one after the
   /// other reach it in that order and each is compared with the last one.
   bool _transmitting = false;
+
+  /// The number of the running opening, and the connection its evidence came
+  /// from; `null` while closed. Openings are numbered for the life of the
+  /// process and never reused, so an answer or a renewal about an older one
+  /// can be told from the one that holds, here and natively.
+  int? _grant;
+  int? _grantChannel;
+  int _grants = 0;
 
   /// Whether the foreground service was asked to start and not yet asked to
   /// stop. Set *before* the start is awaited, so that a start which threw
@@ -212,6 +221,8 @@ class MediaProjectionScreenCaptureClient implements ScreenCaptureClient {
     _videoTrack = videoTracks.single;
     _remoteSessionId = remoteSessionId;
     _transmitting = false;
+    _grant = null;
+    _grantChannel = null;
     capture.onEnded = _onEndedByPlatform;
 
     _log('capture started');
@@ -219,28 +230,98 @@ class MediaProjectionScreenCaptureClient implements ScreenCaptureClient {
   }
 
   @override
-  Future<bool> setTransmitting(bool transmitting) async {
+  Future<ScreenTransmissionOutcome> setTransmitting(
+    bool transmitting, {
+    ScreenTransmissionEvidence? evidence,
+  }) async {
     final capture = _capture;
-    if (capture == null) return true;
-    if (_transmitting == transmitting) return true;
+    if (capture == null) return ScreenTransmissionOutcome.applied;
+    if (_transmitting == transmitting) return ScreenTransmissionOutcome.applied;
+    if (transmitting && evidence == null) {
+      // No deadline to give the gate, so no opening: the Android side has no
+      // way to transmit without one.
+      _log('transmission not resumed for $_remoteSessionId: no heartbeat evidence');
+      return ScreenTransmissionOutcome.lapsed;
+    }
     _transmitting = transmitting;
+    final grant = transmitting ? ++_grants : null;
+    _grant = grant;
+    _grantChannel = transmitting ? evidence!.channel : null;
     _log(
       transmitting
-          ? 'transmission resumed for $_remoteSessionId'
+          ? 'transmission resumed for $_remoteSessionId (grant $grant)'
           : 'transmission suspended for $_remoteSessionId',
     );
     try {
-      await capture.setTransmitting(transmitting);
-      return true;
+      if (grant == null) {
+        await capture.closeTransmission();
+        return ScreenTransmissionOutcome.applied;
+      }
+      final live = await capture.openTransmission(
+        grant: grant,
+        evidence: evidence!,
+      );
+      if (live || !identical(_capture, capture) || _grant != grant) {
+        return ScreenTransmissionOutcome.applied;
+      }
+      _log('transmission lease of grant $grant ran out on arrival');
+      return ScreenTransmissionOutcome.lapsed;
     } catch (_) {
       // Stopped or replaced meanwhile: what the call was about is gone, and
       // it transmits nothing.
-      if (!identical(_capture, capture)) return true;
+      if (!identical(_capture, capture)) return ScreenTransmissionOutcome.applied;
       // The last resort. A capture whose frames cannot be held back is not
       // left running, and one that cannot be let through is of no use.
       _log('transmission could not be changed: capture stopped');
       await stop();
-      return false;
+      return ScreenTransmissionOutcome.failed;
+    }
+  }
+
+  @override
+  Future<ScreenTransmissionRenewal> renewTransmission(
+    ScreenTransmissionEvidence evidence,
+  ) async {
+    final capture = _capture;
+    final grant = _grant;
+    if (capture == null || !_transmitting || grant == null) {
+      return ScreenTransmissionRenewal.ignored;
+    }
+    if (evidence.channel != _grantChannel) {
+      // Evidence of another connection says nothing about the one this lease
+      // was opened on. The lease runs out by itself; the authority has to be
+      // confirmed on the new connection and opened again.
+      _log('transmission lease of grant $grant not renewed: other connection');
+      return ScreenTransmissionRenewal.lapsed;
+    }
+    final ScreenLeaseRenewalAnswer answer;
+    try {
+      answer = await capture.renewTransmission(grant: grant, evidence: evidence);
+    } catch (_) {
+      // Not renewed. The lease runs out natively by itself, which is the
+      // safe outcome; it is reported as such so that it is confirmed again.
+      if (!identical(_capture, capture) || _grant != grant) {
+        return ScreenTransmissionRenewal.ignored;
+      }
+      _log('transmission lease of grant $grant could not be renewed');
+      return ScreenTransmissionRenewal.lapsed;
+    }
+    // An answer about an opening that has since been closed or replaced is
+    // news about nothing.
+    if (!identical(_capture, capture) || _grant != grant) {
+      return ScreenTransmissionRenewal.ignored;
+    }
+    switch (answer.result) {
+      case ScreenLeaseRenewalResult.renewed:
+        if (answer.live) return ScreenTransmissionRenewal.renewed;
+        _log('transmission lease of grant $grant renewed too late');
+        return ScreenTransmissionRenewal.lapsed;
+      case ScreenLeaseRenewalResult.lapsed:
+      case ScreenLeaseRenewalResult.rejected:
+        _log('transmission lease of grant $grant lapsed (${answer.result.name})');
+        return ScreenTransmissionRenewal.lapsed;
+      case ScreenLeaseRenewalResult.ignored:
+        return ScreenTransmissionRenewal.ignored;
     }
   }
 
@@ -256,6 +337,8 @@ class MediaProjectionScreenCaptureClient implements ScreenCaptureClient {
     _videoTrack = null;
     _remoteSessionId = null;
     _transmitting = false;
+    _grant = null;
+    _grantChannel = null;
 
     if (capture != null) {
       // Detached first, so this teardown cannot come back as "the platform

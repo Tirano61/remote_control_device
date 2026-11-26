@@ -2,6 +2,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:remote_control_device/features/screen_capture/data/flutter_webrtc_screen_media.dart';
 import 'package:remote_control_device/features/screen_capture/data/method_channel_media_projection_service.dart';
+import 'package:remote_control_device/features/screen_capture/domain/entities/screen_transmission.dart';
 
 /// The capture and consent adapters, from the Dart side of the wire.
 ///
@@ -117,23 +118,108 @@ void main() {
       ]);
     });
 
-    test('opens and closes its transmission gate by its own id', () async {
-      reply = (call) =>
-          call.method == 'startScreenCapture' ? started('track-a') : true;
+    const evidence = ScreenTransmissionEvidence(
+      channel: 4,
+      observedAtNanos: 123456789012345,
+      validFor: Duration(seconds: 13),
+    );
+
+    test('opens under a lease and closes its gate, by its own id', () async {
+      reply = (call) => call.method == 'startScreenCapture'
+          ? started('track-a')
+          : {'applied': true, 'live': true};
       final capture = await source.open();
       calls.clear();
 
-      await capture.setTransmitting(true);
-      await capture.setTransmitting(false);
+      expect(
+        await capture.openTransmission(grant: 7, evidence: evidence),
+        isTrue,
+      );
+      await capture.closeTransmission();
 
       expect(calls.map((call) => call.method), [
         'setScreenCaptureTransmission',
         'setScreenCaptureTransmission',
       ]);
       expect(calls.map((call) => call.arguments), [
-        {'trackId': 'track-a', 'transmitting': true},
+        {
+          'trackId': 'track-a',
+          'transmitting': true,
+          'grant': 7,
+          'evidenceAtNanos': 123456789012345,
+          'validForMs': 13000,
+        },
         {'trackId': 'track-a', 'transmitting': false},
       ]);
+    });
+
+    test('an opening that is not live, or not applied, answers false', () async {
+      final capture = await () async {
+        reply = (call) => started('track-a');
+        return source.open();
+      }();
+      reply = (call) => {'applied': true, 'live': false};
+      expect(
+        await capture.openTransmission(grant: 1, evidence: evidence),
+        isFalse,
+      );
+      reply = (call) => {'applied': false, 'live': false};
+      expect(
+        await capture.openTransmission(grant: 2, evidence: evidence),
+        isFalse,
+      );
+      reply = (call) => null;
+      expect(
+        await capture.openTransmission(grant: 3, evidence: evidence),
+        isFalse,
+      );
+    });
+
+    test('renews by its own id and reads every answer', () async {
+      reply = (call) => started('track-a');
+      final capture = await source.open();
+      calls.clear();
+
+      Future<ScreenLeaseRenewalAnswer> renewWith(Object? answer) {
+        reply = (call) => answer;
+        return capture.renewTransmission(grant: 7, evidence: evidence);
+      }
+
+      expect(
+        await renewWith({'result': 'renewed', 'live': true}),
+        const ScreenLeaseRenewalAnswer(
+          ScreenLeaseRenewalResult.renewed,
+          live: true,
+        ),
+      );
+      expect(
+        (await renewWith({'result': 'ignored', 'live': false})).result,
+        ScreenLeaseRenewalResult.ignored,
+      );
+      expect(
+        (await renewWith({'result': 'rejected', 'live': true})).result,
+        ScreenLeaseRenewalResult.rejected,
+      );
+      expect(
+        (await renewWith({'result': 'lapsed', 'live': false})).result,
+        ScreenLeaseRenewalResult.lapsed,
+      );
+      // An answer this side cannot read is a lapse: the safe reading.
+      expect(
+        (await renewWith({'result': 'what'})).result,
+        ScreenLeaseRenewalResult.lapsed,
+      );
+      expect(
+        (await renewWith(null)).result,
+        ScreenLeaseRenewalResult.lapsed,
+      );
+      expect(calls.first.method, 'renewScreenCaptureTransmission');
+      expect(calls.first.arguments, {
+        'trackId': 'track-a',
+        'grant': 7,
+        'evidenceAtNanos': 123456789012345,
+        'validForMs': 13000,
+      });
     });
 
     test('a gate the platform could not change reaches the caller', () async {
@@ -144,7 +230,11 @@ void main() {
       });
 
       await expectLater(
-        capture.setTransmitting(false),
+        capture.closeTransmission(),
+        throwsA(isA<PlatformException>()),
+      );
+      await expectLater(
+        capture.renewTransmission(grant: 1, evidence: evidence),
         throwsA(isA<PlatformException>()),
       );
     });
@@ -155,7 +245,15 @@ void main() {
       await capture.dispose();
       calls.clear();
 
-      await capture.setTransmitting(true);
+      expect(
+        await capture.openTransmission(grant: 1, evidence: evidence),
+        isFalse,
+      );
+      await capture.closeTransmission();
+      expect(
+        (await capture.renewTransmission(grant: 1, evidence: evidence)).result,
+        ScreenLeaseRenewalResult.ignored,
+      );
 
       expect(calls, isEmpty);
     });

@@ -505,6 +505,17 @@ the track is on: a replaced peer, a recovery, an old generation. The policy,
 the alternatives considered and the runs on the T10A are in
 [LIFECYCLE.md](../remote_session/LIFECYCLE.md#video-during-an-authority-loss-prompt-40).
 
+Since Prompt 43 an open gate also carries a **lease**: the opening is given the
+newest `/devices` heartbeat evidence, stamped on `CLOCK_BOOTTIME`, and every
+PING that continues the chain renews it (`renewScreenCaptureTransmission`).
+`onFrame` checks it against `SystemClock.elapsedRealtimeNanos()` for every
+frame, without a lock, so frames stop at `evidence + pingInterval + min(3 s,
+pingTimeout)` (13 s) even if Dart never runs to say so. A lapse found natively
+closes the gate in Dart too and goes through the C2 confirmation; nothing but a
+new opening after that confirmation sends again. MediaProjection, the peer and
+the negotiation are untouched by an expiry. Details and the T10A runs:
+[LIFECYCLE.md](../remote_session/LIFECYCLE.md#native-transmission-lease-prompt-43).
+
 ## The foreground service
 
 `MediaProjectionForegroundService.kt`, deliberately dull:

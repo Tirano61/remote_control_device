@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:remote_control_device/features/screen_capture/domain/entities/screen_capture_result.dart';
+import 'package:remote_control_device/features/screen_capture/domain/entities/screen_transmission.dart';
 import 'package:remote_control_device/features/screen_capture/domain/entities/screen_video_track.dart';
 import 'package:remote_control_device/features/screen_capture/domain/screen_capture_client.dart';
 import 'package:remote_control_device/features/screen_capture/domain/screen_capture_platform.dart';
@@ -76,6 +77,10 @@ class FakeScreenCapturePlatform {
   final List<FakeScreenMediaCapture> captures = [];
 
   FakeScreenMediaCapture get lastCapture => captures.last;
+
+  /// Android's elapsed-realtime clock, in nanoseconds, as the native gate
+  /// reads it. Moved by the test.
+  int realtimeNanos = 1000000000000;
 
   bool get foregroundServiceRunning =>
       calls.where((call) => call == 'foregroundService.start').length >
@@ -158,6 +163,26 @@ class FakeScreenMediaCapture implements ScreenMediaCapture {
   /// Every transmission change asked of this capture, in order.
   final List<bool> transmissionCalls = [];
 
+  /// The native lease, under the same rules as `ScreenCaptureTransmission.kt`:
+  /// only a newer grant opens, a renewal only moves it forward, evidence at or
+  /// past the deadline lapses it, nothing renews a closed gate.
+  int highestGrant = 0;
+  int? leaseGrant;
+  int? leaseEvidenceAt;
+  int? leaseValidFor;
+
+  /// Every renewal asked of this capture, as `(grant, evidenceAtNanos)`.
+  final List<(int, int)> renewalCalls = [];
+
+  int get _now => _platform.realtimeNanos;
+
+  /// Whether a frame arriving now would go through.
+  bool get live =>
+      !isDisposed &&
+      transmitting &&
+      leaseEvidenceAt != null &&
+      _now < leaseEvidenceAt! + leaseValidFor!;
+
   bool get isDisposed => disposeCount > 0;
   bool get isListened => _onEnded != null;
 
@@ -171,12 +196,66 @@ class FakeScreenMediaCapture implements ScreenMediaCapture {
   }
 
   @override
-  Future<void> setTransmitting(bool transmitting) async {
-    _platform.calls.add('capture.transmit:$transmitting');
-    transmissionCalls.add(transmitting);
+  Future<bool> openTransmission({
+    required int grant,
+    required ScreenTransmissionEvidence evidence,
+  }) async {
+    _platform.calls.add('capture.transmit:true');
+    transmissionCalls.add(true);
+    if (_platform.transmissionThrows) throw StateError('gate unavailable');
+    if (isDisposed || grant <= highestGrant) return false;
+    highestGrant = grant;
+    final validFor = evidence.validFor.inMicroseconds * 1000;
+    if (evidence.observedAtNanos > _now || validFor <= 0) {
+      transmitting = false;
+      leaseGrant = null;
+      return false;
+    }
+    transmitting = true;
+    leaseGrant = grant;
+    leaseEvidenceAt = evidence.observedAtNanos;
+    leaseValidFor = validFor;
+    return live;
+  }
+
+  @override
+  Future<void> closeTransmission() async {
+    _platform.calls.add('capture.transmit:false');
+    transmissionCalls.add(false);
     if (_platform.transmissionThrows) throw StateError('gate unavailable');
     if (isDisposed) return;
-    this.transmitting = transmitting;
+    transmitting = false;
+    leaseGrant = null;
+  }
+
+  @override
+  Future<ScreenLeaseRenewalAnswer> renewTransmission({
+    required int grant,
+    required ScreenTransmissionEvidence evidence,
+  }) async {
+    _platform.calls.add('capture.renew:$grant');
+    renewalCalls.add((grant, evidence.observedAtNanos));
+    if (_platform.transmissionThrows) throw StateError('gate unavailable');
+    ScreenLeaseRenewalAnswer answer(ScreenLeaseRenewalResult result) =>
+        ScreenLeaseRenewalAnswer(result, live: live);
+    if (isDisposed || !transmitting || leaseGrant != grant) {
+      return const ScreenLeaseRenewalAnswer(
+        ScreenLeaseRenewalResult.ignored,
+        live: false,
+      );
+    }
+    final validFor = evidence.validFor.inMicroseconds * 1000;
+    if (evidence.observedAtNanos > _now || validFor != leaseValidFor) {
+      return answer(ScreenLeaseRenewalResult.rejected);
+    }
+    if (evidence.observedAtNanos <= leaseEvidenceAt!) {
+      return answer(ScreenLeaseRenewalResult.ignored);
+    }
+    if (evidence.observedAtNanos >= leaseEvidenceAt! + leaseValidFor!) {
+      return answer(ScreenLeaseRenewalResult.lapsed);
+    }
+    leaseEvidenceAt = evidence.observedAtNanos;
+    return answer(ScreenLeaseRenewalResult.renewed);
   }
 
   /// Android ended the capture on its own — the user pressing *Stop sharing*
@@ -223,18 +302,61 @@ class FakeScreenCaptureClient implements ScreenCaptureClient {
   bool transmissionFails = false;
 
   /// Frames the technician would receive: one per [screenChanged] made while
-  /// [transmitting]. What a frame counter on the receiving side would count.
+  /// [live]. What a frame counter on the receiving side would count.
   int framesSent = 0;
 
   /// Frames the capture produced while held back.
   int framesWithheld = 0;
 
-  /// The screen changed. Counted as sent only while transmitting, and only
-  /// while a capture runs at all.
+  /// Frames held back with the gate open, because its lease had run out.
+  int framesExpired = 0;
+
+  /// When set, the gate keeps a lease the way the Android side does, on this
+  /// clock (elapsed realtime, nanoseconds): an opening needs evidence, frames
+  /// go through only until `evidence + validFor`, a renewal moves it only
+  /// forward and lapses on evidence at or past the deadline. Unset, every
+  /// opening is live for ever: the bloc tests that predate the lease.
+  int Function()? realtimeNanos;
+
+  /// The evidence the running lease runs from; `null` while closed.
+  ScreenTransmissionEvidence? lease;
+
+  /// Every opening, with the evidence it was given.
+  final List<ScreenTransmissionEvidence?> openings = [];
+
+  /// Every renewal asked for, with what the fake gate answered.
+  final List<(ScreenTransmissionEvidence, ScreenTransmissionRenewal)>
+  renewals = [];
+
+  /// When set, a renewal waits for the test to complete it before the fake
+  /// gate applies it: a message still on its way while something else
+  /// happens.
+  Completer<void>? renewalGate;
+
+  /// When true, the next renewal is answered as a lapse whatever its
+  /// evidence: the Android side saw the lease run out where Dart did not.
+  bool lapseNextRenewal = false;
+
+  /// Whether a frame arriving now would reach the technician.
+  bool get live {
+    if (!_active || !transmitting) return false;
+    final clock = realtimeNanos;
+    if (clock == null) return true;
+    final lease = this.lease;
+    return lease != null && clock() < _deadlineOf(lease);
+  }
+
+  static int _deadlineOf(ScreenTransmissionEvidence lease) =>
+      lease.observedAtNanos + lease.validFor.inMicroseconds * 1000;
+
+  /// The screen changed. Counted as sent only while live, and only while a
+  /// capture runs at all.
   void screenChanged() {
     if (!_active) return;
-    if (transmitting) {
+    if (live) {
       framesSent++;
+    } else if (transmitting) {
+      framesExpired++;
     } else {
       framesWithheld++;
     }
@@ -266,18 +388,77 @@ class FakeScreenCaptureClient implements ScreenCaptureClient {
   }
 
   @override
-  Future<bool> setTransmitting(bool transmitting) async {
+  Future<ScreenTransmissionOutcome> setTransmitting(
+    bool transmitting, {
+    ScreenTransmissionEvidence? evidence,
+  }) async {
     final remoteSessionId = _remoteSessionId;
-    if (!_active || remoteSessionId == null) return true;
-    if (this.transmitting == transmitting) return true;
+    if (!_active || remoteSessionId == null) {
+      return ScreenTransmissionOutcome.applied;
+    }
+    if (this.transmitting == transmitting) {
+      return ScreenTransmissionOutcome.applied;
+    }
     if (transmissionFails) {
       transmissionFails = false;
       await stop();
-      return false;
+      return ScreenTransmissionOutcome.failed;
+    }
+    final clock = realtimeNanos;
+    if (transmitting && clock != null && evidence == null) {
+      return ScreenTransmissionOutcome.lapsed;
     }
     this.transmitting = transmitting;
     transmissions.add((remoteSessionId, transmitting));
-    return true;
+    if (!transmitting) {
+      lease = null;
+      return ScreenTransmissionOutcome.applied;
+    }
+    openings.add(evidence);
+    lease = evidence;
+    return live
+        ? ScreenTransmissionOutcome.applied
+        : ScreenTransmissionOutcome.lapsed;
+  }
+
+  @override
+  Future<ScreenTransmissionRenewal> renewTransmission(
+    ScreenTransmissionEvidence evidence,
+  ) async {
+    ScreenTransmissionRenewal answer(ScreenTransmissionRenewal renewal) {
+      renewals.add((evidence, renewal));
+      return renewal;
+    }
+
+    final gate = renewalGate;
+    if (gate != null) await gate.future;
+    if (!_active || !transmitting) {
+      return answer(ScreenTransmissionRenewal.ignored);
+    }
+    if (lapseNextRenewal) {
+      lapseNextRenewal = false;
+      this.lease = null;
+      return answer(ScreenTransmissionRenewal.lapsed);
+    }
+    final clock = realtimeNanos;
+    final lease = this.lease;
+    if (clock == null || lease == null) {
+      this.lease = evidence;
+      return answer(ScreenTransmissionRenewal.renewed);
+    }
+    if (evidence.channel != lease.channel) {
+      return answer(ScreenTransmissionRenewal.lapsed);
+    }
+    if (evidence.observedAtNanos <= lease.observedAtNanos) {
+      return answer(ScreenTransmissionRenewal.ignored);
+    }
+    if (evidence.observedAtNanos >= _deadlineOf(lease)) {
+      return answer(ScreenTransmissionRenewal.lapsed);
+    }
+    this.lease = evidence;
+    return answer(
+      live ? ScreenTransmissionRenewal.renewed : ScreenTransmissionRenewal.lapsed,
+    );
   }
 
   /// Called at the moment [stop] is, before anything is released. Lets a test
@@ -291,6 +472,7 @@ class FakeScreenCaptureClient implements ScreenCaptureClient {
     _active = false;
     _remoteSessionId = null;
     transmitting = false;
+    lease = null;
   }
 
   final StreamController<String> _endedByPlatform =

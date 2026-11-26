@@ -33,6 +33,9 @@ void main() {
   late DeviceRealtimeBloc bloc;
   late List<DeviceRealtimeState> states;
 
+  /// The clocks running ahead of the timers: the isolate was held.
+  var ahead = Duration.zero;
+
   const confirmation = DeviceRealtimeConfirmation(
     deviceId: testDeviceId,
     publicId: testPublicId,
@@ -47,10 +50,12 @@ void main() {
       loginResult: const Ok(testRenewedSession),
       tokenStore: tokenStore,
     );
+    ahead = Duration.zero;
     watchdog = HeartbeatWatchdog(
       timerFactory: timers.factory,
-      monotonicClock: () => timers.now,
-      wallClock: () => DateTime.utc(2026, 11, 26).add(timers.now),
+      monotonicClock: () => timers.now + ahead,
+      wallClock: () => DateTime.utc(2026, 11, 26).add(timers.now + ahead),
+      elapsedRealtimeClock: () => (timers.now + ahead).inMicroseconds * 1000,
     );
     bloc = DeviceRealtimeBloc(
       client: client,
@@ -168,6 +173,47 @@ void main() {
     expect(bloc.state, const DeviceRealtimeConnected());
     await elapse(ms(1));
     expect(bloc.state, isA<DeviceRealtimeHeartbeatOverdue>());
+  });
+
+  test('Prompt 43: a PING handled after an unseen lapse (the isolate was '
+      'held past the deadline) is an overdue that is already over: both '
+      'states, in that order, on the same connection', () async {
+    await connect();
+    await elapse(s(5));
+    states.clear();
+    ahead = s(15); // held: no timer ran, the PING waited
+    await ping();
+    expect(states, const [
+      DeviceRealtimeHeartbeatOverdue(confirmation: confirmation),
+      DeviceRealtimeConnected(confirmation: confirmation),
+    ]);
+    expect(client.connectedWithTokens, hasLength(1));
+    expect(client.disconnectCount, 0);
+    // And the next deadline counts from that PING.
+    states.clear();
+    await elapse(s(12));
+    expect(states, isEmpty);
+    await elapse(s(1));
+    expect(bloc.state, isA<DeviceRealtimeHeartbeatOverdue>());
+  });
+
+  test('Prompt 43: a lapse the native gate reported is an overdue, and the '
+      'next PING brings the channel back', () async {
+    await connect();
+    await elapse(s(5));
+    final evidence = watchdog.currentEvidence!;
+    watchdog.reportLapse(
+      watch: evidence.watch,
+      observedAtNanos: evidence.observedAtNanos,
+    );
+    await pumpEventQueue();
+    expect(
+      bloc.state,
+      const DeviceRealtimeHeartbeatOverdue(confirmation: confirmation),
+    );
+    await elapse(s(5));
+    await ping();
+    expect(bloc.state, const DeviceRealtimeConnected(confirmation: confirmation));
   });
 
   test('a PING while not connected changes nothing', () async {

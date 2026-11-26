@@ -1,3 +1,4 @@
+import 'package:remote_control_device/features/screen_capture/domain/entities/screen_transmission.dart';
 import 'package:remote_control_device/features/screen_capture/domain/entities/screen_video_track.dart';
 
 /// The three platform facilities a screen capture is made of.
@@ -78,13 +79,36 @@ abstract interface class ScreenMediaCapture {
   /// come back as a notification about a capture nobody holds any more.
   set onEnded(void Function()? listener);
 
-  /// Lets the capture's frames reach WebRTC, or keeps every one of them back,
-  /// without stopping the capture: the projection, the user's consent and the
-  /// notification stay. A new capture starts with its frames kept back.
+  /// Lets the capture's frames reach WebRTC under opening [grant], for as long
+  /// as [evidence] vouches, without stopping the capture: the projection, the
+  /// user's consent and the notification stay. A new capture starts with its
+  /// frames kept back.
   ///
-  /// Throws when the platform could not apply it. Nothing on a capture that is
-  /// already released.
-  Future<void> setTransmitting(bool transmitting);
+  /// The deadline is kept natively and checked for every frame, so frames stop
+  /// when the evidence runs out whether or not this isolate runs again.
+  /// Answers whether frames go through now: `false` when the evidence had
+  /// already run out on arrival, or the gate refused it.
+  ///
+  /// [grant] must be newer than every grant opened on this capture before: an
+  /// older one is not applied (answers `false`). Throws when the platform could
+  /// not apply it. `false` on a capture that is already released.
+  Future<bool> openTransmission({
+    required int grant,
+    required ScreenTransmissionEvidence evidence,
+  });
+
+  /// Keeps every frame back again. Throws when the platform could not apply
+  /// it. Nothing on a capture that is already released.
+  Future<void> closeTransmission();
+
+  /// Renews the lease of opening [grant] with fresher [evidence]. Never opens a
+  /// closed gate and never revives a lease that ran out before [evidence].
+  /// Throws when the platform could not be asked; `ignored` on a capture that
+  /// is already released.
+  Future<ScreenLeaseRenewalAnswer> renewTransmission({
+    required int grant,
+    required ScreenTransmissionEvidence evidence,
+  });
 
   /// Stops every track and releases the stream. Idempotent, and never throws:
   /// it is called from teardown paths that have nothing left to do about a

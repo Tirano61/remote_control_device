@@ -98,4 +98,24 @@ class RunningScreenCaptureTest {
         running.stop()
         assertTrue(released.isEmpty())
     }
+
+    @Test
+    fun `8 a lease message for a replaced capture never reaches its replacement`() {
+        // Each capture carries its own gate; a message is addressed by track id.
+        var now = 0L
+        val gates = mutableMapOf<String, ScreenCaptureTransmission>()
+        val leased = RunningScreenCapture<Capture>(trackIdOf = { it.trackId }, release = {})
+        leased.started(Capture("old"))
+        gates["old"] = ScreenCaptureTransmission { now }
+        leased.started(Capture("new"))
+        gates["new"] = ScreenCaptureTransmission { now }
+
+        val opened = leased.ifRunning("old") { gates.getValue(it.trackId).open(1, now, 13_000_000_000L) }
+        val renewed = leased.ifRunning("old") { gates.getValue(it.trackId).renew(1, now, 13_000_000_000L) }
+
+        assertNull(opened)
+        assertNull(renewed)
+        assertFalse(gates.getValue("new").transmitting)
+        assertEquals(FrameAdmission.WITHHELD_CLOSED, gates.getValue("new").admit())
+    }
 }

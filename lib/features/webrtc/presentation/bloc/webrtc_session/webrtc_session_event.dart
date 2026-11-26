@@ -215,3 +215,33 @@ final class _WebRtcScreenTransmissionFailed extends WebRtcSessionEvent {
   @override
   List<Object?> get props => [remoteSessionId];
 }
+
+/// A PING continued the `/devices` heartbeat chain. Raised only by the bloc,
+/// from its evidence source: the running transmission lease is renewed with it,
+/// and it grants nothing.
+final class _WebRtcHeartbeatEvidence extends WebRtcSessionEvent {
+  const _WebRtcHeartbeatEvidence(this.evidence);
+
+  final HeartbeatEvidence evidence;
+
+  @override
+  List<Object?> get props => [evidence];
+}
+
+/// The native gate found the transmission lease of opening [epoch] run out:
+/// the heartbeat evidence stopped vouching while frames could flow. Raised
+/// only by the bloc, from the capture client's answer.
+final class _WebRtcScreenLeaseLapsed extends WebRtcSessionEvent {
+  const _WebRtcScreenLeaseLapsed(
+    this.remoteSessionId, {
+    required this.epoch,
+    required this.evidence,
+  });
+
+  final String remoteSessionId;
+  final int epoch;
+  final HeartbeatEvidence? evidence;
+
+  @override
+  List<Object?> get props => [remoteSessionId, epoch, evidence];
+}

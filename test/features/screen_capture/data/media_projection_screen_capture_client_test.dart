@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:remote_control_device/features/screen_capture/data/media_projection_screen_capture_client.dart';
 import 'package:remote_control_device/features/screen_capture/domain/entities/screen_capture_result.dart';
+import 'package:remote_control_device/features/screen_capture/domain/entities/screen_transmission.dart';
 
 import '../../../fakes/screen_capture_fakes.dart';
 
@@ -563,6 +564,20 @@ void main() {
   // ------------------------------------------------- transmission (Prompt 40)
 
   group('transmitting is not capturing', () {
+    /// Evidence observed [ageMs] ago on connection [channel], on the fake
+    /// native clock.
+    ScreenTransmissionEvidence evidence({int ageMs = 0, int channel = 1}) =>
+        ScreenTransmissionEvidence(
+          channel: channel,
+          observedAtNanos: platform.realtimeNanos - ageMs * 1000000,
+          validFor: const Duration(seconds: 13),
+        );
+
+    Future<ScreenTransmissionOutcome> open([ScreenTransmissionEvidence? e]) =>
+        client.setTransmitting(true, evidence: e ?? evidence());
+
+    const applied = ScreenTransmissionOutcome.applied;
+
     test('a new capture transmits nothing until it is told to', () async {
       await client.requestAndStart(session);
 
@@ -570,8 +585,9 @@ void main() {
       expect(platform.lastCapture.transmissionCalls, isEmpty);
       expect(platform.lastCapture.transmitting, isFalse);
 
-      expect(await client.setTransmitting(true), isTrue);
+      expect(await open(), applied);
       expect(platform.lastCapture.transmitting, isTrue);
+      expect(platform.lastCapture.live, isTrue);
     });
 
     test('each change reaches the platform once and in order; a repeat '
@@ -579,21 +595,21 @@ void main() {
       await client.requestAndStart(session);
 
       final results = await Future.wait([
-        client.setTransmitting(true),
-        client.setTransmitting(true),
+        open(),
+        open(),
         client.setTransmitting(false),
         client.setTransmitting(false),
-        client.setTransmitting(true),
+        open(),
       ]);
 
-      expect(results, everyElement(isTrue));
+      expect(results, everyElement(applied));
       expect(platform.lastCapture.transmissionCalls, [true, false, true]);
     });
 
     test('holding back keeps the capture, its service and its consent',
         () async {
       await client.requestAndStart(session);
-      await client.setTransmitting(true);
+      await open();
       final from = platform.calls.length;
 
       await client.setTransmitting(false);
@@ -603,7 +619,7 @@ void main() {
       expect(platform.foregroundServiceRunning, isTrue);
       // The same session afterwards needs no second dialog.
       await client.requestAndStart(session);
-      await client.setTransmitting(true);
+      await open();
       expect(
         platform.calls.skip(from).where((c) => c == 'consent.request'),
         isEmpty,
@@ -613,38 +629,45 @@ void main() {
     test('a reused capture keeps what it was told; a new one starts held back',
         () async {
       await client.requestAndStart(session);
-      await client.setTransmitting(true);
+      await open();
 
       await client.requestAndStart(session);
-      expect(await client.setTransmitting(true), isTrue);
+      expect(await open(), applied);
       expect(platform.lastCapture.transmissionCalls, [true]);
 
       await client.requestAndStart(otherSession);
       expect(platform.lastCapture.transmitting, isFalse);
-      await client.setTransmitting(true);
+      await open();
       expect(platform.lastCapture.transmissionCalls, [true]);
     });
 
     test('with no capture there is nothing to transmit or hold back',
         () async {
-      expect(await client.setTransmitting(true), isTrue);
-      expect(await client.setTransmitting(false), isTrue);
+      expect(await open(), applied);
+      expect(await client.setTransmitting(false), applied);
+      expect(
+        await client.renewTransmission(evidence()),
+        ScreenTransmissionRenewal.ignored,
+      );
       expect(platform.calls, isEmpty);
 
       await client.requestAndStart(session);
       await client.stop();
       platform.calls.clear();
-      expect(await client.setTransmitting(true), isTrue);
+      expect(await open(), applied);
       expect(platform.calls, isEmpty);
     });
 
     test('a change the platform refuses stops the capture as a last resort',
         () async {
       await client.requestAndStart(session);
-      await client.setTransmitting(true);
+      await open();
       platform.transmissionThrows = true;
 
-      expect(await client.setTransmitting(false), isFalse);
+      expect(
+        await client.setTransmitting(false),
+        ScreenTransmissionOutcome.failed,
+      );
 
       expect(client.isActive, isFalse);
       expect(platform.lastCapture.isDisposed, isTrue);
@@ -660,8 +683,164 @@ void main() {
       await Future<void>.delayed(Duration.zero);
 
       expect(ended, [session]);
-      expect(await client.setTransmitting(true), isTrue);
+      expect(await open(), applied);
       expect(platform.lastCapture.transmissionCalls, isEmpty);
+    });
+  });
+
+  // ------------------------------------------- transmission lease (Prompt 43)
+
+  group('the transmission lease', () {
+    ScreenTransmissionEvidence evidence({int ageMs = 0, int channel = 1}) =>
+        ScreenTransmissionEvidence(
+          channel: channel,
+          observedAtNanos: platform.realtimeNanos - ageMs * 1000000,
+          validFor: const Duration(seconds: 13),
+        );
+
+    void elapse(int ms) => platform.realtimeNanos += ms * 1000000;
+
+    Future<ScreenTransmissionOutcome> open([ScreenTransmissionEvidence? e]) =>
+        client.setTransmitting(true, evidence: e ?? evidence());
+
+    test('an opening without evidence opens nothing', () async {
+      await client.requestAndStart(session);
+
+      expect(
+        await client.setTransmitting(true),
+        ScreenTransmissionOutcome.lapsed,
+      );
+      expect(platform.lastCapture.transmissionCalls, isEmpty);
+      // And a real opening afterwards is still the first one.
+      expect(await open(), ScreenTransmissionOutcome.applied);
+    });
+
+    test('every opening is a new grant, never reused across captures',
+        () async {
+      await client.requestAndStart(session);
+      await open();
+      await client.setTransmitting(false);
+      await open();
+      expect(platform.lastCapture.highestGrant, 2);
+
+      await client.requestAndStart(otherSession);
+      await open();
+      expect(platform.lastCapture.leaseGrant, 3);
+    });
+
+    test('an opening whose evidence already ran out is a lapse', () async {
+      await client.requestAndStart(session);
+
+      expect(
+        await open(evidence(ageMs: 13000)),
+        ScreenTransmissionOutcome.lapsed,
+      );
+      expect(platform.lastCapture.live, isFalse);
+    });
+
+    test('a renewal in time keeps it live past the first deadline', () async {
+      await client.requestAndStart(session);
+      await open();
+      elapse(10000);
+
+      expect(
+        await client.renewTransmission(evidence()),
+        ScreenTransmissionRenewal.renewed,
+      );
+      elapse(10000);
+      expect(platform.lastCapture.live, isTrue);
+      expect(platform.lastCapture.renewalCalls.single.$1, 1);
+    });
+
+    test('evidence after the lease ran out is a lapse, for good', () async {
+      await client.requestAndStart(session);
+      await open();
+      elapse(20000);
+
+      expect(
+        await client.renewTransmission(evidence()),
+        ScreenTransmissionRenewal.lapsed,
+      );
+      elapse(5000);
+      expect(
+        await client.renewTransmission(evidence()),
+        ScreenTransmissionRenewal.lapsed,
+      );
+      expect(platform.lastCapture.live, isFalse);
+    });
+
+    test('a timely PING whose message arrives too late to help is a lapse',
+        () async {
+      await client.requestAndStart(session);
+      await open();
+      elapse(12000);
+      final timely = evidence(); // observed 12 s after the opening
+      elapse(13500); // ...and delivered 13.5 s later: Dart was held between
+      expect(
+        await client.renewTransmission(timely),
+        ScreenTransmissionRenewal.lapsed,
+      );
+      expect(platform.lastCapture.live, isFalse);
+    });
+
+    test('evidence of another connection never renews this lease', () async {
+      await client.requestAndStart(session);
+      await open(evidence(channel: 1));
+      elapse(1000);
+
+      expect(
+        await client.renewTransmission(evidence(channel: 2)),
+        ScreenTransmissionRenewal.lapsed,
+      );
+      expect(platform.lastCapture.renewalCalls, isEmpty);
+    });
+
+    test('nothing is renewed while closed, stopped or never opened', () async {
+      await client.requestAndStart(session);
+      expect(
+        await client.renewTransmission(evidence()),
+        ScreenTransmissionRenewal.ignored,
+      );
+      await open();
+      await client.setTransmitting(false);
+      elapse(1000);
+      expect(
+        await client.renewTransmission(evidence()),
+        ScreenTransmissionRenewal.ignored,
+      );
+      await open();
+      await client.stop();
+      expect(
+        await client.renewTransmission(evidence()),
+        ScreenTransmissionRenewal.ignored,
+      );
+      expect(platform.lastCapture.renewalCalls, isEmpty);
+    });
+
+    test('an answer about an opening closed meanwhile is news about nothing',
+        () async {
+      await client.requestAndStart(session);
+      await open();
+      elapse(20000);
+      // The renewal leaves, and before its (lapsed) answer the gate closes.
+      final renewal = client.renewTransmission(evidence());
+      await client.setTransmitting(false);
+
+      expect(await renewal, ScreenTransmissionRenewal.ignored);
+    });
+
+    test('a renewal the platform cannot take is a lapse, and keeps the capture',
+        () async {
+      await client.requestAndStart(session);
+      await open();
+      platform.transmissionThrows = true;
+      elapse(1000);
+
+      expect(
+        await client.renewTransmission(evidence()),
+        ScreenTransmissionRenewal.lapsed,
+      );
+      expect(client.isActive, isTrue);
     });
   });
 }

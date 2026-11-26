@@ -47,6 +47,10 @@ dependencies:
   # Same version remote_control_web uses, so the two ends of the peer
   # connection negotiate with identical libwebrtc behaviour during this stage.
   flutter_webrtc: ^1.6.2+hotfix.2
+  # Already in the graph; depended on directly to read CLOCK_BOOTTIME from Dart
+  # (core/async/android_elapsed_realtime_clock.dart), the clock the native
+  # screen transmission lease runs on.
+  ffi: ^2.2.0
 
 dev_dependencies:
   flutter_test:
