@@ -1,5 +1,6 @@
 import 'package:equatable/equatable.dart';
 import 'package:remote_control_device/features/device/domain/entities/device_realtime_confirmation.dart';
+import 'package:remote_control_device/features/device/domain/realtime/realtime_heartbeat_policy.dart';
 
 /// Transport-agnostic facts reported by the realtime connection.
 ///
@@ -15,7 +16,29 @@ sealed class DeviceRealtimeSignal extends Equatable {
 
 /// The handshake succeeded and the namespace accepted the connection.
 final class RealtimeConnected extends DeviceRealtimeSignal {
-  const RealtimeConnected();
+  const RealtimeConnected({this.heartbeat});
+
+  /// The heartbeat the backend announced in this connection's Engine.IO
+  /// handshake, or `null` when the transport could not tell.
+  final RealtimeHeartbeatPolicy? heartbeat;
+
+  @override
+  List<Object?> get props => [heartbeat];
+}
+
+/// An Engine.IO `PING` arrived on the current connection.
+///
+/// The transport's heartbeat, not an application event: the server sends one
+/// every `pingInterval` (after the previous `PONG`), and the transport answers
+/// it by itself. It is the only evidence the tablet has that the backend can
+/// still reach it; see `HeartbeatWatchdog`.
+///
+/// It carries nothing and authorises nothing. In particular it never confirms
+/// a remote session: after a suspension, a `PING` only makes the channel count
+/// as up again, and the session must still be confirmed by a REST read made
+/// after that.
+final class RealtimeHeartbeat extends DeviceRealtimeSignal {
+  const RealtimeHeartbeat();
 }
 
 /// `device:connected` arrived with a payload that passed validation.
