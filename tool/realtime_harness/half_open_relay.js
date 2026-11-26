@@ -188,9 +188,14 @@ class Pair {
       return;
     }
     if (this.kind === 'http' && direction === 'toServer') {
-      // Keep-alive: a later request on the same connection.
-      const m = /^([A-Z]+) ([^ ?]*) HTTP\/1\.1/.exec(chunk.toString('latin1', 0, 200));
-      if (m) log('request', { pair: this.id, method: m[1], path: m[2], kind: 'http' });
+      // Keep-alive: a later request on the same connection. A dev tunnel
+      // reuses its connections, so the WebSocket upgrade may come this way.
+      const head = chunk.toString('latin1', 0, 2000);
+      const m = /^([A-Z]+) ([^ ?]*)\S* HTTP\/1\.1/.exec(head);
+      if (m) {
+        if (/upgrade: websocket/i.test(head)) this.kind = 'ws';
+        log('request', { pair: this.id, method: m[1], path: m[2], kind: this.kind });
+      }
       return;
     }
     if (this.kind === 'http' && direction === 'toClient') {
