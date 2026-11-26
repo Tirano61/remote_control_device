@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
+import 'package:remote_control_device/features/device/domain/realtime/heartbeat_evidence.dart';
 import 'package:remote_control_device/features/device/domain/realtime/heartbeat_watchdog.dart';
 import 'package:remote_control_device/features/device/domain/realtime/realtime_heartbeat_policy.dart';
 
@@ -122,7 +125,7 @@ void main() {
         () {
       start();
       timers.elapse(ms(12900));
-      expect(watchdog.beat(), ms(12900));
+      expect(watchdog.beat()!.gap, ms(12900));
       timers.elapse(ms(12999));
       expect(events, isEmpty);
     });
@@ -191,7 +194,7 @@ void main() {
       start();
       timers.elapse(s(15));
       expect(watchdog.isOverdue, isTrue);
-      expect(watchdog.beat(), s(15));
+      expect(watchdog.beat()!.gap, s(15));
       expect(watchdog.isOverdue, isFalse);
       expect(watchdog.confirmFresh(), isTrue);
       timers.elapse(ms(12999));
@@ -270,12 +273,17 @@ void main() {
       expect(watchdog.evidenceAge, s(17));
     });
 
-    test('29b. a late timer with a PING handled before it: nothing is '
-        'declared, and the next deadline counts from that PING', () {
+    test('29b. a late timer with a PING handled before it: the beat reports '
+        'the lapse nobody declared (Prompt 43), no callback is raised, and the '
+        'next deadline counts from that PING', () {
       start();
       timers.elapse(s(10));
       timersLate = s(7);
-      watchdog.beat(); // real 17 s, handled before the 13 s timer
+      // real 17 s, handled before the 13 s timer
+      final beat = watchdog.beat()!;
+      expect(beat.gap, s(17));
+      expect(beat.afterUnseenLapse, isTrue);
+      expect(watchdog.isOverdue, isFalse);
       timers.elapse(s(3)); // the timer runs (real 20 s): evidence 3 s old
       expect(events, isEmpty);
       timers.elapse(s(10) - ms(1)); // real 30 s - 1 ms: 13 s - 1 ms old
@@ -357,6 +365,216 @@ void main() {
       expect(watchdog.confirmFresh(), isFalse);
       timers.elapse(Duration.zero);
       expect(events, hasLength(1));
+    });
+  });
+
+  // ------------------------------------- evidence for the native lease (P43)
+
+  group('evidence for the native transmission lease', () {
+    /// Android's elapsed-realtime clock: runs with the manual clock, keeps
+    /// counting in deep sleep (it does not lag), and the test can move it on
+    /// its own.
+    late Duration realtimeOffset;
+    late List<HeartbeatEvidence> published;
+    late StreamSubscription<HeartbeatEvidence> subscription;
+
+    int realtime() =>
+        (timers.now + timersLate + realtimeOffset).inMicroseconds * 1000;
+
+    setUp(() {
+      realtimeOffset = s(5000); // since boot
+      published = [];
+      watchdog = HeartbeatWatchdog(
+        timerFactory: timers.factory,
+        monotonicClock: () => timers.now + timersLate - monotonicLag,
+        wallClock: () => DateTime.utc(
+          2026,
+          11,
+          26,
+          12,
+        ).add(timers.now + timersLate + wallOffset),
+        elapsedRealtimeClock: realtime,
+      );
+      subscription = watchdog.evidence.listen(published.add);
+    });
+
+    tearDown(() => subscription.cancel());
+
+    Future<void> deliver() => Future<void>.delayed(Duration.zero);
+
+    test('the connection coming up is evidence, stamped on the realtime '
+        'clock, valid for the overdue deadline', () {
+      start();
+      expect(
+        watchdog.currentEvidence,
+        HeartbeatEvidence(
+          watch: watchdog.watch,
+          observedAtNanos: realtime(),
+          validFor: s(13),
+        ),
+      );
+    });
+
+    test('every PING that continues the chain is published with its own '
+        'instant; the stream carries the instant, not the delivery', () async {
+      start();
+      timers.elapse(s(10));
+      final at = realtime();
+      watchdog.beat();
+      timers.elapse(s(2)); // the listener runs later; the instant does not move
+      await deliver();
+
+      expect(published, hasLength(1));
+      expect(published.single.observedAtNanos, at);
+      expect(watchdog.currentEvidence!.observedAtNanos, at);
+    });
+
+    test('no evidence without a connection, while overdue, unmonitored, or '
+        'without the clock', () {
+      expect(watchdog.currentEvidence, isNull);
+      start();
+      timers.elapse(s(13));
+      timers.elapse(Duration.zero);
+      expect(watchdog.isOverdue, isTrue);
+      expect(watchdog.currentEvidence, isNull);
+
+      start(null); // unmonitored
+      expect(watchdog.currentEvidence, isNull);
+      watchdog.stop();
+      expect(watchdog.currentEvidence, isNull);
+
+      final noClock = HeartbeatWatchdog(timerFactory: timers.factory);
+      noClock.start(policy1010, onOverdue: (_) {}, onStalled: (_) {});
+      expect(noClock.currentEvidence, isNull);
+      noClock.stop();
+    });
+
+    test('the PING that ends an overdue starts a new chain and is not '
+        'published: it vouches for nothing until the authority is confirmed',
+        () async {
+      start();
+      timers.elapse(s(13));
+      timers.elapse(Duration.zero);
+      expect(watchdog.isOverdue, isTrue);
+
+      timers.elapse(s(2));
+      watchdog.beat();
+      await deliver();
+
+      expect(published, isEmpty);
+      expect(watchdog.currentEvidence!.observedAtNanos, realtime());
+    });
+
+    test('14. Dart held past the deadline: the next PING is an unseen lapse, '
+        'not published, and nothing was declared by a timer', () async {
+      start();
+      timers.elapse(s(5));
+      // The isolate is held for 15 s: no timer runs, no PING is handled.
+      timersLate = s(15);
+      final beat = watchdog.beat()!;
+      await deliver();
+
+      expect(beat.afterUnseenLapse, isTrue);
+      expect(beat.gap, s(20));
+      expect(published, isEmpty);
+      expect(events, isEmpty);
+      // The chain starts again from it.
+      expect(watchdog.currentEvidence!.observedAtNanos, realtime());
+    });
+
+    test('deep sleep counts on the realtime clock even when the wall clock '
+        'was set back meanwhile', () {
+      start();
+      timers.elapse(s(5));
+      // Asleep 20 s: monotonic stood still, the wall clock was set back by
+      // as much, only CLOCK_BOOTTIME saw it.
+      monotonicLag = s(20);
+      timersLate = s(20);
+      wallOffset = -s(20);
+      expect(watchdog.evidenceAge, s(25));
+      expect(watchdog.confirmFresh(), isFalse);
+      expect(watchdog.beat()!.afterUnseenLapse, isTrue);
+    });
+
+    test('a lapse found natively declares the heartbeat overdue', () {
+      start();
+      timers.elapse(s(10));
+      watchdog.beat();
+      final evidence = watchdog.currentEvidence!;
+
+      watchdog.reportLapse(
+        watch: evidence.watch,
+        observedAtNanos: evidence.observedAtNanos,
+      );
+
+      expect(watchdog.isOverdue, isTrue);
+      expect(events, ['overdue#${watchdog.watch}']);
+      expect(watchdog.currentEvidence, isNull);
+    });
+
+    test('a lapse already known, of another connection, or of evidence older '
+        'than the running chain is ignored', () {
+      start();
+      final old = watchdog.currentEvidence!;
+      timers.elapse(s(13));
+      timers.elapse(Duration.zero);
+      expect(events, hasLength(1));
+      // Already overdue.
+      watchdog.reportLapse(
+        watch: old.watch,
+        observedAtNanos: old.observedAtNanos,
+      );
+      expect(events, hasLength(1));
+
+      // Back: a new chain. A lapse of evidence from before it is old news.
+      timers.elapse(s(1));
+      watchdog.beat();
+      watchdog.reportLapse(
+        watch: old.watch,
+        observedAtNanos: old.observedAtNanos,
+      );
+      expect(watchdog.isOverdue, isFalse);
+
+      // Another connection.
+      watchdog.reportLapse(
+        watch: old.watch - 1,
+        observedAtNanos: realtime(),
+      );
+      expect(watchdog.isOverdue, isFalse);
+      expect(events, hasLength(1));
+    });
+
+    test('a lapse declared natively still ends with the next PING, which is '
+        'not published', () async {
+      start();
+      final evidence = watchdog.currentEvidence!;
+      watchdog.reportLapse(
+        watch: evidence.watch,
+        observedAtNanos: evidence.observedAtNanos,
+      );
+      expect(watchdog.isOverdue, isTrue);
+      timers.elapse(s(10));
+      watchdog.beat();
+      await deliver();
+      expect(watchdog.isOverdue, isFalse);
+      expect(published, isEmpty);
+      timers.elapse(s(10));
+      watchdog.beat();
+      await deliver();
+      expect(published, hasLength(1));
+    });
+
+    test('a new connection is a new chain: nothing of the old one renews it',
+        () async {
+      start();
+      final first = watchdog.watch;
+      timers.elapse(s(5));
+      start();
+      timers.elapse(s(10));
+      watchdog.beat();
+      await deliver();
+      expect(published.single.watch, isNot(first));
+      expect(published.single.watch, watchdog.watch);
     });
   });
 }

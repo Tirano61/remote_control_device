@@ -329,8 +329,26 @@ class DeviceRealtimeBloc
         current is! DeviceRealtimeHeartbeatOverdue) {
       return;
     }
-    final gap = _watchdog.beat();
-    if (gap == null) return;
+    final beat = _watchdog.beat();
+    if (beat == null) return;
+    final gap = beat.gap;
+    if (current is DeviceRealtimeConnected && beat.afterUnseenLapse) {
+      // The heartbeat stopped vouching for the authority longer than it may,
+      // and nobody declared it: this isolate's timers did not run (it was
+      // held, or the process slept). The native transmission lease ran out at
+      // the deadline on its own; here it is the overdue that is already over,
+      // both states in a row: the coordinators suspend the session and, the
+      // channel being up again, confirm it over REST before anything goes on.
+      final policy = _watchdog.policy!;
+      _log(
+        'heartbeat lapsed unseen: PING after ${_seconds(gap)} (limit '
+        '${_seconds(_watchdog.thresholdFor(policy))}); the session is '
+        'suspended and must be confirmed again',
+      );
+      emit(DeviceRealtimeHeartbeatOverdue(confirmation: current.confirmation));
+      emit(DeviceRealtimeConnected(confirmation: current.confirmation));
+      return;
+    }
     if (current is DeviceRealtimeHeartbeatOverdue) {
       // The channel counts as up again, and only that. The coordinator reads
       // it as a reconnection: the session stays suspended until a REST read
