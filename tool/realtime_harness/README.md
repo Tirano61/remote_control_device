@@ -96,3 +96,35 @@ served by `nest start --watch`; reading that tree has coincided with the watcher
 restarting the shared backend.
 The tablet needs a build whose `BACKEND_BASE_URL` points at the forwarded relay
 port.
+
+## Heartbeat watchdog (Prompt 42)
+
+`half_open_relay.js` is a plain TCP relay with no dependencies. While a
+direction is blocked it **holds** everything entering it (data, FIN, RST), so
+neither end sees an error or a close: the half-open connection that only the
+Engine.IO heartbeat can notice. Lifting the block delivers what was held, in
+order. It logs, without content, the Engine.IO handshake values, every PING
+and PONG at the instant it is delivered, Socket.IO event names, close frames,
+FIN/RST and HTTP method + path.
+
+```text
+POST 127.0.0.1:CTL_PORT/ctl
+  {"block": "both" | "toServer" | "toClient", "ms": 15000}
+  {"unblock": true}
+  {"closeAll": true}
+GET  127.0.0.1:CTL_PORT/state
+Env: RELAY_PORT (3010), UPSTREAM_PORT (3200), CTL_PORT (3011)
+```
+
+`heartbeat_server.js` is a bare socket.io 4.8.1 server (`/devices` accepts
+anyone) with a short heartbeat, 2 s / 5 s by default, for the integration test
+that runs the real `socket_io_client` against a real heartbeat:
+
+```bash
+npm install socket.io@4.8.1     # in a scratch folder of its own
+NODE_PATH=<scratch>/node_modules node tool/realtime_harness/heartbeat_server.js
+RELAY_PORT=3121 UPSTREAM_PORT=3120 CTL_PORT=3122 node tool/realtime_harness/half_open_relay.js
+HEARTBEAT_HARNESS=1 flutter test test/integration/heartbeat_watchdog_isolated_test.dart
+```
+
+Without `HEARTBEAT_HARNESS=1` the test is skipped.
