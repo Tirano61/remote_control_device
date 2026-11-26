@@ -7,6 +7,7 @@ import 'package:remote_control_device/app/remote_session_coordinator.dart';
 import 'package:remote_control_device/app/signaling_coordinator.dart';
 import 'package:remote_control_device/app/support_coordinator.dart';
 import 'package:remote_control_device/app/webrtc_coordinator.dart';
+import 'package:remote_control_device/features/device/domain/realtime/heartbeat_watchdog.dart';
 import 'package:remote_control_device/features/device/presentation/bloc/realtime/device_realtime_bloc.dart';
 import 'package:remote_control_device/features/device/presentation/bloc/session/device_session_bloc.dart';
 import 'package:remote_control_device/features/remote_control/presentation/bloc/remote_control_accessibility/remote_control_accessibility_bloc.dart';
@@ -30,7 +31,13 @@ class RemoteControlApp extends StatefulWidget {
   State<RemoteControlApp> createState() => _RemoteControlAppState();
 }
 
-class _RemoteControlAppState extends State<RemoteControlApp> {
+class _RemoteControlAppState extends State<RemoteControlApp>
+    with WidgetsBindingObserver {
+  /// One watchdog for the one `/devices` socket. The realtime bloc feeds it
+  /// (connections, PINGs, losses) and acts on it; the WebRTC bloc only asks it,
+  /// right before a command runs, whether the heartbeat still vouches for the
+  /// authority (see `RealtimeLiveness`).
+  late final HeartbeatWatchdog _heartbeatWatchdog;
   late final DeviceSessionBloc _sessionBloc;
   late final DeviceRealtimeBloc _realtimeBloc;
   late final SupportBloc _supportBloc;
@@ -48,6 +55,10 @@ class _RemoteControlAppState extends State<RemoteControlApp> {
   void initState() {
     super.initState();
     final dependencies = widget.dependencies;
+    WidgetsBinding.instance.addObserver(this);
+    _heartbeatWatchdog = HeartbeatWatchdog(
+      tolerance: dependencies.config.realtimeHeartbeatTolerance,
+    );
 
     _sessionBloc = DeviceSessionBloc(
       loadDeviceCredentials: dependencies.loadDeviceCredentials,
@@ -63,6 +74,7 @@ class _RemoteControlAppState extends State<RemoteControlApp> {
       recoveryBackoff: dependencies.config.realtimeRecoveryBackoff,
       stableConnectionPeriod:
           dependencies.config.realtimeStableConnectionPeriod,
+      heartbeatWatchdog: _heartbeatWatchdog,
     );
     _supportBloc = SupportBloc(
       requestSupport: dependencies.requestSupport,
@@ -95,6 +107,9 @@ class _RemoteControlAppState extends State<RemoteControlApp> {
       // Where an authorised command ends up. The bloc decides whether it runs;
       // this only carries it out.
       remoteControl: dependencies.remoteControlAccessibility,
+      // Asked, not fed: a command arriving after the heartbeat went quiet, and
+      // before the suspension reached this bloc, is refused from the clock.
+      channelLiveness: _heartbeatWatchdog,
     );
     _remoteControlAccessibilityBloc = RemoteControlAccessibilityBloc(
       client: dependencies.remoteControlAccessibility,
@@ -132,8 +147,17 @@ class _RemoteControlAppState extends State<RemoteControlApp> {
     _sessionBloc.add(const DeviceSessionStarted());
   }
 
+  /// Back in the foreground the tablet may have slept, and the watchdog's
+  /// timer (on a clock that stops in deep sleep) may not have run: the age of
+  /// the heartbeat is measured again now, before anything else happens.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _heartbeatWatchdog.checkNow();
+  }
+
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _webRtcCoordinator.dispose();
     _signalingCoordinator.dispose();
     _remoteSessionCoordinator.dispose();

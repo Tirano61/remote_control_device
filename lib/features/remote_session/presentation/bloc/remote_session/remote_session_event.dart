@@ -82,12 +82,20 @@ final class RemoteSessionClosureAnnounced extends RemoteSessionEvent {
 /// `/current` read, started after the channel is back, confirms the session
 /// again. Regaining it confirms nothing by itself.
 final class RemoteSessionAuthorityChannelChanged extends RemoteSessionEvent {
-  const RemoteSessionAuthorityChannelChanged({required this.available});
+  const RemoteSessionAuthorityChannelChanged({
+    required this.available,
+    this.heartbeatOverdue = false,
+  });
 
   final bool available;
 
+  /// Down because the socket's heartbeat is overdue, not because it closed.
+  /// Changes nothing in what the bloc does — a suspicion suspends exactly like
+  /// a disconnection — and is only there to say so in the log.
+  final bool heartbeatOverdue;
+
   @override
-  List<Object?> get props => [available];
+  List<Object?> get props => [available, heartbeatOverdue];
 }
 
 /// The grace period of a suspended session ran out. Raised only by the bloc's

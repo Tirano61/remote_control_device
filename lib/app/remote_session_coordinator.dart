@@ -140,9 +140,17 @@ class RemoteSessionCoordinator {
     // at once, and the bloc bounds how long it may stay suspended. The
     // channel's return is announced *before* the read it causes, so that read
     // is the first one allowed to confirm the session again.
+    //
+    // A heartbeat gone overdue is "down" here, on a socket the transport still
+    // calls open: the same suspension, the same epoch, the same re-reads. Its
+    // PING coming back is "up" again, the same as a reconnection: it confirms
+    // nothing by itself, the read that follows has to.
     if (changed) {
       _remoteSessionBloc.add(
-        RemoteSessionAuthorityChannelChanged(available: connected),
+        RemoteSessionAuthorityChannelChanged(
+          available: connected,
+          heartbeatOverdue: state is DeviceRealtimeHeartbeatOverdue,
+        ),
       );
     }
     if (reconnected) {

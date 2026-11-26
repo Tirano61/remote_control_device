@@ -37,6 +37,17 @@ class ManualTimers {
     }
     _now = target;
   }
+
+  /// Fires the earliest pending deadline alone, moving the clock to it, and
+  /// nothing it schedules — unlike [elapse], which would also fire a
+  /// zero-delay timer set at that same instant. For observing the state
+  /// between a deadline and the turn that follows it.
+  void fireNext() {
+    final due = pending..sort((a, b) => a.dueAt.compareTo(b.dueAt));
+    final timer = due.first;
+    if (timer.dueAt > _now) _now = timer.dueAt;
+    timer._fire();
+  }
 }
 
 class ManualTimer implements Timer {

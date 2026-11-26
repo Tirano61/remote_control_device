@@ -9,6 +9,7 @@ import 'package:remote_control_device/features/remote_control/domain/entities/re
 import 'package:remote_control_device/features/remote_control/domain/entities/remote_control_command.dart';
 import 'package:remote_control_device/features/remote_control/domain/entities/remote_control_error.dart';
 import 'package:remote_control_device/features/remote_control/domain/entities/remote_control_inbound_message.dart';
+import 'package:remote_control_device/features/device/domain/realtime/realtime_liveness.dart';
 import 'package:remote_control_device/features/remote_control/domain/remote_control_accessibility_client.dart';
 import 'package:remote_control_device/features/remote_control/domain/remote_control_command_queue.dart';
 import 'package:remote_control_device/features/remote_control/domain/remote_touch_controller.dart';
@@ -113,6 +114,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     required RemoteControlAccessibilityClient remoteControl,
     Duration orphanCaptureTimeout = defaultOrphanCaptureTimeout,
     TimerFactory timerFactory = systemTimerFactory,
+    RealtimeLiveness? channelLiveness,
   }) : _peerConnectionFactory = peerConnectionFactory,
        _signaling = signaling,
        _iceConfiguration = iceConfiguration,
@@ -120,6 +122,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
        _remoteControl = remoteControl,
        _orphanCaptureTimeout = orphanCaptureTimeout,
        _timerFactory = timerFactory,
+       _channelLiveness = channelLiveness,
        super(const WebRtcIdle()) {
     on<WebRtcScreenCaptureEndedByPlatform>(_onScreenCaptureEndedByPlatform);
     on<_WebRtcOrphanCaptureExpired>(_onOrphanCaptureExpired);
@@ -183,6 +186,11 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   final RemoteControlAccessibilityClient _remoteControl;
   final Duration _orphanCaptureTimeout;
   final TimerFactory _timerFactory;
+
+  /// Checked right before a command is let through, on top of the session's
+  /// confirmed authority; see [_isChannelFresh]. `null` (tests of this bloc
+  /// alone) checks nothing more.
+  final RealtimeLiveness? _channelLiveness;
 
   late final StreamSubscription<String> _platformStopSubscription;
 
@@ -1302,7 +1310,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
           _log('$name rejected: the control channel is not open');
           return;
         }
-        if (!_isControlAuthorized) {
+        if (!_isControlAuthorized || !_isChannelFresh(name)) {
           _log('$name rejected: the remote session is not active');
           _sendControlAck(
             generation,
@@ -1325,6 +1333,25 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
           _sendControlAck(generation, channel, ack);
         });
     }
+  }
+
+  /// Whether the `/devices` heartbeat still vouches for the authority this
+  /// command would run under.
+  ///
+  /// The authority itself is withdrawn through the coordinators a few
+  /// event-loop turns after the heartbeat goes overdue; and after the tablet
+  /// slept or its isolate stalled, the watchdog's own timer may not have run
+  /// yet. A command arriving in either gap is refused here, from the clock,
+  /// and the watchdog's declaration follows on its own (see
+  /// [RealtimeLiveness.confirmFresh]). The suspension that follows abandons a
+  /// touch that is down, as any suspension does.
+  ///
+  /// It grants nothing: it is only asked once [_isControlAuthorized] holds.
+  bool _isChannelFresh(String name) {
+    final liveness = _channelLiveness;
+    if (liveness == null || liveness.confirmFresh()) return true;
+    _log('$name refused: the realtime heartbeat is overdue');
+    return false;
   }
 
   /// A message of a remote touch, through the same gate as every command.
@@ -1359,7 +1386,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
       _log('$name rejected: the control channel is not open');
       return;
     }
-    if (!_isControlAuthorized) {
+    if (!_isControlAuthorized || !_isChannelFresh(name)) {
       answer(
         RemoteControlAck.failure(
           command.id,

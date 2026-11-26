@@ -28,6 +28,7 @@ class AppConfig {
       Duration(seconds: 60),
     ],
     this.realtimeStableConnectionPeriod = const Duration(seconds: 30),
+    this.realtimeHeartbeatTolerance = const Duration(seconds: 3),
     this.signalingAckTimeout = const Duration(seconds: 10),
   });
 
@@ -109,6 +110,13 @@ class AppConfig {
   /// to run at once again. Bounds a backend that keeps accepting and dropping
   /// the socket to one login per backoff step.
   final Duration realtimeStableConnectionPeriod;
+
+  /// How long past the announced `pingInterval` an Engine.IO `PING` may be
+  /// late before the connection's heartbeat counts as overdue and the remote
+  /// session's authority is suspended (13 s with the backend's 10 s). The
+  /// interval itself is never configured here: it comes from the handshake.
+  /// See `HeartbeatWatchdog`.
+  final Duration realtimeHeartbeatTolerance;
 
   /// How long to wait for a signaling ACK before treating it as unanswered.
   ///
