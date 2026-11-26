@@ -1,4 +1,5 @@
 import 'package:remote_control_device/features/screen_capture/domain/entities/screen_capture_result.dart';
+import 'package:remote_control_device/features/screen_capture/domain/entities/screen_transmission.dart';
 
 /// The boundary Android's `MediaProjection` lives behind.
 ///
@@ -60,14 +61,30 @@ abstract interface class ScreenCaptureClient {
   /// keeps every frame back again while MediaProjection, its consent and its
   /// notification stay, so a session that recovers needs no second dialog.
   ///
+  /// `true` needs [evidence]: frames go through only for as long as it, and
+  /// the renewals that follow it ([renewTransmission]), vouch — a deadline the
+  /// Android side keeps and checks for every frame by itself. Every `true`
+  /// after a `false` is a new opening with a number of its own, and nothing of
+  /// an older opening can reach it.
+  ///
   /// Calls take effect in the order they are made. With no capture running
   /// there is nothing to transmit, and nothing happens.
   ///
-  /// Never throws. Returns `false` only when the platform could not apply the
-  /// change: the capture has then been stopped — a capture this side cannot
-  /// hold back is not left running — and the caller treats it as a failed
-  /// screen. `true` otherwise.
-  Future<bool> setTransmitting(bool transmitting);
+  /// Never throws. [ScreenTransmissionOutcome.failed] only when the platform
+  /// could not apply the change: the capture has then been stopped — a capture
+  /// this side cannot hold back is not left running — and the caller treats it
+  /// as a failed screen. [ScreenTransmissionOutcome.lapsed] when it opened but
+  /// nothing goes through (see there).
+  Future<ScreenTransmissionOutcome> setTransmitting(
+    bool transmitting, {
+    ScreenTransmissionEvidence? evidence,
+  });
+
+  /// Renews the running opening's lease with fresher [evidence] of the same
+  /// connection. Never opens anything. Never throws.
+  Future<ScreenTransmissionRenewal> renewTransmission(
+    ScreenTransmissionEvidence evidence,
+  );
 
   /// Stops the capture, releases the track and the stream, and takes the
   /// foreground notification down.

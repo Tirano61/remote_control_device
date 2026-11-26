@@ -9,6 +9,7 @@ import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.os.SystemClock
 import android.util.DisplayMetrics
 import android.util.Log
 import android.view.Display
@@ -56,9 +57,11 @@ import org.webrtc.VideoSink
  * to deliver its texture again — see [ScreenCaptureSettleFrame].
  *
  * Capturing and transmitting are separate: every frame goes through a gate first
- * ([ScreenCaptureTransmission], [setTransmitting]) that starts closed and that Dart opens only
+ * ([ScreenCaptureTransmission], [openTransmission]) that starts closed and that Dart opens only
  * while the remote session's authority is confirmed. Closed, the projection keeps running and
- * nothing reaches WebRTC.
+ * nothing reaches WebRTC. An open gate also carries a lease on the elapsed-realtime clock, which
+ * [onFrame] checks itself for every frame: when the heartbeat evidence Dart vouched with is too
+ * old, frames are kept back here even if Dart cannot run to say so ([renewTransmission]).
  *
  * Threads: [startCapture] and [stopCapture] are called from the main thread; frames, the
  * settle frame, the display listener and the projection callback all run on the
@@ -86,7 +89,7 @@ class ScreenCapturer(
     private var framing: ScreenCaptureFraming? = null
     private var geometryRefresh: ScreenCaptureGeometryRefresh? = null
     private var settleFrame: ScreenCaptureSettleFrame? = null
-    private val transmission = ScreenCaptureTransmission()
+    private val transmission = ScreenCaptureTransmission(SystemClock::elapsedRealtimeNanos)
 
     private val stopped = AtomicBoolean(false)
     private var mismatchLogged = false
@@ -222,7 +225,14 @@ class ScreenCapturer(
         val settleFrame = settleFrame ?: return
         // Before anything else looks at the frame: a withheld frame is not a frame the settle
         // logic should know about, since it never went out.
-        if (!transmission.admit()) return
+        when (transmission.admit()) {
+            FrameAdmission.ADMITTED -> Unit
+            FrameAdmission.WITHHELD_LEASE_RAN_OUT -> {
+                logLeaseRanOut()
+                return
+            }
+            else -> return
+        }
 
         val buffer = frame.buffer
         val side = framing.virtualDisplaySide
@@ -284,16 +294,58 @@ class ScreenCapturer(
     }
 
     /**
-     * Opens or closes the transmission gate. Returns false when the capture is already stopped,
-     * which leaves nothing to transmit either way.
+     * Opens the transmission gate for [grant], with a lease that runs out [validForNanos] after
+     * [evidenceAtNanos] (elapsed-realtime clock). Returns null when the capture is already
+     * stopped, which leaves nothing to transmit either way, or when the opening was not applied
+     * (a grant that is not newer than one already opened here).
      *
      * Run on the helper's thread and waited for: once this returns, a frame being processed
-     * there has finished, and every frame after it sees the new state. A frame that was already
-     * past the gate when it closed belongs to the authorised period. Called from the main
+     * there has finished, and every frame after it sees the new state. Called from the main
      * thread; the helper's thread is disposed only from the main thread too
      * ([ScreenCaptureSession.stop]), so it is alive for as long as this waits.
      */
-    fun setTransmitting(open: Boolean): Boolean {
+    internal fun openTransmission(grant: Long, evidenceAtNanos: Long, validForNanos: Long): TransmissionOpening? {
+        if (stopped.get() || !::helper.isInitialized) return null
+        var opening: TransmissionOpening? = null
+        ThreadUtils.invokeAtFrontUninterruptibly(
+            helper.handler,
+            Runnable {
+                if (stopped.get()) return@Runnable
+                val result = transmission.open(grant, evidenceAtNanos, validForNanos) ?: return@Runnable
+                opening = result
+                val change = result.change
+                if (change?.refresh == true && result.verdict == LeaseVerdict.LIVE) {
+                    settleFrame?.redeliverNow()
+                }
+                // Counts and durations only: never a frame, never a size that is not already logged.
+                val age = ms(result.evidenceAgeNanos)
+                val valid = ms(validForNanos)
+                Log.i(
+                    TAG,
+                    when (result.verdict) {
+                        LeaseVerdict.LIVE ->
+                            "transmission resumed (grant $grant, evidence $age ms old, valid $valid ms; " +
+                                "withheld while suspended: ${change?.withheldBefore ?: 0}, after a lease " +
+                                "ran out: ${change?.expiredBefore ?: 0})"
+                        LeaseVerdict.EXPIRED ->
+                            "transmission opened with a lease already run out (grant $grant, evidence " +
+                                "$age ms old, valid $valid ms): nothing goes through"
+                        LeaseVerdict.REJECTED ->
+                            "transmission opening rejected (grant $grant, evidence age $age ms, valid " +
+                                "$valid ms): the gate stays closed"
+                    },
+                )
+            },
+        )
+        return opening
+    }
+
+    /**
+     * Closes the gate, on the helper's thread and waited for, as [openTransmission]: a frame that
+     * was already past the gate when it closed belongs to the authorised period. Returns false
+     * when the capture is already stopped.
+     */
+    fun closeTransmission(): Boolean {
         if (stopped.get() || !::helper.isInitialized) return false
         var applied = false
         ThreadUtils.invokeAtFrontUninterruptibly(
@@ -301,22 +353,66 @@ class ScreenCapturer(
             Runnable {
                 if (stopped.get()) return@Runnable
                 applied = true
-                val change = (if (open) transmission.resume() else transmission.suspend())
-                    ?: return@Runnable
-                if (change.refresh) settleFrame?.redeliverNow()
-                // Counts only: never a frame, never a size that is not already logged.
+                val change = transmission.close() ?: return@Runnable
                 Log.i(
                     TAG,
-                    if (change.transmitting) {
-                        "transmission resumed (withheld while suspended: ${change.withheldBefore})"
-                    } else {
-                        "transmission suspended (admitted: ${change.admittedBefore}, " +
-                            "withheld: ${change.withheldBefore})"
-                    },
+                    "transmission suspended (admitted: ${change.admittedBefore}, withheld: " +
+                        "${change.withheldBefore}, withheld after a lease ran out: ${change.expiredBefore})",
                 )
             },
         )
         return applied
+    }
+
+    /**
+     * Fresh heartbeat evidence for the opening [grant]; see [ScreenCaptureTransmission.renew].
+     *
+     * Applied on the calling thread, under the gate's own lock: [onFrame] never waits for it,
+     * and a renewal that crosses a closing is ordered against it there. Returns null when the
+     * capture is stopped.
+     */
+    internal fun renewTransmission(grant: Long, evidenceAtNanos: Long, validForNanos: Long): TransmissionRenewal? {
+        if (stopped.get() || !::helper.isInitialized) return null
+        val renewal = transmission.renew(grant, evidenceAtNanos, validForNanos)
+        when (renewal.outcome) {
+            RenewalOutcome.RENEWED -> {
+                if (renewal.refresh) {
+                    // The lease had run out and frames were kept back meanwhile: the screen as it
+                    // is now goes again, through the gate like any frame.
+                    helper.handler.post { if (!stopped.get()) settleFrame?.redeliverNow() }
+                }
+                Log.i(
+                    TAG,
+                    "transmission lease renewed (grant $grant, evidence ${ms(renewal.evidenceAgeNanos)} ms " +
+                        "old, ${ms(renewal.remainingNanos)} ms left" +
+                        (if (renewal.live) "" else ", already run out") + ")",
+                )
+            }
+            RenewalOutcome.LAPSED -> Log.i(
+                TAG,
+                "transmission lease lapsed (grant $grant): the evidence came " +
+                    "${-ms(renewal.remainingNanos)} ms after it had run out; only a new opening sends again",
+            )
+            RenewalOutcome.REJECTED -> Log.w(
+                TAG,
+                "transmission renewal rejected (grant $grant, evidence age ${ms(renewal.evidenceAgeNanos)} ms)",
+            )
+            RenewalOutcome.IGNORED -> Unit
+        }
+        return renewal
+    }
+
+    /** The first frame kept back after a lease ran out: when, against what. Once per lease. */
+    private fun logLeaseRanOut() {
+        val lease = transmission.lease ?: return
+        val now = SystemClock.elapsedRealtimeNanos()
+        Log.i(
+            TAG,
+            "transmission lease ran out (grant ${lease.grant}): evidence ${ms(now - lease.evidenceAtNanos)} ms " +
+                "old, limit ${ms(lease.validForNanos)} ms, ${ms(now - lease.deadlineNanos)} ms past it; " +
+                "admitted since the last switch: ${transmission.admittedSinceSwitch()}; frames are " +
+                "withheld until Dart renews or reopens it",
+        )
     }
 
     /** The size follows the display; there is nothing to change from outside. */
@@ -366,6 +462,8 @@ class ScreenCapturer(
     companion object {
         private const val TAG = "RemoteControlScreen"
         private const val VIRTUAL_DISPLAY_NAME = "RemoteControl_ScreenCapture"
+
+        private fun ms(nanos: Long): Long = nanos / 1_000_000
 
         private const val SIGNAL_STARTED = "started"
         private const val SIGNAL_DISPLAY = "display changed"

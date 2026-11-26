@@ -11,6 +11,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
 import 'package:flutter_webrtc/src/native/media_stream_track_impl.dart'
     show MediaStreamTrackNative;
 import 'package:remote_control_device/features/screen_capture/data/method_channel_media_projection_service.dart';
+import 'package:remote_control_device/features/screen_capture/domain/entities/screen_transmission.dart';
 import 'package:remote_control_device/features/screen_capture/domain/entities/screen_video_track.dart';
 import 'package:remote_control_device/features/screen_capture/domain/screen_capture_platform.dart';
 
@@ -48,9 +49,17 @@ class FlutterWebRtcScreenMediaSource implements ScreenMediaSource {
   static const String startCaptureMethod = 'startScreenCapture';
   static const String stopCaptureMethod = 'stopScreenCapture';
 
-  /// `{ "trackId": "<id>", "transmitting": <bool> }`: opens or closes the
-  /// running capture's transmission gate on the Android side.
+  /// `{ "trackId", "transmitting": false }`, or `{ "trackId", "transmitting":
+  /// true, "grant", "evidenceAtNanos", "validForMs" }`: closes, or opens under
+  /// a heartbeat lease, the running capture's transmission gate on the Android
+  /// side. Answers `{ "applied", "live" }`.
   static const String setTransmissionMethod = 'setScreenCaptureTransmission';
+
+  /// `{ "trackId", "grant", "evidenceAtNanos", "validForMs" }`: renews the
+  /// lease of an opening. Answers `{ "result": renewed|lapsed|ignored|rejected,
+  /// "live" }`.
+  static const String renewTransmissionMethod =
+      'renewScreenCaptureTransmission';
 
   /// Called *by Android* when MediaProjection's `onStop` fired for a capture:
   /// `{ "trackId": "<id>" }`. The Android side has already released it.
@@ -161,20 +170,77 @@ class FlutterWebRtcScreenMediaCapture implements ScreenMediaCapture {
     _onEnded?.call();
   }
 
-  /// Opens or closes this capture's transmission gate natively, keyed by track
-  /// id so that it can only ever reach this capture. Platform failures reach
+  /// Opens this capture's transmission gate natively under [grant], keyed by
+  /// track id so that it can only ever reach this capture. Answers whether
+  /// frames go through now. Platform failures reach the caller. `false` once
+  /// released.
+  @override
+  Future<bool> openTransmission({
+    required int grant,
+    required ScreenTransmissionEvidence evidence,
+  }) async {
+    if (_disposed) return false;
+    final answer = await FlutterWebRtcScreenMediaSource._channel
+        .invokeMapMethod<String, Object?>(
+          FlutterWebRtcScreenMediaSource.setTransmissionMethod,
+          <String, Object?>{
+            'trackId': _videoTrack.id,
+            'transmitting': true,
+            ..._lease(grant, evidence),
+          },
+        );
+    return answer?['applied'] == true && answer?['live'] == true;
+  }
+
+  /// Closes this capture's transmission gate natively. Platform failures reach
   /// the caller. Nothing once released.
   @override
-  Future<void> setTransmitting(bool transmitting) async {
+  Future<void> closeTransmission() async {
     if (_disposed) return;
-    await FlutterWebRtcScreenMediaSource._channel.invokeMethod<bool>(
+    await FlutterWebRtcScreenMediaSource._channel.invokeMethod<Object?>(
       FlutterWebRtcScreenMediaSource.setTransmissionMethod,
-      <String, Object?>{
-        'trackId': _videoTrack.id,
-        'transmitting': transmitting,
-      },
+      <String, Object?>{'trackId': _videoTrack.id, 'transmitting': false},
     );
   }
+
+  /// Renews the lease of opening [grant] natively. Platform failures reach the
+  /// caller; an answer this side cannot read is a lapse, the safe reading.
+  @override
+  Future<ScreenLeaseRenewalAnswer> renewTransmission({
+    required int grant,
+    required ScreenTransmissionEvidence evidence,
+  }) async {
+    if (_disposed) {
+      return const ScreenLeaseRenewalAnswer(
+        ScreenLeaseRenewalResult.ignored,
+        live: false,
+      );
+    }
+    final answer = await FlutterWebRtcScreenMediaSource._channel
+        .invokeMapMethod<String, Object?>(
+          FlutterWebRtcScreenMediaSource.renewTransmissionMethod,
+          <String, Object?>{
+            'trackId': _videoTrack.id,
+            ..._lease(grant, evidence),
+          },
+        );
+    final result = switch (answer?['result']) {
+      'renewed' => ScreenLeaseRenewalResult.renewed,
+      'ignored' => ScreenLeaseRenewalResult.ignored,
+      'rejected' => ScreenLeaseRenewalResult.rejected,
+      _ => ScreenLeaseRenewalResult.lapsed,
+    };
+    return ScreenLeaseRenewalAnswer(result, live: answer?['live'] == true);
+  }
+
+  static Map<String, Object?> _lease(
+    int grant,
+    ScreenTransmissionEvidence evidence,
+  ) => <String, Object?>{
+    'grant': grant,
+    'evidenceAtNanos': evidence.observedAtNanos,
+    'validForMs': evidence.validFor.inMilliseconds,
+  };
 
   /// Stops this capture natively — the virtual display, the projection and
   /// the track's registration go with it. Idempotent, and keyed by track id,
