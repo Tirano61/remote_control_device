@@ -9,6 +9,7 @@ import 'package:remote_control_device/features/remote_control/domain/entities/re
 import 'package:remote_control_device/features/remote_control/domain/entities/remote_control_command.dart';
 import 'package:remote_control_device/features/remote_control/domain/entities/remote_control_error.dart';
 import 'package:remote_control_device/features/remote_control/domain/entities/remote_control_inbound_message.dart';
+import 'package:remote_control_device/features/device/domain/realtime/heartbeat_evidence.dart';
 import 'package:remote_control_device/features/device/domain/realtime/realtime_liveness.dart';
 import 'package:remote_control_device/features/remote_control/domain/remote_control_accessibility_client.dart';
 import 'package:remote_control_device/features/remote_control/domain/remote_control_command_queue.dart';
@@ -19,6 +20,7 @@ import 'package:remote_control_device/features/signaling/domain/entities/webrtc_
 import 'package:remote_control_device/features/signaling/domain/entities/webrtc_offer.dart';
 import 'package:remote_control_device/features/screen_capture/domain/entities/screen_capture_result.dart';
 import 'package:remote_control_device/features/screen_capture/domain/entities/screen_capture_status.dart';
+import 'package:remote_control_device/features/screen_capture/domain/entities/screen_transmission.dart';
 import 'package:remote_control_device/features/screen_capture/domain/screen_capture_client.dart';
 import 'package:remote_control_device/features/webrtc/domain/control_channel.dart';
 import 'package:remote_control_device/features/webrtc/domain/entities/peer_ice_candidate.dart';
@@ -105,6 +107,14 @@ part 'webrtc_session_state.dart';
 /// Losing any of them keeps every new frame on the tablet at once, while
 /// MediaProjection and its consent stay for the recovery; see
 /// [_syncScreenTransmission].
+///
+/// And an opening of that gate only lasts as long as the `/devices` heartbeat
+/// vouches for it: it is given the newest heartbeat evidence and renewed with
+/// every PING that continues the chain, and the Android side holds every frame
+/// back the moment that evidence is too old — by itself, whether or not this
+/// isolate is running. A lease found run out there counts as an overdue
+/// heartbeat: the gate stays shut until the authority is confirmed again; see
+/// [_onScreenLeaseLapsed].
 class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   WebRtcSessionBloc({
     required WebRtcPeerConnectionFactory peerConnectionFactory,
@@ -115,6 +125,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     Duration orphanCaptureTimeout = defaultOrphanCaptureTimeout,
     TimerFactory timerFactory = systemTimerFactory,
     RealtimeLiveness? channelLiveness,
+    HeartbeatEvidenceSource? transmissionEvidence,
   }) : _peerConnectionFactory = peerConnectionFactory,
        _signaling = signaling,
        _iceConfiguration = iceConfiguration,
@@ -123,10 +134,16 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
        _orphanCaptureTimeout = orphanCaptureTimeout,
        _timerFactory = timerFactory,
        _channelLiveness = channelLiveness,
+       _transmissionEvidence = transmissionEvidence,
        super(const WebRtcIdle()) {
     on<WebRtcScreenCaptureEndedByPlatform>(_onScreenCaptureEndedByPlatform);
     on<_WebRtcOrphanCaptureExpired>(_onOrphanCaptureExpired);
     on<_WebRtcScreenTransmissionFailed>(_onScreenTransmissionFailed);
+    on<_WebRtcHeartbeatEvidence>(_onHeartbeatEvidence);
+    on<_WebRtcScreenLeaseLapsed>(_onScreenLeaseLapsed);
+    _evidenceSubscription = transmissionEvidence?.evidence.listen(
+      (evidence) => add(_WebRtcHeartbeatEvidence(evidence)),
+    );
     _platformStopSubscription = _screenCapture.endedByPlatform.listen(
       (remoteSessionId) =>
           add(WebRtcScreenCaptureEndedByPlatform(remoteSessionId)),
@@ -191,6 +208,22 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   /// confirmed authority; see [_isChannelFresh]. `null` (tests of this bloc
   /// alone) checks nothing more.
   final RealtimeLiveness? _channelLiveness;
+
+  /// Where an opening of the screen's gate gets its lease from, and what keeps
+  /// it renewed; see [_syncScreenTransmission]. `null` (tests of this bloc
+  /// alone) opens with no lease; in the application it is never `null`, and
+  /// the Android side never transmits without one.
+  final HeartbeatEvidenceSource? _transmissionEvidence;
+  StreamSubscription<HeartbeatEvidence>? _evidenceSubscription;
+
+  /// Whether the native gate found the running opening's lease run out. Until
+  /// the session's confirmed authority moves (it is suspended, or confirmed
+  /// for another session) nothing reopens the gate: not a PING, not a renewal.
+  bool _screenLeaseLapsed = false;
+
+  /// Moves on every opening, so that the answer about an older one is told
+  /// from the one that holds.
+  int _transmissionEpoch = 0;
 
   late final StreamSubscription<String> _platformStopSubscription;
 
@@ -669,6 +702,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     _captureAttachedGeneration = null;
     _screenCaptureStatus = ScreenCaptureStatus.idle;
     _screenTransmissionAllowed = false;
+    _screenLeaseLapsed = false;
     try {
       await _screenCapture.stop();
     } catch (_) {
@@ -956,6 +990,11 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     WebRtcRemoteSessionAuthorityChanged event,
     Emitter<WebRtcSessionState> emit,
   ) async {
+    // A lapse is over once the authority it happened under is: suspended, or
+    // confirmed again by a REST read made after the heartbeat came back.
+    if (event.remoteSessionId != _confirmedRemoteSessionId) {
+      _screenLeaseLapsed = false;
+    }
     _confirmedRemoteSessionId = event.remoteSessionId;
     _syncScreenTransmission();
   }
@@ -980,7 +1019,8 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     return sessionId != null &&
         sessionId == _liveRemoteSessionId &&
         sessionId == _confirmedRemoteSessionId &&
-        sessionId != _screenRevokedSessionId;
+        sessionId != _screenRevokedSessionId &&
+        !_screenLeaseLapsed;
   }
 
   /// Brings the capture's transmission in line with [_mayTransmitScreen].
@@ -1001,25 +1041,140 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
       _screenTransmissionAllowed = false;
       return;
     }
-    final allowed = _mayTransmitScreen;
+    // An opening needs evidence to give its lease. Without any — no watched
+    // connection right now — it waits for the next PING (see
+    // [_onHeartbeatEvidence]); it never opens without one.
+    final source = _transmissionEvidence;
+    final evidence = source?.currentEvidence;
+    final authorised = _mayTransmitScreen;
+    final allowed = authorised && (source == null || evidence != null);
     if (allowed == _screenTransmissionAllowed && !capturedAnew) return;
     if (allowed != _screenTransmissionAllowed) {
       _log(
         allowed
             ? 'screen transmission resumed for $sessionId'
+            : authorised
+            ? 'screen transmission waits for $sessionId: no heartbeat evidence'
             : 'screen transmission suspended for $sessionId: its authority is '
                   'not confirmed',
       );
     }
+    if (allowed && !_screenTransmissionAllowed) _transmissionEpoch++;
     _screenTransmissionAllowed = allowed;
+    final epoch = _transmissionEpoch;
     unawaited(
-      _screenCapture.setTransmitting(allowed).then((applied) {
-        if (!applied && !isClosed) {
-          add(_WebRtcScreenTransmissionFailed(sessionId));
+      _screenCapture
+          .setTransmitting(
+            allowed,
+            evidence: allowed && evidence != null
+                ? _screenEvidenceOf(evidence)
+                : null,
+          )
+          .then((outcome) {
+            if (isClosed) return;
+            switch (outcome) {
+              case ScreenTransmissionOutcome.applied:
+                return;
+              case ScreenTransmissionOutcome.failed:
+                add(_WebRtcScreenTransmissionFailed(sessionId));
+              case ScreenTransmissionOutcome.lapsed:
+                if (allowed) {
+                  add(
+                    _WebRtcScreenLeaseLapsed(
+                      sessionId,
+                      epoch: epoch,
+                      evidence: evidence,
+                    ),
+                  );
+                }
+            }
+          }),
+    );
+  }
+
+  /// A PING continued the heartbeat chain: the running opening's lease is
+  /// renewed with it. It renews; it never opens what the authority closed.
+  ///
+  /// The one opening it can cause is one that was only waiting for evidence —
+  /// the authority confirmed, nothing suspended, no lapse — and that is the
+  /// same decision [_syncScreenTransmission] makes from the same fields.
+  Future<void> _onHeartbeatEvidence(
+    _WebRtcHeartbeatEvidence event,
+    Emitter<WebRtcSessionState> emit,
+  ) async {
+    final sessionId = _screenCaptureSessionId;
+    if (sessionId == null) return;
+    if (!_screenTransmissionAllowed) {
+      if (_mayTransmitScreen) _syncScreenTransmission();
+      return;
+    }
+    final epoch = _transmissionEpoch;
+    final evidence = event.evidence;
+    unawaited(
+      _screenCapture.renewTransmission(_screenEvidenceOf(evidence)).then((
+        renewal,
+      ) {
+        if (renewal == ScreenTransmissionRenewal.lapsed && !isClosed) {
+          add(
+            _WebRtcScreenLeaseLapsed(
+              sessionId,
+              epoch: epoch,
+              evidence: evidence,
+            ),
+          );
         }
       }),
     );
   }
+
+  /// The Android side holds the running opening's frames back: its lease ran
+  /// out before evidence arrived, or the evidence it was given was already too
+  /// old. The heartbeat stopped vouching for the authority, whatever this
+  /// isolate's timers say, and it is handled as an overdue heartbeat would be:
+  ///
+  /// ```text
+  /// 1. the gate is closed here too, and nothing reopens it while the session's
+  ///    confirmed authority is the one this happened under
+  /// 2. the watchdog is told; unless it already knows of the break, it declares
+  ///    the heartbeat overdue, and the coordinators suspend the session
+  /// 3. the next opening, a new grant, comes after a REST read made once the
+  ///    heartbeat is back has confirmed the session again
+  /// ```
+  ///
+  /// An answer about an older opening than the one that holds is ignored.
+  Future<void> _onScreenLeaseLapsed(
+    _WebRtcScreenLeaseLapsed event,
+    Emitter<WebRtcSessionState> emit,
+  ) async {
+    final sessionId = event.remoteSessionId;
+    if (sessionId != _screenCaptureSessionId ||
+        event.epoch != _transmissionEpoch ||
+        !_screenTransmissionAllowed) {
+      return;
+    }
+    _log(
+      'screen transmission lapsed for $sessionId: the heartbeat evidence ran '
+      'out on the Android side; held back until its authority is confirmed '
+      'again',
+    );
+    _screenLeaseLapsed = true;
+    _syncScreenTransmission();
+    final evidence = event.evidence;
+    if (evidence != null) {
+      _transmissionEvidence?.reportLapse(
+        watch: evidence.watch,
+        observedAtNanos: evidence.observedAtNanos,
+      );
+    }
+  }
+
+  static ScreenTransmissionEvidence _screenEvidenceOf(
+    HeartbeatEvidence evidence,
+  ) => ScreenTransmissionEvidence(
+    channel: evidence.watch,
+    observedAtNanos: evidence.observedAtNanos,
+    validFor: evidence.validFor,
+  );
 
   /// The platform could not hold the frames back, or let them through; the
   /// client has stopped the capture rather than leave it in doubt. Recorded as
@@ -1070,6 +1225,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     _screenCaptureSessionId = null;
     _captureAttachedGeneration = null;
     _screenTransmissionAllowed = false;
+    _screenLeaseLapsed = false;
     _screenCaptureStatus = ScreenCaptureStatus.stoppedBySystem;
     _log('screen capture stopped by Android for $sessionId: control withdrawn');
     // Said before anything is awaited: nothing may go on reading "sharing".
@@ -1596,6 +1752,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     _orphanCaptureTimer?.cancel();
     _orphanCaptureTimer = null;
     await _platformStopSubscription.cancel();
+    await _evidenceSubscription?.cancel();
     await _teardownPeer();
     // The screen goes with the application. A capture that outlived the
     // process that authorised it would be a notification the user cannot get

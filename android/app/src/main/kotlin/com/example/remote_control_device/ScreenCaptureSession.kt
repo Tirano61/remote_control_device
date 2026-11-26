@@ -29,10 +29,19 @@ class ScreenCaptureSession private constructor(
     private var stopped = false
 
     /**
-     * Lets the capture's frames reach WebRTC, or keeps them back, without stopping the
-     * projection. See [ScreenCapturer.setTransmitting]. A new capture starts with them kept back.
+     * Lets the capture's frames reach WebRTC under a heartbeat lease, without stopping the
+     * projection. See [ScreenCapturer.openTransmission]. A new capture starts with them kept back.
+     * Null when nothing was applied.
      */
-    fun setTransmitting(open: Boolean): Boolean = !stopped && capturer.setTransmitting(open)
+    internal fun openTransmission(grant: Long, evidenceAtNanos: Long, validForNanos: Long): TransmissionOpening? =
+        if (stopped) null else capturer.openTransmission(grant, evidenceAtNanos, validForNanos)
+
+    /** Keeps every frame back again; see [ScreenCapturer.closeTransmission]. */
+    fun closeTransmission(): Boolean = !stopped && capturer.closeTransmission()
+
+    /** Fresh heartbeat evidence; see [ScreenCapturer.renewTransmission]. Null once stopped. */
+    internal fun renewTransmission(grant: Long, evidenceAtNanos: Long, validForNanos: Long): TransmissionRenewal? =
+        if (stopped) null else capturer.renewTransmission(grant, evidenceAtNanos, validForNanos)
 
     /**
      * Releases everything, in the order the pieces depend on each other. Idempotent.

@@ -24,8 +24,10 @@ import io.flutter.plugin.common.MethodChannel
  * ```
  *
  * In between, `setScreenCaptureTransmission` opens or closes the running capture's
- * transmission gate (a new capture starts closed); see [ScreenCaptureTransmission].
- * Which state it should be in is Dart's decision.
+ * transmission gate (a new capture starts closed), and `renewScreenCaptureTransmission`
+ * renews the heartbeat lease of an opening; see [ScreenCaptureTransmission] and
+ * [ScreenTransmissionMessages]. Which state it should be in is Dart's decision; when its lease
+ * runs out is not, and needs no message at all.
  *
  * What it does hold is what cannot cross the boundary: the projection grant (between the
  * dialog and the capture, never longer) and the one running capture.
@@ -107,16 +109,53 @@ class MediaProjectionChannel(
             SET_TRANSMISSION_METHOD -> {
                 val trackId = call.argument<String>(TRACK_ID)
                 val transmitting = call.argument<Boolean>(TRANSMITTING)
-                if (trackId == null || transmitting == null) {
+                // An opening without a complete lease is not an opening: there is no way to
+                // transmit here without a deadline.
+                val lease = if (transmitting == true) {
+                    ScreenTransmissionMessages.leaseOf { call.argument<Any>(it) }
+                } else {
+                    null
+                }
+                if (trackId == null || transmitting == null || (transmitting && lease == null)) {
                     result.error(TRANSMISSION_FAILED, BAD_ARGUMENTS, null)
                 } else {
                     try {
-                        // false: no such capture any more, or it is stopping. Either way it
-                        // transmits nothing, which is not a failure.
-                        val applied = capture.ifRunning(trackId) {
-                            it.setTransmitting(transmitting)
+                        // Not applied: no such capture any more, or it is stopping. Either way
+                        // it transmits nothing, which is not a failure.
+                        val answer = if (lease != null) {
+                            ScreenTransmissionMessages.openingAnswer(
+                                capture.ifRunning(trackId) {
+                                    it.openTransmission(lease.grant, lease.evidenceAtNanos, lease.validForNanos)
+                                },
+                            )
+                        } else {
+                            ScreenTransmissionMessages.closingAnswer(
+                                capture.ifRunning(trackId) { it.closeTransmission() } ?: false,
+                            )
                         }
-                        result.success(applied ?: false)
+                        result.success(answer)
+                    } catch (error: Exception) {
+                        result.error(TRANSMISSION_FAILED, error.javaClass.simpleName, null)
+                    }
+                }
+            }
+
+            RENEW_TRANSMISSION_METHOD -> {
+                val trackId = call.argument<String>(TRACK_ID)
+                val lease = ScreenTransmissionMessages.leaseOf { call.argument<Any>(it) }
+                if (trackId == null || lease == null) {
+                    result.error(TRANSMISSION_FAILED, BAD_ARGUMENTS, null)
+                } else {
+                    try {
+                        // No such capture: ignored. A renewal for a capture that was replaced
+                        // must never reach its replacement, and it never opens anything.
+                        result.success(
+                            ScreenTransmissionMessages.renewalAnswer(
+                                capture.ifRunning(trackId) {
+                                    it.renewTransmission(lease.grant, lease.evidenceAtNanos, lease.validForNanos)
+                                },
+                            ),
+                        )
                     } catch (error: Exception) {
                         result.error(TRANSMISSION_FAILED, error.javaClass.simpleName, null)
                     }
@@ -195,8 +234,16 @@ class MediaProjectionChannel(
         const val START_CAPTURE_METHOD = "startScreenCapture"
         const val STOP_CAPTURE_METHOD = "stopScreenCapture"
 
-        /** `{ "trackId": "<id>", "transmitting": <bool> }`. Answers whether it was applied. */
+        /**
+         * `{ "trackId", "transmitting": false }` or `{ "trackId", "transmitting": true, "grant",
+         * "evidenceAtNanos", "validForMs" }`. Answers `{ "applied", "live" }`.
+         */
         const val SET_TRANSMISSION_METHOD = "setScreenCaptureTransmission"
+
+        /**
+         * `{ "trackId", "grant", "evidenceAtNanos", "validForMs" }`. Answers `{ "result", "live" }`.
+         */
+        const val RENEW_TRANSMISSION_METHOD = "renewScreenCaptureTransmission"
 
         /** Android -> Dart. `{ "trackId": "<id>" }`, after the capture was released. */
         const val STOPPED_BY_PLATFORM_METHOD = "screenCaptureStoppedByPlatform"

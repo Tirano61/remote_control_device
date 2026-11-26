@@ -1,9 +1,26 @@
 import 'dart:async';
 
+import 'package:remote_control_device/core/async/elapsed_realtime_clock.dart';
 import 'package:remote_control_device/core/async/monotonic_clock.dart';
 import 'package:remote_control_device/core/async/timer_factory.dart';
+import 'package:remote_control_device/features/device/domain/realtime/heartbeat_evidence.dart';
 import 'package:remote_control_device/features/device/domain/realtime/realtime_heartbeat_policy.dart';
 import 'package:remote_control_device/features/device/domain/realtime/realtime_liveness.dart';
+
+/// What [HeartbeatWatchdog.beat] learnt from one PING.
+final class HeartbeatBeat {
+  const HeartbeatBeat({required this.gap, required this.afterUnseenLapse});
+
+  /// How long it had been since the previous evidence.
+  final Duration gap;
+
+  /// The gap was already past the overdue deadline, and nothing had declared
+  /// it: the watchdog's timer had not run (the isolate was held, the process
+  /// slept). The heartbeat stopped vouching for the authority for a while, and
+  /// that has to be treated as an overdue that is already over — a suspension
+  /// and a REST confirmation — not as a heartbeat that never stopped.
+  final bool afterUnseenLapse;
+}
 
 /// Watches the Engine.IO heartbeat of the current `/devices` connection and
 /// says when it has gone quiet for longer than a healthy one can.
@@ -68,6 +85,27 @@ import 'package:remote_control_device/features/device/domain/realtime/realtime_l
 /// setting the clock back cannot either; setting it forward can only make it
 /// look stale, which suspends and reconciles — the safe direction.
 ///
+/// ## Unseen lapses
+///
+/// A PING handled after a gap longer than the overdue deadline, with the
+/// watchdog still *watching* — its timer never ran, because the isolate was
+/// held or the process slept — is not a heartbeat that never stopped. Until
+/// Prompt 43 it was taken as one, and nothing was suspended. Now [beat]
+/// reports it ([HeartbeatBeat.afterUnseenLapse]) and the owner treats it as an
+/// overdue that is already over: suspend, and confirm again over REST. The
+/// native transmission lease ran out at the same deadline in the meantime,
+/// without waiting for this isolate at all (see [HeartbeatEvidenceSource]).
+///
+/// ## Evidence for the native lease
+///
+/// With an [ElapsedRealtimeClock], every piece of evidence is also stamped on
+/// Android's elapsed-realtime clock, and that instant is what the native
+/// screen lease runs from ([currentEvidence], [evidence]). The age then also
+/// counts that clock, so the watchdog never finds evidence younger than the
+/// native side does. A chain of evidence starts with the connection, or with
+/// the PING that ends an overdue or an unseen lapse; only the PINGs that
+/// continue a chain are published as [evidence].
+///
 /// ## Watches
 ///
 /// Every [start] and [stop] begins a new watch ([watch]). A timer of an older
@@ -76,17 +114,20 @@ import 'package:remote_control_device/features/device/domain/realtime/realtime_l
 /// beat is only ever recorded for the watch that is running: a `PING` of a
 /// released socket never reaches here (the transport drops it), and one
 /// arriving while nothing is watched is ignored.
-final class HeartbeatWatchdog implements RealtimeLiveness {
+final class HeartbeatWatchdog
+    implements RealtimeLiveness, HeartbeatEvidenceSource {
   HeartbeatWatchdog({
     this.tolerance = defaultTolerance,
     this.stallMargin = defaultStallMargin,
     TimerFactory timerFactory = systemTimerFactory,
     MonotonicClock monotonicClock = systemMonotonicClock,
     DateTime Function() wallClock = DateTime.now,
+    ElapsedRealtimeClock? elapsedRealtimeClock,
   }) : assert(!tolerance.isNegative, 'the tolerance cannot be negative'),
        _timerFactory = timerFactory,
        _monotonic = monotonicClock,
-       _wall = wallClock;
+       _wall = wallClock,
+       _realtime = elapsedRealtimeClock;
 
   /// Allowed on top of `pingInterval` before the heartbeat counts as overdue.
   /// Covers the round trip the server waits for before scheduling the next
@@ -104,11 +145,21 @@ final class HeartbeatWatchdog implements RealtimeLiveness {
   final MonotonicClock _monotonic;
   final DateTime Function() _wall;
 
+  /// `null` without one: no evidence is offered to the native lease, and the
+  /// screen is then never transmitted.
+  final ElapsedRealtimeClock? _realtime;
+
   int _watch = 0;
   _Phase _phase = _Phase.stopped;
   RealtimeHeartbeatPolicy? _policy;
   Duration _evidenceMonotonic = Duration.zero;
   DateTime _evidenceWall = DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
+  int? _evidenceRealtime;
+
+  /// The elapsed-realtime instant the current chain of evidence started at.
+  int? _chainStartRealtime;
+  final StreamController<HeartbeatEvidence> _evidence =
+      StreamController<HeartbeatEvidence>.broadcast();
   Timer? _timer;
   bool _settling = false;
   void Function(int watch)? _onOverdue;
@@ -161,28 +212,39 @@ final class HeartbeatWatchdog implements RealtimeLiveness {
     _onStalled = onStalled;
     _phase = _Phase.watching;
     _record();
+    _chainStartRealtime = _evidenceRealtime;
     _arm(thresholdFor(policy));
   }
 
   /// An Engine.IO `PING` arrived on the watched connection.
   ///
-  /// Returns how long it had been since the previous evidence (for the log),
-  /// or `null` when nothing is watched and the beat was ignored. After an
-  /// overdue it makes the heartbeat fresh again — and that is all it does: it
-  /// grants nothing, see `DeviceRealtimeBloc`.
-  Duration? beat() {
+  /// Returns how long it had been since the previous evidence (for the log)
+  /// and whether that gap was an unseen lapse, or `null` when nothing is
+  /// watched and the beat was ignored. After an overdue, or an unseen lapse,
+  /// it makes the heartbeat fresh again — and that is all it does: it grants
+  /// nothing, see `DeviceRealtimeBloc`.
+  HeartbeatBeat? beat() {
     final policy = _policy;
     if (policy == null) return null;
     final gap = _age();
+    final threshold = thresholdFor(policy);
+    final wasOverdue = _phase == _Phase.overdue;
+    final unseenLapse = _phase == _Phase.watching && gap >= threshold;
     _record();
-    if (_phase == _Phase.overdue) {
+    if (wasOverdue || unseenLapse) {
+      // A new chain of evidence starts here. Not published: it vouches for
+      // nothing until the authority is confirmed again.
       _phase = _Phase.watching;
       _settling = false;
-      _arm(thresholdFor(policy));
+      _chainStartRealtime = _evidenceRealtime;
+      _arm(threshold);
+    } else {
+      // While watching, the pending check is left alone: it fires at the
+      // deadline of the previous evidence, finds this one and re-arms from it.
+      final evidence = currentEvidence;
+      if (evidence != null) _evidence.add(evidence);
     }
-    // While watching, the pending check is left alone: it fires at the
-    // deadline of the previous evidence, finds this one and re-arms from it.
-    return gap;
+    return HeartbeatBeat(gap: gap, afterUnseenLapse: unseenLapse);
   }
 
   /// Nothing to watch any more: the connection is gone or was replaced.
@@ -194,6 +256,8 @@ final class HeartbeatWatchdog implements RealtimeLiveness {
     _settling = false;
     _onOverdue = null;
     _onStalled = null;
+    _evidenceRealtime = null;
+    _chainStartRealtime = null;
   }
 
   /// Re-evaluates now, from the clocks. For a tablet that may have slept: the
@@ -217,6 +281,37 @@ final class HeartbeatWatchdog implements RealtimeLiveness {
         _settle();
         return false;
     }
+  }
+
+  @override
+  HeartbeatEvidence? get currentEvidence {
+    final policy = _policy;
+    final observedAt = _evidenceRealtime;
+    if (_phase != _Phase.watching || policy == null || observedAt == null) {
+      return null;
+    }
+    return HeartbeatEvidence(
+      watch: _watch,
+      observedAtNanos: observedAt,
+      validFor: thresholdFor(policy),
+    );
+  }
+
+  @override
+  Stream<HeartbeatEvidence> get evidence => _evidence.stream;
+
+  @override
+  void reportLapse({required int watch, required int observedAtNanos}) {
+    if (watch != _watch || _phase != _Phase.watching) return;
+    final chainStart = _chainStartRealtime;
+    // Evidence older than the chain running now: the break it shows is one
+    // the watchdog has already seen and declared.
+    if (chainStart != null && observedAtNanos < chainStart) return;
+    final policy = _policy!;
+    _settling = false;
+    _phase = _Phase.overdue;
+    _arm(stallDeadlineFor(policy) - _age());
+    _onOverdue?.call(watch);
   }
 
   // --------------------------------------------------------------- internals
@@ -286,12 +381,30 @@ final class HeartbeatWatchdog implements RealtimeLiveness {
   void _record() {
     _evidenceMonotonic = _monotonic();
     _evidenceWall = _wall();
+    _evidenceRealtime = _readRealtime();
+  }
+
+  int? _readRealtime() {
+    final realtime = _realtime;
+    if (realtime == null) return null;
+    try {
+      return realtime();
+    } catch (_) {
+      return null;
+    }
   }
 
   Duration _age() {
     final monotonic = _monotonic() - _evidenceMonotonic;
     final wall = _wall().difference(_evidenceWall);
-    return wall > monotonic ? wall : monotonic;
+    var age = wall > monotonic ? wall : monotonic;
+    final from = _evidenceRealtime;
+    final now = from == null ? null : _readRealtime();
+    if (from != null && now != null) {
+      final realtime = Duration(microseconds: (now - from) ~/ 1000);
+      if (realtime > age) age = realtime;
+    }
+    return age;
   }
 }
 
