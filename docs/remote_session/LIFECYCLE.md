@@ -950,7 +950,8 @@ the screen before activating. Unconfirmed, nothing does.
   thread and waited for, so once the call returns no frame after it passes; a
   frame already past the gate belongs to the authorised period. Counts frames
   admitted and withheld and logs them on each switch, never per frame.
-* **Channel**: `setScreenCaptureTransmission {trackId, transmitting}`, applied
+* **Channel**: `setScreenCaptureTransmission {trackId, transmitting}` (since
+  Prompt 43 an opening also carries its heartbeat lease), applied
   only to the running capture with that id (`RunningScreenCapture.ifRunning`); a
   late call for a replaced capture reaches nothing.
 * **Client** (`ScreenCaptureClient.setTransmitting`): one platform call per
@@ -1456,11 +1457,8 @@ Android in the background: a remote session runs with a foreground service
 deep sleep of a screen-off tablet stop the CPU, and with it Dart and the native
 capture alike. What Dart cannot guarantee is a **live process whose isolate is
 stalled** (a long jank, a debugger): the native capture keeps producing frames
-and the gate stays as Dart last set it until Dart runs again. Proposed, not
-implemented: a native lease on `ScreenCaptureTransmission` (Dart renews
-`transmitUntil = elapsedRealtime + 13 s` on every `PING`; the gate closes
-itself when it lapses, on `SystemClock.elapsedRealtime`, which counts sleep).
-It needs its own JVM and device tests.
+and the gate stays as Dart last set it until Dart runs again. Implemented in
+Prompt 43: see "Native transmission lease (Prompt 43)".
 
 ### Tests
 
@@ -1558,6 +1556,274 @@ backend with other heartbeat values.
 * **False suspension** when a `PING` is more than 3 s late (a congested network,
   an isolate blocked for seconds): costs one REST round trip and a rejoin; the
   peer and the capture are kept.
-* **A stalled isolate in a live process** keeps the gate as it was; see the
-  native lease proposed above.
+* **A stalled isolate in a live process** kept the gate as it was; closed by
+  the native lease of Prompt 43.
 * **The wall clock set forward** suspends once.
+
+## Native transmission lease (Prompt 43)
+
+The residual risk Prompt 42 left: a **live process whose Dart isolate is
+stalled** (a long jank, a debugger, a delayed callback) keeps the native frame
+gate as Dart last set it. The watchdog cannot close it, because its timer does
+not run, and the capture goes on producing frames that reach the encoder until
+Dart runs again: before this prompt nothing in the native path looked at time.
+(Not reproduced on a device with the old build; on this build, scenario C below
+shows how many frames that window holds.)
+
+### Design
+
+The gate in `ScreenCapturer.onFrame` (`ScreenCaptureTransmission`) now lets a
+frame through only when **both** hold at the moment it arrives:
+
+```text
+open    Dart opened it for the remote session whose authority it confirmed
+        (unchanged since Prompt 40)
+lease   the heartbeat evidence that opening was given, or a renewal of it,
+        is younger than its validity — read from Kotlin's own clock, for
+        every frame
+```
+
+```text
+PING handled in Dart ── stamped on CLOCK_BOOTTIME (clock_gettime, via FFI)
+        │
+        ├── HeartbeatWatchdog (age, overdue, unseen lapse)
+        │
+        └── evidence stream ──► WebRtcSessionBloc ──► client ──► channel
+                                                                  │
+ScreenCapturer.onFrame ── open? ── now < evidenceAt + validFor? ──┘
+                           no ──► withheld        no ──► withheld (no message needed)
+                           yes and yes ──► encoder
+```
+
+The lease grants nothing. It can only take away what an opening gave. There is
+no second authority: the opening is still the confirmed C2 authority of
+`RemoteSessionBloc`, decided in `WebRtcSessionBloc._syncScreenTransmission`.
+
+### Time source
+
+`SystemClock.elapsedRealtimeNanos()` on the Kotlin side, `CLOCK_BOOTTIME`: the
+user cannot set it and it keeps counting in deep sleep. Dart stamps every piece
+of evidence on **the same kernel clock**, through `clock_gettime(CLOCK_BOOTTIME)`
+read with `dart:ffi` from `libc.so`
+(`core/async/android_elapsed_realtime_clock.dart`) — the call libutils'
+`elapsedRealtimeNano()` makes. The instant crosses the channel as it was read,
+so the channel's delay does not move it: a late message carries an old instant
+and buys no time. Dart's own `Stopwatch` is `CLOCK_MONOTONIC` (stops in deep
+sleep, other origin) and could not be used for this.
+
+Checked on the T10A: every renewal reached Kotlin with its evidence 2–6 ms old
+(47 renewals), and the first opening found its evidence 4678 ms old — the PING
+before it. An instant from the native clock's future would mean the clocks do
+not agree; it is refused and the gate stays shut (fail closed). Without the FFI
+clock (not Android, or the call fails) no evidence is offered and the screen is
+never transmitted.
+
+### Validity
+
+`pingInterval + min(3 s, pingTimeout)` from each connection's own Engine.IO
+handshake — 13 s with the backend's 10/10, exactly the watchdog's overdue
+deadline. It is not a constant: Dart sends it with every opening, and a renewal
+must carry the same validity as its grant. Kotlin refuses anything above 120 s.
+
+### Openings, renewals, generations
+
+```text
+opening   setScreenCaptureTransmission {trackId, transmitting: true, grant,
+          evidenceAtNanos, validForMs} -> {applied, live}
+          grant: numbered by the client for the life of the process; Kotlin
+          applies it only if newer than every grant opened on that capture
+closing   {trackId, transmitting: false} -> {applied, live: false}
+renewal   renewScreenCaptureTransmission {trackId, grant, evidenceAtNanos,
+          validForMs} -> {result: renewed|lapsed|ignored|rejected, live}
+```
+
+The renewal rule is about the evidence, never about when its message arrived:
+
+```text
+evidence before the lease ran out    renewed: the deadline moves to
+                                     evidence + validity (forward only)
+evidence at or after it ran out      lapsed: there was a gap of at least the
+                                     validity with no evidence at all; nothing
+                                     renews this grant any more
+older / same evidence                ignored: nothing moves back
+other grant, closed gate, stopped    ignored: never opens, never reaches a
+                                     newer opening
+future instant, other validity       rejected
+```
+
+* Only the PINGs that **continue an unbroken chain** are renewals. The PING that
+  ends an overdue, or one that comes after a gap nobody saw, starts a new chain
+  and is not published: it vouches for nothing until the authority is
+  confirmed again.
+* A renewal carries the connection it was observed on; evidence of another
+  connection (another watch) never renews a lease opened on an older one.
+* Each capture has its own gate (a new capture starts closed, grants mean
+  nothing across captures), and messages are addressed by track id, so a
+  renewal for a replaced capture reaches nothing.
+* **Revocation always wins**: closing, FINALIZAR, SYSTEM and Android's own stop
+  close or stop the gate; any renewal still on its way is then ignored.
+
+### A lapse found natively
+
+The client answers `lapsed` when Kotlin reports `lapsed` or `rejected`, when a
+renewal was applied but its evidence had already run out by then, when an
+opening's evidence had run out on arrival, or when a renewal could not be
+delivered. `WebRtcSessionBloc._onScreenLeaseLapsed` then:
+
+1. closes the gate here too, and keeps it closed while the session's confirmed
+   authority is the one the lapse happened under (a PING or a renewal never
+   reopens it);
+2. tells the watchdog (`HeartbeatEvidenceSource.reportLapse`), which declares
+   the heartbeat overdue unless it already knows of a break at or after that
+   evidence — the normal C2 suspension follows;
+3. the next opening, a new grant, comes only after a REST read made once the
+   heartbeat is back has confirmed the session.
+
+Answers about an older opening than the one that holds are ignored (an epoch
+per opening).
+
+### The unseen lapse (Dart side)
+
+Before this prompt, a PING handled after a gap past the deadline while the
+watchdog was still *watching* (its timer had not run: the isolate was held, the
+process slept) simply refreshed the evidence: nothing was suspended. Now
+`HeartbeatWatchdog.beat` reports it (`afterUnseenLapse`) and
+`DeviceRealtimeBloc` emits `HeartbeatOverdue` and `Connected` in a row: the
+session is suspended and confirmed again over REST, exactly as the native lease
+already decided. The age also counts the elapsed-realtime clock, so the
+watchdog never finds evidence younger than Kotlin does.
+
+### Concurrency
+
+`admit()` runs on the `SurfaceTextureHelper` thread for every frame and takes
+no lock: one volatile read of an immutable snapshot plus the clock. Every
+change (open, close, renew, stop) replaces the snapshot under one short lock,
+so changes from different threads apply one after another and a frame sees the
+old snapshot or the new one, whole. Openings and closings still run on the
+helper thread and are waited for (Prompt 40's guarantee: once a closing
+returns, no later frame passes); renewals are applied on the channel's thread
+and only post a redelivery to the helper when they revive a lease that had run
+out with frames withheld.
+
+### Recovery, FINALIZAR, SYSTEM
+
+* Recovery: when Dart runs again it measures the age (late timer or unseen
+  lapse), suspends through C2, reconciles over REST, checks the same session
+  and the current generation, rejoins signaling, and only then opens a new
+  grant. MediaProjection is kept, so no new consent; if Android stopped it, it
+  is never restarted silently.
+* FINALIZAR: the session ends here at once; the gate closes, control is
+  withdrawn, the capture stops and every resource of the session is released;
+  any renewal in flight is ignored.
+* SYSTEM: unchanged, the backend's authoritative `endedBy: SYSTEM`; nothing
+  reopens video after CLOSED.
+
+What the lease does **not** change: MediaProjection is never stopped by an
+expiry, no black frame is sent, the peer connection is not torn down for it,
+and the WebRTC negotiation is untouched.
+
+### Tests
+
+* JVM `ScreenCaptureTransmissionTest` (39, injectable clock): live, expired,
+  closed, expiry with no call at all, valid / late / lapsed renewals, a late
+  message buying nothing, older grants, other capture
+  (`RunningScreenCaptureTest`), FINALIZAR/SYSTEM/Android stop, future instants,
+  validity changes, the exact nanosecond edge, new capture, frames on one
+  thread and renewals on another, 8 threads renewing concurrently, closing
+  racing renewals (revocation wins, 200 rounds), and the full frame path with
+  the settle frame (nothing sent after expiry, a revived lease redelivers the
+  current screen).
+* `heartbeat_watchdog_test` (+10): stamps on the realtime clock, published
+  evidence carries the PING's instant, no evidence when overdue / unmonitored
+  / without the clock, the PING ending an overdue is not published, the unseen
+  lapse, deep sleep with the wall clock set back, `reportLapse` and its
+  ignored cases, a new connection is a new chain.
+* `device_realtime_heartbeat_test` (+2), `media_projection_screen_capture_client_test`
+  (+10), `flutter_webrtc_screen_media_test` (channel arguments and answers).
+* `test/app/native_video_lease_test.dart` (19): every bloc and coordinator real;
+  the fake capture client keeps its lease under the native rules on a clock that
+  moves whether or not the isolate runs (no mock that always accepts): normal
+  assistance, half-open, Dart held 20 s (frames stop with no Dart call), resumed
+  with the PING first or the timer first, renewals racing the deadline, a lapse
+  only Android saw, socket generations, two cuts, a recovery offer, FINALIZAR,
+  SYSTEM, Android's stop during a renewal, a new assistance.
+
+### Seen on a device
+
+2026-11-26, T10A (`LSTT10M2026081504`), branch
+`feature/device-native-video-authority-expiry` (05dece5). Isolated as in Prompt
+42, nothing shared touched: a second installation
+`com.example.remote_control_device.p43test` ("P43 prueba lease", device
+`501-327-866`, its own enrolment), a `git archive` of `remote_control_backend`
+`main` (18a413f) with its own `node_modules` on 127.0.0.1:3200 and a disposable
+embedded PostgreSQL, `remote_control_web` `main` (2ebe4dd) built against it on
+localhost:5173 in Chrome (`inbound-rtp` sampled each second),
+`half_open_relay.js` on port 3010 behind the Public dev tunnel. Dart logs from
+the VM service, native logs from logcat (`log.tag.RemoteControlScreen I`,
+reset afterwards). Tablet clock 0.85 s behind the PC, converted. PERMITIR, the
+capture dialogs and the accessibility toggle by the user; enrolment input,
+SOLICITAR, FINALIZAR and screen changes (status bar every 1.5 s) with adb; no
+mobile-mcp, no UiAutomation, no `am force-stop`. The "Dart blocked" of C was
+the VM service's `pause` of the app's root isolate (debug build), which stops
+Dart only: Android's main thread, the capture thread and the OS keep running.
+
+```text
+A  normal 128 s + whole run  410 PING gaps: median 10.14 s, max 10.24 s. 47
+                             renewals, evidence 2-6 ms old on arrival. Web
+                             frames 0 -> 1292 in 128 s, no flat second. Remote
+                             Back executed. No expiry, lapse or rejection
+                             except the induced one in C.
+B  half-open 15 s, 7 s       native deadline PING+13.000; Dart overdue +13.01,
+   after a PING              gate closed natively 31 ms after the deadline, no
+                             frame in between. Web frames flat 1738 for ~11 s.
+                             Restore: reconnected, REST ACTIVE, grant 2.
+C  Dart isolate paused 22 s  paused 8.1 s after a PING. Kotlin alone: "lease
+   (VM service)              ran out" at evidence+13.082 s (first frame after
+                             the deadline); 459 frames withheld with no Dart
+                             call. Dart could not suspend: its closing came
+                             only after the resume, 16.7 s later. Web frames
+                             flat 2193 from +13.8 s.
+D  Dart resumed              transport disconnect (server closed it), overdue
+                             29.7 s + stalled, suspended, new socket, REST
+                             ACTIVE, then grant 3. Web frames resumed only
+                             after that (+31.8 s). No video on resume alone.
+E  Wi-Fi off 5 s             disconnected, suspended; reconnected, REST,
+                             grant 4; the web's recovery offer reused the
+                             capture, no dialog.
+F  two cuts in a row         PINGs held 15 s (toClient), then a full 15 s cut:
+                             one suspension each, grant 5 and grant 6 each
+                             after its own REST read.
+G  cut 120 s                 suspended +13 s; backend CLOSED endedBy SYSTEM;
+                             the tablet ended at its 75 s, capture stopped;
+                             after restore /current confirmed it gone; no
+                             opening afterwards.
+H  FINALIZAR right on a      185 ms after a PING (its renewal applied 3 ms
+   PING                      after it): gate closed +30 ms, capture stopped
+                             +96 ms, CLOSED endedBy DEVICE; later PINGs renewed
+                             and opened nothing.
+I  new assistance            d442b888: PERMITIR and the capture dialog again,
+                             new capture, grant 7 from the evidence of the
+                             moment (3198 ms old), ACTIVE.
+```
+
+Also seen: an isolate paused 14 s with the socket surviving went through the
+watchdog's late timer first (overdue 15.63 s) and then the held PING ("heartbeat
+back") and REST. The other order — the held PING handled before the timer, the
+unseen-lapse branch — is covered by tests only.
+
+### Residual risks
+
+* **Evidence is stamped when Dart handles the PING**, not when the kernel
+  received it. A PING buffered during a stall is stamped late; the gap it shows
+  is then at least as long as the stall, so it is treated as a lapse (safe
+  direction), at the cost of one REST round trip.
+* **Frames already past the gate** (in the encoder or in flight) when the lease
+  runs out still go, as in Prompt 40. RTX/padding may still flow.
+* **Detection is bounded by the heartbeat**: up to 13 s after the last PING.
+* **A stall longer than 3 s past a PING interval** now always costs a
+  suspension and a REST confirmation (the unseen lapse), where Prompt 42 let it
+  pass.
+* **No elapsed-realtime clock** (FFI failure) means no screen at all, by design.
+* The native protection only limits frames. Commands are still guarded by the
+  Dart checks (`confirmFresh`), which need Dart to run — while Dart is stalled
+  it cannot execute commands either.
