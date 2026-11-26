@@ -9,6 +9,7 @@ import 'package:remote_control_device/features/device/data/realtime/device_socke
 import 'package:remote_control_device/features/device/data/realtime/socket_zone.dart';
 import 'package:remote_control_device/features/device/domain/realtime/device_realtime_channel.dart';
 import 'package:remote_control_device/features/device/domain/realtime/device_realtime_signal.dart';
+import 'package:remote_control_device/features/device/domain/realtime/realtime_heartbeat_policy.dart';
 import 'package:remote_control_device/features/signaling/data/signaling_events.dart';
 import 'package:remote_control_device/features/signaling/data/signaling_payloads.dart';
 import 'package:remote_control_device/features/signaling/domain/entities/join_remote_session_result.dart';
@@ -126,8 +127,30 @@ class SocketIoDeviceRealtimeClient implements DeviceRealtimeChannel {
     _listenerRemovers.addAll([
       socket.onConnect((_) {
         if (stale()) return;
-        _log('connected');
-        _emit(const RealtimeConnected());
+        // The namespace connects only after the Engine.IO handshake, so the
+        // engine already holds the values the backend announced for this
+        // connection. A reconnection of the same socket is a new engine with
+        // a new handshake, read again here.
+        final engine = socket.io.engine;
+        final heartbeat = RealtimeHeartbeatPolicy.fromHandshake(
+          pingIntervalMs: engine?.pingInterval,
+          pingTimeoutMs: engine?.pingTimeout,
+        );
+        _log(
+          heartbeat == null
+              ? 'connected (heartbeat not announced)'
+              : 'connected (heartbeat $heartbeat)',
+        );
+        _emit(RealtimeConnected(heartbeat: heartbeat));
+      }),
+      // The Engine.IO PING, which the Manager re-emits as `ping` for every one
+      // its current engine receives (manager.dart, `onping`); the engine has
+      // already answered it with a PONG. Only the current engine's reach here:
+      // the Manager drops an engine's subscriptions when it closes. Not
+      // logged here, the bloc logs the gap.
+      socket.onPing((_) {
+        if (stale()) return;
+        _emit(const RealtimeHeartbeat());
       }),
       socket.on(deviceConnectedEvent, (Object? payload) {
         if (stale()) return;

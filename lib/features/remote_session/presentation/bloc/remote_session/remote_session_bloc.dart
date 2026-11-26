@@ -280,7 +280,11 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
     if (current is RemoteSessionLive && !current.isSuspended) {
       _log(
         'authority over ${current.session.id} suspended: the realtime '
-        'channel is ${event.available ? 'back but not reconciled' : 'down'}',
+        'channel is ${event.available
+            ? 'back but not reconciled'
+            : event.heartbeatOverdue
+            ? 'silent (heartbeat overdue)'
+            : 'down'}',
       );
       emit(_withAuthority(current, RemoteSessionAuthority.suspended));
     }

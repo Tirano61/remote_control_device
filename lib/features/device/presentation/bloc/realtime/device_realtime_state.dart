@@ -57,6 +57,34 @@ final class DeviceRealtimeConnected extends DeviceRealtimeState {
   List<Object?> get props => [confirmation];
 }
 
+/// The transport still reports the connection as up, but its Engine.IO
+/// heartbeat is overdue: no `PING` within `pingInterval` + a tolerance (13 s
+/// with the backend's 10/10). See `HeartbeatWatchdog`.
+///
+/// For everything that hangs on the channel this is **not connected**: the
+/// remote session's authority is suspended exactly as on a real
+/// disconnection, the screen is held back and commands are refused. It is a
+/// suspicion, not a verdict, so nothing is torn down here and the socket is
+/// left to the transport:
+///
+/// ```text
+/// a PING arrives          ──> DeviceRealtimeConnected again. That is all it
+///                             does: the session still needs a REST read made
+///                             after it, as after any reconnection
+/// the transport gives up  ──> DeviceRealtimeReconnecting, as always
+/// neither, for too long   ──> a new socket (DeviceRealtimeReconnecting)
+/// ```
+final class DeviceRealtimeHeartbeatOverdue extends DeviceRealtimeState {
+  const DeviceRealtimeHeartbeatOverdue({this.confirmation});
+
+  /// Kept from the connection it suspects, so that it is not lost if the
+  /// heartbeat comes back on the same socket.
+  final DeviceRealtimeConfirmation? confirmation;
+
+  @override
+  List<Object?> get props => [confirmation];
+}
+
 /// A connection that had been established was lost and is being retried.
 final class DeviceRealtimeReconnecting extends DeviceRealtimeState {
   const DeviceRealtimeReconnecting();

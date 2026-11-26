@@ -44,3 +44,26 @@ final class _RetryDue extends DeviceRealtimeEvent {
   @override
   List<Object?> get props => [generation, renew];
 }
+
+/// The heartbeat of the watched connection went overdue. Raised only by the
+/// [HeartbeatWatchdog], tagged with its watch so that one raised for a
+/// connection since replaced does nothing.
+final class _HeartbeatOverdue extends DeviceRealtimeEvent {
+  const _HeartbeatOverdue(this.watch);
+
+  final int watch;
+
+  @override
+  List<Object?> get props => [watch];
+}
+
+/// The heartbeat stayed overdue past the point where the transport should
+/// have given up by itself. Raised only by the [HeartbeatWatchdog].
+final class _HeartbeatStalled extends DeviceRealtimeEvent {
+  const _HeartbeatStalled(this.watch);
+
+  final int watch;
+
+  @override
+  List<Object?> get props => [watch];
+}

@@ -133,7 +133,11 @@ class _ConnectionField extends StatelessWidget {
         final (label, connected) = switch (state) {
           DeviceRealtimeConnected() => ('Conectado', true),
           DeviceRealtimeConnecting() => ('Conectando...', false),
-          DeviceRealtimeReconnecting() => ('Reconectando...', false),
+          // The socket may still be open, but nothing proves the backend can
+          // reach the tablet: to the user it is the same as a lost
+          // connection being recovered.
+          DeviceRealtimeReconnecting() ||
+          DeviceRealtimeHeartbeatOverdue() => ('Reconectando...', false),
           DeviceRealtimeDisconnected() ||
           DeviceRealtimeConnectionError() => ('Sin conexión', false),
         };
