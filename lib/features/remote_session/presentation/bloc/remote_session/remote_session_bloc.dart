@@ -199,6 +199,22 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
   /// restart is already known when `/current` first returns it.
   Future<void>? _markerLoaded;
 
+  /// Sessions this run recorded as held in [_endedSessionStore] before
+  /// granting anything in them. Only these can be confirmed: a session whose
+  /// record could not be written would be resumed by the next start if this
+  /// run's FINALIZAR failed to be written too, so it is never controlled
+  /// (A3 of the Prompt 44 audit).
+  final Set<String> _recordedHeld = <String>{};
+
+  /// The session the store names as held, as far as this bloc knows.
+  String? _heldInStore;
+
+  /// The store could not be read at start: nothing tells which session an
+  /// earlier run took part in or ended. Fail closed: the first answer of this
+  /// run that reaches the backend refuses whatever session it shows live, as
+  /// not resumable. Sessions that begin after it go the normal way.
+  bool _startUnverified = false;
+
   /// The close currently on its way to the backend, if any. An identity token
   /// rather than a flag, so a close abandoned by a reset cannot clear the flag
   /// of one started after it.
@@ -411,9 +427,15 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
     _retryTimer = null;
   }
 
-  /// What a read that started at [epoch] may say about authority.
-  RemoteSessionAuthority _authorityFor(int epoch) =>
-      _authorityChannelUp && epoch == _authorityEpoch
+  /// What a read that started at [epoch] may say about the authority over
+  /// [remoteSessionId]: confirmed only with the channel up since before the
+  /// read left, and only for a session recorded as held first (see
+  /// [_recordedHeld]).
+  RemoteSessionAuthority _authorityFor(int epoch, String? remoteSessionId) =>
+      _authorityChannelUp &&
+          epoch == _authorityEpoch &&
+          remoteSessionId != null &&
+          _recordedHeld.contains(remoteSessionId)
       ? RemoteSessionAuthority.confirmed
       : RemoteSessionAuthority.suspended;
 
@@ -558,8 +580,9 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
     if (current is RemoteSessionEndedLocally) {
       if (!_closeOwed(current.remoteSessionId)) {
         _log(
-          'session ${current.remoteSessionId} stopped here (authority lost) '
-          'is still live at the backend: waiting for its own close',
+          'session ${current.remoteSessionId} stopped here '
+          '(${current.reason.name}) is still live at the backend: waiting '
+          'for its own close',
         );
         return;
       }
@@ -722,6 +745,19 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
     final answeredLive = value != null && _isLiveStatus(value.status)
         ? value
         : null;
+    if (_startUnverified) {
+      // The first answer since a start whose store could not be read. What it
+      // shows live existed before this run, and nothing says whether that run
+      // ended it: it is refused, never resumed.
+      _startUnverified = false;
+      if (answeredLive != null && !_isOver(answeredLive.id)) {
+        _refuseAsNotResumable(answeredLive.id);
+        _log(
+          'session ${answeredLive.id} found live after a start whose '
+          'ended-session store could not be read: not resumed',
+        );
+      }
+    }
     if (answeredLive != null) {
       // Whatever becomes of this answer, the backend had this session when it
       // served it; any read that leaves from now on was served after that.
@@ -730,9 +766,13 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
     final overtaken = sequence < _newestAnsweredRead;
     if (!overtaken) _newestAnsweredRead = sequence;
 
-    // What this answer proves is over: the session held, and the one ended
-    // here that the backend has not confirmed yet.
-    for (final id in {_heldSessionId(state), _pendingConfirmation}) {
+    // What this answer proves is over: the session held, the one ended here
+    // that the backend has not confirmed yet, and the one recorded as held.
+    for (final id in {
+      _heldSessionId(state),
+      _pendingConfirmation,
+      _heldInStore,
+    }) {
       if (id == null || answeredLive?.id == id) continue;
       if (_isOverAtBackend(id) || !_answerProvesGone(id, sequence)) continue;
       _goneAtBackend.add(id);
@@ -744,6 +784,23 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
         _isOverAtBackend(pending)) {
       _log('session $pending ended here is no longer live: confirmed');
       await _forgetPending(pending);
+      if (generation != _generation) return false;
+    }
+    final held = _heldInStore;
+    if (held != null && answeredLive?.id != held && _isOverAtBackend(held)) {
+      await _forgetHeld(held);
+      if (generation != _generation) return false;
+    }
+
+    // A live session this run has not recorded as held yet is recorded now,
+    // and the write is waited for: only a recorded session can be confirmed
+    // ([_authorityFor]). A failed write is tried again by the next read, and
+    // until one succeeds the session stays suspended.
+    if (answeredLive != null &&
+        !overtaken &&
+        !_isOver(answeredLive.id) &&
+        !_recordedHeld.contains(answeredLive.id)) {
+      await _recordHeld(answeredLive.id);
       if (generation != _generation) return false;
     }
 
@@ -799,7 +856,7 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
           current.authority == RemoteSessionAuthority.confirmed &&
               _authorityChannelUp
           ? RemoteSessionAuthority.confirmed
-          : _authorityFor(epoch);
+          : _authorityFor(epoch, session.id);
       _noteDeparture(session);
       emit(_stateFor(session, lastFailure: reason, authority: authority));
       return true;
@@ -827,7 +884,11 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
 
     _noteDeparture(value);
     emit(
-      _stateFor(value, lastFailure: reason, authority: _authorityFor(epoch)),
+      _stateFor(
+        value,
+        lastFailure: reason,
+        authority: _authorityFor(epoch, value?.id),
+      ),
     );
     return true;
   }
@@ -1015,6 +1076,8 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
           _goneAtBackend.add(remoteSessionId);
           await _forgetPending(remoteSessionId);
           if (generation != _generation) return;
+          await _forgetHeld(remoteSessionId);
+          if (generation != _generation) return;
           done();
           emit(_stateFor(value));
           // ...and the contract's own recovery call agrees. Normally `null`.
@@ -1090,13 +1153,18 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
 
   Future<void> _loadMarker() => _markerLoaded ??= _readMarker();
 
+  /// Reads what an earlier run left: the session it ended (the marker) and
+  /// the session it took part in (the held record). Each read is tried twice.
+  /// If either cannot be read, the start is unverified ([_startUnverified]):
+  /// nothing found live by this run's first answer is resumed.
   Future<void> _readMarker() async {
-    try {
-      final marker = await _endedSessionStore.read();
-      if (marker == null) return;
-      final remoteSessionId = marker.remoteSessionId;
+    final marker = await _readStore(_endedSessionStore.read, 'marker');
+    if (marker == null) {
+      _startUnverified = true;
+    } else if (marker.$1 case final ended?) {
+      final remoteSessionId = ended.remoteSessionId;
       _endedHere.add(remoteSessionId);
-      if (!marker.closeOwed) {
+      if (!ended.closeOwed) {
         _endReasons.putIfAbsent(
           remoteSessionId,
           () => RemoteSessionLocalEndReason.authorityLost,
@@ -1107,23 +1175,113 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
         'session $remoteSessionId was ended on this tablet before: '
         'it will not be resumed',
       );
-    } on EndedRemoteSessionStoreException {
-      _log('the ended-session marker could not be read');
+    }
+
+    final held = await _readStore(_endedSessionStore.readHeld, 'held record');
+    if (held == null) {
+      _startUnverified = true;
+    } else if (held.$1 case final heldId?) {
+      _heldInStore = heldId;
+      // Ended by the earlier run and recorded: the marker says how. Taken
+      // part in and not recorded as ended: that run crashed, or its FINALIZAR
+      // could not be written. The two cannot be told apart here.
+      if (!_endedHere.contains(heldId)) _refuseAsNotResumable(heldId);
+      _log(
+        'session $heldId was taken part in by an earlier run: it will not be '
+        'resumed',
+      );
+    }
+    if (_startUnverified) {
+      _log(
+        'the ended-session store could not be read: a session found live now '
+        'will not be resumed',
+      );
     }
   }
 
+  /// [read], and once more if it fails: a record of its value, or `null` if
+  /// neither attempt could read the store.
+  Future<(T,)?> _readStore<T>(Future<T> Function() read, String what) async {
+    for (var attempt = 1; attempt <= 2; attempt++) {
+      try {
+        return (await read(),);
+      } on EndedRemoteSessionStoreException {
+        _log('the ended-session $what could not be read (attempt $attempt)');
+      }
+    }
+    return null;
+  }
+
+  /// [remoteSessionId] is refused as live from now on, as a session ended
+  /// here that owes no close.
+  void _refuseAsNotResumable(String remoteSessionId) {
+    _endedHere.add(remoteSessionId);
+    _endReasons.putIfAbsent(
+      remoteSessionId,
+      () => RemoteSessionLocalEndReason.notResumable,
+    );
+  }
+
+  /// Records [remoteSessionId] as held before it can be confirmed. Tried
+  /// twice; if both fail it is not recorded, and cannot be confirmed in this
+  /// run until a later read records it.
+  Future<void> _recordHeld(String remoteSessionId) async {
+    for (var attempt = 1; attempt <= 2; attempt++) {
+      try {
+        await _endedSessionStore.writeHeld(remoteSessionId);
+        _recordedHeld.add(remoteSessionId);
+        _heldInStore = remoteSessionId;
+        return;
+      } on EndedRemoteSessionStoreException {
+        _log(
+          'session $remoteSessionId could not be recorded as held '
+          '(attempt $attempt)',
+        );
+      }
+    }
+    _log(
+      'session $remoteSessionId is not recorded as held: its authority will '
+      'not be confirmed',
+    );
+  }
+
+  Future<void> _forgetHeld(String remoteSessionId) async {
+    if (_heldInStore != remoteSessionId) return;
+    _heldInStore = null;
+    try {
+      await _endedSessionStore.clearHeld();
+    } on EndedRemoteSessionStoreException {
+      // Harmless: it names a session the backend no longer holds live, which
+      // a next start refuses for nothing.
+      _log('the held-session record could not be cleared');
+    }
+  }
+
+  /// Writes the marker, tried twice. A failure costs only how the backend
+  /// hears about the end after a restart (a close owed becomes the backend's
+  /// own SYSTEM close): the session was recorded as held before it could be
+  /// controlled, and a next start refuses it for that alone.
   Future<void> _rememberPending(
     String remoteSessionId, {
     required bool closeOwed,
   }) async {
     _pendingConfirmation = remoteSessionId;
-    try {
-      await _endedSessionStore.write(
-        EndedRemoteSessionMarker(remoteSessionId, closeOwed: closeOwed),
-      );
-    } on EndedRemoteSessionStoreException {
-      _log('the ended-session marker could not be written');
+    for (var attempt = 1; attempt <= 2; attempt++) {
+      try {
+        await _endedSessionStore.write(
+          EndedRemoteSessionMarker(remoteSessionId, closeOwed: closeOwed),
+        );
+        return;
+      } on EndedRemoteSessionStoreException {
+        _log(
+          'the ended-session marker could not be written (attempt $attempt)',
+        );
+      }
     }
+    _log(
+      'session $remoteSessionId: marker not written; a next start refuses it '
+      'all the same, as taken part in by an earlier run',
+    );
   }
 
   Future<void> _forgetPending(String remoteSessionId) async {
@@ -1145,7 +1303,11 @@ class RemoteSessionBloc extends Bloc<RemoteSessionEvent, RemoteSessionState> {
   /// Whether a session ended here is one the backend must be told about with
   /// `POST close` (FINALIZAR), as opposed to one the backend closes itself.
   bool _closeOwed(String remoteSessionId) =>
-      _endReasons[remoteSessionId] != RemoteSessionLocalEndReason.authorityLost;
+      switch (_endReasons[remoteSessionId]) {
+        null || RemoteSessionLocalEndReason.userRequest => true,
+        RemoteSessionLocalEndReason.authorityLost ||
+        RemoteSessionLocalEndReason.notResumable => false,
+      };
 
   /// `404` and `409` both mean the same thing here: what this client believed
   /// is not what the backend holds, and the close did not happen. The contract

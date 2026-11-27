@@ -34,6 +34,32 @@ abstract interface class EndedRemoteSessionStore {
   ///
   /// Throws [EndedRemoteSessionStoreException] if the store cannot be written.
   Future<void> clear();
+
+  /// The session this tablet last took part in, recorded *before* it could be
+  /// controlled, or `null`.
+  ///
+  /// Read once at start. A session named here was held by an earlier run of
+  /// the application, and that run's end is what the marker above records —
+  /// when its write succeeded. Nothing on this tablet can tell an earlier run
+  /// that crashed during an assistance from one whose FINALIZAR could not be
+  /// written, so a session named here is never resumed: control and the
+  /// screen need a new request and a new consent (A3 of the Prompt 44 audit).
+  ///
+  /// Throws [EndedRemoteSessionStoreException] if the store cannot be read.
+  Future<String?> readHeld();
+
+  /// Records [remoteSessionId] as the session this tablet takes part in,
+  /// replacing any previous one. Written, and its success awaited, before the
+  /// session's authority can be confirmed: the restart guarantee then no
+  /// longer rests on a write made at the moment of FINALIZAR.
+  ///
+  /// Throws [EndedRemoteSessionStoreException] if the store cannot be written.
+  Future<void> writeHeld(String remoteSessionId);
+
+  /// Forgets the held session: the backend showed it is no longer live.
+  ///
+  /// Throws [EndedRemoteSessionStoreException] if the store cannot be written.
+  Future<void> clearHeld();
 }
 
 /// One session ended on this tablet and not yet confirmed closed.

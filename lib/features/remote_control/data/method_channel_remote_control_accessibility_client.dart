@@ -45,8 +45,21 @@ class MethodChannelRemoteControlAccessibilityClient
   static const String cancelTouchMethod = 'cancelRemoteTouch';
   static const String abandonTouchMethod = 'abandonRemoteTouch';
   static const String touchEndedMethod = 'remoteTouchEnded';
+  static const String openControlMethod = 'openRemoteControl';
+  static const String closeControlMethod = 'closeRemoteControl';
+
+  /// What every command carries when no grant is open: never a grant the
+  /// Android side has opened, since grants start at 1.
+  static const int noGrant = 0;
 
   final Duration gestureTimeout;
+
+  /// The grant [openControl] opened last, until [closeControl]. Stamped on
+  /// every command at the moment it is sent, which is the moment it is put on
+  /// the channel: the Android side receives calls in the order they are made.
+  int? _grant;
+
+  int get _grantForCall => _grant ?? noGrant;
 
   /// The handler goes on when someone listens rather than at construction,
   /// which happens before the Flutter binding exists, and comes off when
@@ -130,12 +143,16 @@ class MethodChannelRemoteControlAccessibilityClient
   Future<RemoteTextOutcome> performSetText(String text) async {
     try {
       final outcome = await channel
-          .invokeMethod<String>(setTextMethod, <String, Object>{'text': text})
+          .invokeMethod<String>(setTextMethod, <String, Object>{
+            'text': text,
+            'grant': _grantForCall,
+          })
           .timeout(gestureTimeout);
       return switch (outcome) {
         'completed' => RemoteTextOutcome.completed,
         'targetUnavailable' => RemoteTextOutcome.targetUnavailable,
         'unavailable' => RemoteTextOutcome.unavailable,
+        'revoked' => RemoteTextOutcome.revoked,
         _ => RemoteTextOutcome.rejected,
       };
     } on MissingPluginException {
@@ -151,13 +168,16 @@ class MethodChannelRemoteControlAccessibilityClient
   Future<RemoteImeEnterOutcome> performImeEnter() async {
     try {
       final outcome = await channel
-          .invokeMethod<String>(imeEnterMethod)
+          .invokeMethod<String>(imeEnterMethod, <String, Object>{
+            'grant': _grantForCall,
+          })
           .timeout(gestureTimeout);
       return switch (outcome) {
         'completed' => RemoteImeEnterOutcome.completed,
         'targetUnavailable' => RemoteImeEnterOutcome.targetUnavailable,
         'actionUnavailable' => RemoteImeEnterOutcome.actionUnavailable,
         'unavailable' => RemoteImeEnterOutcome.unavailable,
+        'revoked' => RemoteImeEnterOutcome.revoked,
         _ => RemoteImeEnterOutcome.rejected,
       };
     } on MissingPluginException {
@@ -173,11 +193,15 @@ class MethodChannelRemoteControlAccessibilityClient
   ]) async {
     try {
       final outcome = await channel
-          .invokeMethod<String>(method, arguments)
+          .invokeMethod<String>(method, <String, Object>{
+            ...?arguments,
+            'grant': _grantForCall,
+          })
           .timeout(gestureTimeout);
       return switch (outcome) {
         'completed' => RemoteGestureOutcome.completed,
         'unavailable' => RemoteGestureOutcome.unavailable,
+        'revoked' => RemoteGestureOutcome.revoked,
         _ => RemoteGestureOutcome.rejected,
       };
     } on MissingPluginException {
@@ -202,6 +226,7 @@ class MethodChannelRemoteControlAccessibilityClient
             'touch': touch,
             'x': x,
             'y': y,
+            'grant': _grantForCall,
           })
           .timeout(gestureTimeout);
       return switch (outcome) {
@@ -209,6 +234,7 @@ class MethodChannelRemoteControlAccessibilityClient
         'ended' => RemoteTouchStartOutcome.ended,
         'unsupported' => RemoteTouchStartOutcome.unsupported,
         'unavailable' => RemoteTouchStartOutcome.unavailable,
+        'revoked' => RemoteTouchStartOutcome.revoked,
         _ => RemoteTouchStartOutcome.rejected,
       };
     } on MissingPluginException {
@@ -234,6 +260,7 @@ class MethodChannelRemoteControlAccessibilityClient
             'seq': seq,
             'x': x,
             'y': y,
+            'grant': _grantForCall,
           })
           .timeout(gestureTimeout);
       return switch (outcome) {
@@ -262,6 +289,7 @@ class MethodChannelRemoteControlAccessibilityClient
             'seq': seq,
             'x': x,
             'y': y,
+            'grant': _grantForCall,
           })
           .timeout(gestureTimeout);
       return switch (outcome) {
@@ -306,6 +334,47 @@ class MethodChannelRemoteControlAccessibilityClient
 
   @override
   Stream<int> get touchEnds => _touchEnds.stream;
+
+  @override
+  Future<RemoteControlOpenOutcome> openControl({
+    required int grant,
+    required String remoteSessionId,
+  }) async {
+    // Before the call: whatever is sent after this line is sent under it, and
+    // reaches the Android side after the opening does.
+    _grant = grant;
+    try {
+      final outcome = await channel
+          .invokeMethod<String>(openControlMethod, <String, Object>{
+            'grant': grant,
+            'session': remoteSessionId,
+          })
+          .timeout(gestureTimeout);
+      return switch (outcome) {
+        'opened' => RemoteControlOpenOutcome.opened,
+        'ended' => RemoteControlOpenOutcome.ended,
+        _ => RemoteControlOpenOutcome.stale,
+      };
+    } catch (_) {
+      return RemoteControlOpenOutcome.unavailable;
+    }
+  }
+
+  @override
+  void closeControl({String? endedRemoteSessionId}) {
+    // Before the call, and not waited on: nothing sent from here on carries an
+    // open grant, whatever the Android side answers or whether it answers.
+    _grant = null;
+    unawaited(
+      channel
+          .invokeMethod<void>(closeControlMethod, <String, Object>{
+            'ended': ?endedRemoteSessionId,
+          })
+          .catchError((Object _) {
+            // No Android side means nothing is running there to stop.
+          }),
+    );
+  }
 
   @override
   Future<void> openAccessibilitySettings() async {

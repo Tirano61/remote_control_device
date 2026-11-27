@@ -43,7 +43,12 @@ void main() {
       await client.startTouch(touch: 3, x: 0.41, y: 0.52);
 
       expect(calls.single.method, 'startRemoteTouch');
-      expect(calls.single.arguments, {'touch': 3, 'x': 0.41, 'y': 0.52});
+      expect(calls.single.arguments, {
+        'touch': 3,
+        'x': 0.41,
+        'y': 0.52,
+        'grant': 0,
+      });
     });
 
     for (final (wire, outcome) in const [
@@ -93,6 +98,7 @@ void main() {
         'seq': 12,
         'x': 0.43,
         'y': 0.55,
+        'grant': 0,
       });
     });
 
@@ -139,6 +145,7 @@ void main() {
         'seq': 40,
         'x': 0.6,
         'y': 0.7,
+        'grant': 0,
       });
     });
 

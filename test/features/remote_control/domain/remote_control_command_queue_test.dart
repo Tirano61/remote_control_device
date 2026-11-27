@@ -85,7 +85,8 @@ void main() {
       expect(acks, const [
         RemoteControlAck.failure('b', RemoteControlError.sessionNotActive),
         RemoteControlAck.failure('c', RemoteControlError.sessionNotActive),
-        RemoteControlAck.success('a'),
+        // Running when its authority went: never reported done (A2).
+        RemoteControlAck.failure('a', RemoteControlError.sessionNotActive),
       ]);
     });
 
@@ -184,7 +185,8 @@ void main() {
       expect(accessibility.longPresses, isEmpty);
       expect(acks, const [
         RemoteControlAck.failure('b', RemoteControlError.sessionNotActive),
-        RemoteControlAck.success('a'),
+        // Running when its authority went: never reported done (A2).
+        RemoteControlAck.failure('a', RemoteControlError.sessionNotActive),
       ]);
     });
 
@@ -335,7 +337,8 @@ void main() {
           RemoteControlAck.failure('b', RemoteControlError.sessionNotActive),
           RemoteControlAck.failure('c', RemoteControlError.sessionNotActive),
           RemoteControlAck.failure('d', RemoteControlError.sessionNotActive),
-          RemoteControlAck.success('a'),
+          // Running when its authority went: never reported done (A2).
+          RemoteControlAck.failure('a', RemoteControlError.sessionNotActive),
         ]);
       },
     );
@@ -474,7 +477,8 @@ void main() {
       expect(accessibility.setTexts, isEmpty);
       expect(acks, const [
         RemoteControlAck.failure('b', RemoteControlError.sessionNotActive),
-        RemoteControlAck.success('a'),
+        // Running when its authority went: never reported done (A2).
+        RemoteControlAck.failure('a', RemoteControlError.sessionNotActive),
       ]);
     });
 
@@ -598,7 +602,8 @@ void main() {
       expect(accessibility.imeEnters, 0);
       expect(acks, const [
         RemoteControlAck.failure('b', RemoteControlError.sessionNotActive),
-        RemoteControlAck.success('a'),
+        // Running when its authority went: never reported done (A2).
+        RemoteControlAck.failure('a', RemoteControlError.sessionNotActive),
       ]);
     });
 
@@ -722,7 +727,11 @@ void main() {
     await settle();
 
     expect(accessibility.taps, hasLength(1));
-    expect(acks.last, const RemoteControlAck.success('a'));
+    // It was running when its authority went: never reported done (A2).
+    expect(
+      acks.last,
+      const RemoteControlAck.failure('a', RemoteControlError.sessionNotActive),
+    );
   });
 
   test('the queue keeps working after a discard', () async {

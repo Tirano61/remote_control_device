@@ -230,6 +230,42 @@ class FakeRemoteControlAccessibilityClient
   @override
   Future<void> openAccessibilitySettings() async => settingsOpened++;
 
+  /// Every opening and closing of the native control gate, in order:
+  /// `('open', grant, remoteSessionId)` and `('close', endedRemoteSessionId)`.
+  final List<Object?> controlCalls = [];
+
+  /// What every opening answers.
+  RemoteControlOpenOutcome openOutcome = RemoteControlOpenOutcome.opened;
+
+  /// The grant the gate holds open, as the Android side would see it, or
+  /// `null`.
+  int? openGrant;
+
+  /// Whether the gate is open, as the Android side would see it.
+  bool get controlOpen => openGrant != null;
+
+  /// Every grant ever opened, in order.
+  List<int> get openedGrants => [
+    for (final call in controlCalls)
+      if (call case ('open', final int grant, _)) grant,
+  ];
+
+  @override
+  Future<RemoteControlOpenOutcome> openControl({
+    required int grant,
+    required String remoteSessionId,
+  }) async {
+    controlCalls.add(('open', grant, remoteSessionId));
+    openGrant = openOutcome == RemoteControlOpenOutcome.opened ? grant : null;
+    return openOutcome;
+  }
+
+  @override
+  void closeControl({String? endedRemoteSessionId}) {
+    controlCalls.add(('close', endedRemoteSessionId));
+    openGrant = null;
+  }
+
   Future<RemoteGestureOutcome> _globalAction(String name) {
     globalActions.add(name);
     gestures.add(name);

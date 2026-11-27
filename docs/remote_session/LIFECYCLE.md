@@ -160,8 +160,12 @@ the session on its next start.
   cause and reads as FINALIZAR, which is what it was.
 - It survives clearing the device credentials, so a re-enrolled installation still
   refuses it.
-- A store that cannot be read or written is logged and does not block the local
-  end. What is lost in that case is only the guarantee across a restart.
+- A store that cannot be written does not block the local end. Since Prompt 45
+  the restart guarantee no longer rests on this write: a session is recorded as
+  *held* before its authority can be confirmed, and a start refuses whatever an
+  earlier run held. A store that cannot be read at start refuses whatever the
+  first answer shows live. See
+  [Ended sessions across a restart](#ended-sessions-across-a-restart-prompt-45).
 
 ## Reconciliation
 
@@ -1827,3 +1831,245 @@ unseen-lapse branch — is covered by tests only.
 * The native protection only limits frames. Commands are still guarded by the
   Dart checks (`confirmFresh`), which need Dart to run — while Dart is stalled
   it cannot execute commands either.
+
+## Native control revocation (Prompt 45)
+
+A2 of the Prompt 44 audit. On the T10A a 2 s `swipe` was started during an
+`ACTIVE` session and the authority was then suspended. Dart stopped accepting
+commands, but the stroke Android had already received ran on and ended 1.67 s
+after the suspension; the queue then acked it `ok: true`.
+
+### Cause
+
+Two things, one on each side of the channel:
+
+```text
+Dart     RemoteControlCommandQueue.discardPending dropped what had not started
+         and "left the running gesture to finish". Its answer, whenever it came,
+         was acked as it was: completed -> ok: true. The generation had not moved
+         (a suspension keeps the peer), so the ack still went out.
+Android  nothing on that side knew about authority at all: a dispatched stroke
+         belongs to MotionEventInjector until its last event, and nothing asked
+         it to stop.
+```
+
+### Design
+
+```text
+C2 authority (RemoteSessionBloc) --coordinator--> WebRtcSessionBloc._isControlAuthorized
+                                                   │  _syncControlGate (synchronous)
+                                                   ▼
+                       openRemoteControl {grant, session} / closeRemoteControl {ended?}
+                                                   ▼
+                                       RemoteControlGate.kt (one per process)
+```
+
+It is not a second authority: the gate opens only when Dart's confirmed authority
+says so, and the opening is a new numbered grant every time. Every command carries
+the grant it was sent under. See "The native control gate" in
+[CONTROL_CHANNEL.md](../webrtc/CONTROL_CHANNEL.md#the-native-control-gate) for the
+channel, the states and the cancellation mechanism.
+
+What closing does, at once and without waiting for anything:
+
+```text
+Dart       the queue's revocation count moves: anything that started before it
+           and answers after it is never acked ok (a failure stays a failure;
+           a success becomes session_not_active, "outcome unknown by race");
+           queued commands are dropped; a remote touch is abandoned
+Android    commands under any other grant answer "revoked" without reaching the
+           service; a remote touch is let go with ACTION_CANCEL; the tap, long
+           press or swipe being played is answered "revoked" and Android is asked
+           to cancel it (a continuation of a never-dispatched stroke, refused by
+           MotionEventInjector, which cancels the gesture in progress); what
+           Android reports about it afterwards is only logged:
+             "revoked: Android cancelled it"
+             "revoked: Android completed it anyway (race with the cancellation)"
+```
+
+What closes it: the session suspended (socket down, heartbeat overdue, a read that
+may predate the session), FINALIZAR, a close by the technician or `SYSTEM`, the
+grace period ending it, a reset, Android taking the screen away, the peer replaced
+or torn down, the bloc closing, and the Flutter engine going away (the channel
+resets the gate on detach and attach). FINALIZAR and a backend close also name the
+session, which the Android side then refuses to open again while the process lives.
+
+### Guarantees and Android's limits
+
+```text
+command not started yet             never runs (Dart drops it; Android refuses its grant)
+command reaching Kotlin late        refused: its grant is not the open one
+tap / long press / swipe running    cancelled on Android 8.0+ (ACTION_CANCEL, no UP);
+                                    below 8.0 it plays out (<= 4 s); never acked ok
+remote touch (drag) running         ACTION_CANCEL, never ACTION_UP (as before)
+back / home / recents / set_text /  already done by Android inside its own call:
+  ime_enter                         nothing to cancel
+already recognised by the app       stays done (a long press past its timeout)
+events already in the pipeline      still delivered (seen: one MOVE, 22 ms late)
+the cancel's position               the gesture's last *scheduled* point; Flutter
+                                    apps see a synthetic MOVE there before CANCEL
+```
+
+The video is not touched by any of this: a suspension keeps MediaProjection and
+the peer, as before (Prompt 40); only FINALIZAR, a close or the grace stop them.
+
+## Ended sessions across a restart (Prompt 45)
+
+A3 of the Prompt 44 audit, found by reading the code. FINALIZAR writes the
+ended-session marker before the close. If that write failed (it was caught and
+logged), the close could not reach the backend, and the process then died, the next
+start read no marker, `/current` still answered the session `ACTIVE`, and the tablet
+took it back: confirmed authority, the room joined, control and a new capture
+request. A marker that could not be read was treated as no marker, with the same
+result. Reproduced deterministically by
+`remote_session_restart_fail_closed_test.dart` before the fix.
+
+### Why a write at FINALIZAR cannot be the guarantee
+
+A write that fails cannot be made durable after the process dies. Keeping the end
+in memory protects the running process only (it always did), and nothing local can
+tell an earlier run that crashed during an assistance from one whose FINALIZAR
+could not be written. So the durable fact is moved to a moment when a failure can
+still be acted on: before the session can be controlled.
+
+### Policy
+
+```text
+first live answer of a session      writeHeld(id), awaited, before the read may
+  in this run                       confirm it. Fails (tried twice) -> the session
+                                    stays suspended (no control, no join, no
+                                    frames); the next read tries again; the grace
+                                    period ends it if it never succeeds
+start, held record names S          S is refused as notResumable, whatever the
+                                    marker says (a marker present keeps its own
+                                    cause: a FINALIZAR still owes its close)
+start, store cannot be read         the first answer that reaches the backend
+  (each record tried twice)         refuses whatever it shows live, as notResumable;
+                                    sessions that begin after it go the normal way
+marker write fails at FINALIZAR     tried twice; the local end never waits for it;
+                                    a restart refuses the session as held, and no
+                                    close is owed then (the backend closes it as
+                                    SYSTEM: the end is recorded as SYSTEM, not
+                                    DEVICE)
+held record cleared                 when the backend confirms the close or a read
+                                    proves the session gone
+```
+
+`notResumable` owes no close: the user may not have asked for one. The device
+never rejoins the room, so the backend's disconnect grace closes it (`SYSTEM`). The
+panel says "La aplicación se reinició y la asistencia anterior no se retoma por
+seguridad." Enrolment and the device credential are never touched; the records
+survive clearing them.
+
+Behaviour change: a session the application was taking part in when its process
+died (a crash, the system killing it, the engine going away) is no longer resumed
+after a restart, even if nobody pressed FINALIZAR. It needs a new request and a new
+consent. Before, it was resumed if the restart came within the backend's grace.
+
+What is still not guaranteed: if the held record cannot be written the session is
+never controlled, so the restart guarantee holds for every session that was. If
+the secure store accepts a write and then loses it (a corrupted or reset Keystore),
+nothing local can know; the backend's grace still closes a session the device does
+not rejoin.
+
+## Tests (Prompt 45)
+
+```text
+JVM   RemoteControlGateTest (34)       gate numbering, stale and ended opens, reset;
+                                       swipe / long press / tap revoked while
+                                       running; Android cancelling or completing
+                                       after the revocation; no cancel below 8.0,
+                                       a refused or throwing cancel; busy until
+                                       Android reports; global actions untouched;
+                                       touch let go; no service; engine reset;
+                                       channel: missing / old / closed grants
+      existing channel tests           now carry an open grant
+Dart  remote_control_revocation_test   A2 repro (failed before the fix), revoked
+                                       mapping, failures kept, late ok refused
+      webrtc_native_control_gate_test  opening only at ACTIVE confirmed on a peer,
+      (19)                             new grants, suspension, FINALIZAR, SYSTEM,
+                                       reset, screen taken, recovery offer,
+                                       teardown, bloc close
+      method channel client            grant stamping, open/close wire, revoked
+      remote_session_restart_fail_closed_test (21)
+                                       A3 repro (failed before the fix), held
+                                       record order, write / read failures,
+                                       restart with REST ACTIVE / null / SYSTEM,
+                                       closeOwed, a crash, a new assistance
+      native_control_revocation_test   end to end through the real blocs: A2 on a
+      (app, 3)                         socket drop, FINALIZAR during a swipe, A3
+                                       across a restart (no gate, no peer, no
+                                       capture request, not joined)
+      updated                          tests that expected a running command to be
+                                       acked ok after the session ended
+```
+
+## Seen on a device (Prompt 45)
+
+2026-11-27, T10A `LSTT10M2026081504` (Android 16, API 36), branch
+`fix/device-native-control-revocation`. Fully isolated: backend `main` `8fb5c2d`
+copied to the scratchpad on 127.0.0.1:3200 (disconnect grace 20 s, CONNECTING TTL
+600 s), disposable PostgreSQL, a fault relay for the tablet on 3010 behind the dev
+tunnel and one for the web on 3030, web `main` `2ebe4dd` built against it, and a
+test copy of this branch as `com.example.remote_control_device.p45test` with three
+test-only hooks: a root `Listener` printing every pointer event of its own window,
+a file flag that adds `RemoteSessionCloseRequested` (FINALIZAR without a finger,
+which would itself cancel the injected gesture), and a store wrapper that fails
+writes on a file flag. Commands injected at protocol level on the web's
+`RTCDataChannel`. Gestures were aimed at the empty margin of the test app's own
+screen. All times on the tablet's clock.
+
+```text
+A  normal            tap, long press (0.49 s), swipe (DOWN..UP), drag (DOWN, 89 MOVE,
+                     UP): all ok: true
+B  swipe 2 s +       DOWN t=0; socket closed by the relay; revoked at 669 ms (33 %),
+   suspension        "cancellation requested", ACTION_CANCEL 44 ms later, no UP;
+                     ack session_not_active; frames held back, MediaProjection kept;
+                     confirmed again 3.4 s later: grant 2
+C  long press +      DOWN t=0; revoked at 143 ms, CANCEL at 155 ms, before the 400 ms
+   suspension        timeout: no long press happened; ack session_not_active
+D  drag +            touch cancelled reason=revoked, CANCEL 37 ms later, never UP;
+   suspension        the web's later moves and release: session_not_active
+E  FINALIZAR during  revoked 28 ms after the request, at 1075 ms (54 %); one MOVE
+   a swipe           already in the pipeline arrived 22 ms later, then CANCEL; gate
+                     "ended for good"; capture stopped 154 ms after the request; no
+                     ack (channel closed); backend CLOSED / DEVICE
+F  SYSTEM during     web socket cut by its relay; backend SYSTEM close 20 s later;
+   a swipe           swipe revoked at 57 %, CANCEL 9 ms later; capture stopped;
+                     backend CLOSED / SYSTEM. The swipes before it completed normally
+G  marker write      FINALIZAR with the tablet's network cut for 4 s and writes
+   failure           failing: two "write failed (injected)", revoked 25 ms after the
+                     request anyway, capture stopped; the close never reached the
+                     backend
+H  restart after     process killed with run-as kill (not force-stop): Android rebound
+   it                the accessibility service by itself. Started again with writes
+                     working: the held record named the session; /current answered
+                     ACTIVE twice; no grant opened, no capture, no join, no close
+                     sent; the web's recovery offer found nobody; backend closed it
+                     SYSTEM (DEVICE_ABSENT) at the end of its grace; held cleared
+I  new assistance    new request, PERMITIR, MediaProjection by hand: grant 1 (new
+                     engine), tap / swipe / long press ok; FINALIZAR: CLOSED / DEVICE
+```
+
+The intermediate `notResumable` panel of H was on screen for about 8 s and was not
+captured; the state is covered by the widget test.
+
+### Residual risks
+
+* **Already delivered input** is not taken back: an event in the input pipeline
+  when the cancel lands (seen: one MOVE, 22 ms), and anything an application
+  already acted on.
+* **ACTION_CANCEL carries the gesture's final scheduled point.** Native views
+  ignore it; a Flutter application sees a synthetic MOVE to where the swipe would
+  have ended (seen on the T10A). Avoiding it would need swipes split into short
+  continued strokes, like the drag, at a cost to fling velocity: a separate
+  decision.
+* **Below Android 8.0** a one-shot gesture cannot be cancelled without another
+  finger; it plays out (at most 4 s), never acked ok.
+* **No native expiry for control**: a paused Dart sends nothing, and what it sent
+  is bounded by its duration or the touch watchdog.
+* **The cancellation relies on framework behaviour**, not public API, as the touch
+  cancellation already did; read in AOSP `main` and `android16-release` and seen on
+  Android 16 only.
+* **A crash during an assistance is no longer resumed** (by design).
+* **A store that loses a write it accepted** cannot be detected locally.

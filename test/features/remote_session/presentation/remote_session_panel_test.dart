@@ -868,4 +868,37 @@ void main() {
     expect(find.textContaining(testRemoteSessionId), findsNothing);
     expect(find.textContaining(testSupportRequestId), findsNothing);
   });
+
+  testWidgets('P45: a session an earlier run took part in says so, offers no '
+      'REINTENTAR, and no FINALIZAR', (tester) async {
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(
+          body: RemoteSessionEndedPanel(
+            state: RemoteSessionEndedLocally(
+              testRemoteSessionId,
+              reason: RemoteSessionLocalEndReason.notResumable,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('Asistencia interrumpida'), findsOneWidget);
+    expect(
+      find.text(RemoteSessionEndedPanel.notResumableMessage),
+      findsOneWidget,
+    );
+    expect(
+      find.text(RemoteSessionEndedPanel.notResumableNextStep),
+      findsOneWidget,
+    );
+    expect(
+      find.text('El técnico ya no puede controlar esta tablet ni ver su '
+          'pantalla.'),
+      findsOneWidget,
+    );
+    expect(find.byKey(RemoteSessionEndedPanel.retryButtonKey), findsNothing);
+    expect(find.byKey(RemoteSessionPanel.closeButtonKey), findsNothing);
+  });
 }

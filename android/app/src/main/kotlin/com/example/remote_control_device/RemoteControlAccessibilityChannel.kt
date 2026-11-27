@@ -11,11 +11,17 @@ import io.flutter.plugin.common.MethodChannel
 /**
  * The Android half of the bridge to [RemoteControlAccessibilityService].
  *
- * Transport and nothing else. Whether a gesture may run is decided in Dart, in
+ * Transport, and a gate. Whether a gesture may run is decided in Dart, in
  * `WebRtcSessionBloc`, against the remote session; by the time [TAP_METHOD], [LONG_PRESS_METHOD],
  * [SWIPE_METHOD], [BACK_METHOD], [HOME_METHOD], [RECENTS_METHOD], [SET_TEXT_METHOD],
  * [IME_ENTER_METHOD] or one of the remote touch methods arrives the decision is made. A remote
  * touch is named by a handle Dart chooses, never by the sender's own name for it.
+ *
+ * That decision is mirrored here, and enforced on this side too: Dart opens a numbered grant with
+ * [OPEN_CONTROL_METHOD] when control becomes authorised and closes it with [CLOSE_CONTROL_METHOD]
+ * the moment it is not, and every command carries the grant it was sent under. A command whose
+ * grant is not the one open answers [REVOKED_WIRE] without reaching the service, and closing the
+ * gate cancels what is running. See [RemoteControlGate].
  * Failures are answered as outcomes, never thrown across the boundary.
  *
  * The text of a [SET_TEXT_METHOD] may be a password. It goes to the service and nowhere else, and
@@ -35,6 +41,8 @@ class RemoteControlAccessibilityChannel(
 
     fun attachTo(messenger: BinaryMessenger) {
         detach()
+        // A new Dart numbers its grants from the start, and has authorised nothing yet.
+        availability.resetControl()
         channel = MethodChannel(messenger, CHANNEL_NAME).also { it.setMethodCallHandler(this) }
         availability.onChanged = { available ->
             channel?.invokeMethod(AVAILABILITY_CHANGED_METHOD, available)
@@ -44,8 +52,12 @@ class RemoteControlAccessibilityChannel(
         }
     }
 
-    /** The service is left alone: it belongs to Android, and only the user can turn it off. */
+    /**
+     * The service is left alone: it belongs to Android, and only the user can turn it off. The
+     * control gate is not: the Dart that opened it is gone, so nothing it authorised goes on.
+     */
     fun detach() {
+        if (channel != null) availability.resetControl()
         availability.onChanged = null
         availability.onTouchEnded = null
         channel?.setMethodCallHandler(null)
@@ -53,8 +65,44 @@ class RemoteControlAccessibilityChannel(
     }
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
+        if (call.method in GATED_METHODS && !availability.admits(integerArgument(call, GRANT))) {
+            // Not logged per call: a touch's moves may keep arriving for a moment after the close.
+            if (call.method != MOVE_TOUCH_METHOD) Log.i(TAG, "${call.method} refused: control not authorised")
+            result.success(REVOKED_WIRE)
+            return
+        }
         when (call.method) {
             AVAILABLE_METHOD -> result.success(availability.isAvailable)
+
+            // The authority Dart decided, mirrored: a numbered grant for one session.
+            OPEN_CONTROL_METHOD -> {
+                val grant = integerArgument(call, GRANT)
+                val session = call.argument<Any?>(SESSION) as? String
+                if (grant == null || session == null) {
+                    result.success(RemoteControlOpenOutcome.STALE.wire)
+                    return
+                }
+                val outcome = availability.openControl(grant, session)
+                Log.i(TAG, "control grant $grant for $session ${outcome.wire}")
+                result.success(outcome.wire)
+            }
+
+            // Waits for nothing, and refuses nothing: withdrawing never needs permission.
+            CLOSE_CONTROL_METHOD -> {
+                val ended = call.argument<Any?>(ENDED) as? String
+                val grant = availability.gate.openGrant
+                val revocation = availability.closeControl(ended)
+                if (revocation != null) {
+                    Log.i(
+                        TAG,
+                        "control grant $grant revoked" +
+                            (if (revocation.gestureRunning) " (gesture running, cancel ${if (revocation.cancelRequested) "requested" else "unavailable"})" else "") +
+                            (if (revocation.touchAbandoned) " (touch let go)" else ""),
+                    )
+                }
+                if (ended != null) Log.i(TAG, "control for $ended ended for good")
+                result.success(null)
+            }
 
             TAP_METHOD -> {
                 val x = call.argument<Double>(X)
@@ -232,6 +280,29 @@ class RemoteControlAccessibilityChannel(
         const val CANCEL_TOUCH_METHOD = "cancelRemoteTouch"
         const val ABANDON_TOUCH_METHOD = "abandonRemoteTouch"
         const val TOUCH_ENDED_METHOD = "remoteTouchEnded"
+        const val OPEN_CONTROL_METHOD = "openRemoteControl"
+        const val CLOSE_CONTROL_METHOD = "closeRemoteControl"
+
+        /** What a command refused by the gate answers: the same word for gestures and touches. */
+        const val REVOKED_WIRE = "revoked"
+
+        /**
+         * Every method that acts on the screen. Each must carry the [GRANT] it was sent under.
+         * Cancelling or abandoning a touch only withdraws, so neither needs one.
+         */
+        private val GATED_METHODS = setOf(
+            TAP_METHOD,
+            LONG_PRESS_METHOD,
+            SWIPE_METHOD,
+            BACK_METHOD,
+            HOME_METHOD,
+            RECENTS_METHOD,
+            SET_TEXT_METHOD,
+            IME_ENTER_METHOD,
+            START_TOUCH_METHOD,
+            MOVE_TOUCH_METHOD,
+            RELEASE_TOUCH_METHOD,
+        )
 
         private const val X = "x"
         private const val Y = "y"
@@ -243,6 +314,9 @@ class RemoteControlAccessibilityChannel(
         private const val TEXT = "text"
         private const val TOUCH = "touch"
         private const val SEQ = "seq"
+        private const val GRANT = "grant"
+        private const val SESSION = "session"
+        private const val ENDED = "ended"
 
         private const val SETTINGS_FAILED = "ACCESSIBILITY_SETTINGS_FAILED"
     }

@@ -77,7 +77,12 @@ class WebRtcCoordinator {
   void _forwardRemoteSession(RemoteSessionState state) {
     _webRtcBloc.add(WebRtcActiveRemoteSessionChanged(_activeIdOf(state)));
     _webRtcBloc.add(WebRtcRemoteSessionAuthorityChanged(_confirmedIdOf(state)));
-    _webRtcBloc.add(WebRtcRemoteSessionChanged(_liveIdOf(state)));
+    _webRtcBloc.add(
+      WebRtcRemoteSessionChanged(
+        _liveIdOf(state),
+        endedRemoteSessionId: _endedIdOf(state),
+      ),
+    );
   }
 
   void _onSignalingMessage(RemoteSignalingMessage message) {
@@ -109,6 +114,15 @@ class WebRtcCoordinator {
   /// which is the safe reading.
   static String? _liveIdOf(RemoteSessionState state) => switch (state) {
     RemoteSessionLive(:final session) => session.id,
+    _ => null,
+  };
+
+  /// The session that is over for this tablet, or `null`: ended here
+  /// (FINALIZAR, or the grace period ran out) or closed by the backend. Both
+  /// are terminal; nothing makes either live again.
+  static String? _endedIdOf(RemoteSessionState state) => switch (state) {
+    RemoteSessionEndedLocally(:final remoteSessionId) => remoteSessionId,
+    RemoteSessionClosedRemotely(:final remoteSessionId) => remoteSessionId,
     _ => null,
   };
 

@@ -88,6 +88,9 @@ enum class RemoteTouchOutcome(val wire: String) {
 
     /** The accessibility service is not connected. */
     UNAVAILABLE("unavailable"),
+
+    /** The [RemoteControlGate] was closed: no authority to put a finger down or move it. */
+    REVOKED("revoked"),
 }
 
 /** Why a touch ended. For the log, never for the wire. */
@@ -102,6 +105,7 @@ enum class TouchEndReason(val log: String) {
     SEQUENCE("sequence"),
     INVALID("invalid"),
     ABANDONED("abandoned"),
+    REVOKED("revoked"),
 }
 
 /** Where a moving stroke's duration comes from: the time between the two positions it joins. */
@@ -336,8 +340,8 @@ class RemoteTouchController(
     }
 
     /** Whatever touch is running ends here, without waiting for anything. */
-    fun abandon() {
-        touch?.let { end(it, TouchEndReason.ABANDONED) }
+    fun abandon(reason: TouchEndReason = TouchEndReason.ABANDONED) {
+        touch?.let { end(it, reason) }
     }
 
     // ------------------------------------------------------------------ steps

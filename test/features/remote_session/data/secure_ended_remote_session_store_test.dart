@@ -97,4 +97,55 @@ void main() {
       SecureEndedRemoteSessionStore.endedRemoteSessionKey: testRemoteSessionId,
     });
   });
+
+  group('the held record (Prompt 45)', () {
+    test('is null when nothing was ever held', () async {
+      expect(await store.readHeld(), isNull);
+    });
+
+    test('write then read round-trips the session id', () async {
+      await store.writeHeld(testRemoteSessionId);
+
+      expect(await store.readHeld(), testRemoteSessionId);
+    });
+
+    test('lives under its own key, apart from the marker', () async {
+      await store.write(const EndedRemoteSessionMarker(testRemoteSessionId));
+      await store.writeHeld(testOtherRemoteSessionId);
+
+      final raw = await const FlutterSecureStorage().readAll();
+      expect(raw, {
+        SecureEndedRemoteSessionStore.endedRemoteSessionKey:
+            testRemoteSessionId,
+        SecureEndedRemoteSessionStore.heldRemoteSessionKey:
+            testOtherRemoteSessionId,
+      });
+    });
+
+    test('clearing it leaves the marker, and clearing the marker leaves it', () async {
+      await store.write(const EndedRemoteSessionMarker(testRemoteSessionId));
+      await store.writeHeld(testRemoteSessionId);
+
+      await store.clearHeld();
+      expect(await store.readHeld(), isNull);
+      expect(
+        await store.read(),
+        const EndedRemoteSessionMarker(testRemoteSessionId),
+      );
+
+      await store.writeHeld(testRemoteSessionId);
+      await store.clear();
+      expect(await store.readHeld(), testRemoteSessionId);
+    });
+
+    test('survives clearing the device credentials', () async {
+      const credentials = SecureDeviceCredentialsStorage();
+      await credentials.save(testCredentials);
+      await store.writeHeld(testRemoteSessionId);
+
+      await credentials.clear();
+
+      expect(await store.readHeld(), testRemoteSessionId);
+    });
+  });
 }

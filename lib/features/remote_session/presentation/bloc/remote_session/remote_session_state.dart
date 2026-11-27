@@ -203,6 +203,14 @@ enum RemoteSessionLocalEndReason {
   /// is sent for it: the backend closes it on its own (`SYSTEM`), because the
   /// device no longer takes part in it. See RemoteSessionBloc.
   authorityLost,
+
+  /// An earlier run of the application took part in it, and this run cannot
+  /// prove it was not ended there: the record of that end may be the write
+  /// that failed (A3 of the Prompt 44 audit), or the ended-session store could
+  /// not be read at all. It is not resumed. No close is sent for it — the
+  /// user may not have asked for one — so the backend closes it on its own
+  /// (`SYSTEM`) once this tablet does not rejoin it.
+  notResumable,
 }
 
 /// The backend closed [remoteSessionId] (the technician did, or the backend

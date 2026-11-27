@@ -560,6 +560,40 @@ void main() {
       expect(channel.sentAcks, const [RemoteControlAck.success('t-1')]);
     });
 
+    test('P45: the native gate opens only at ACTIVE confirmed, and FINALIZAR '
+        'closes it and records the session as ended there', () async {
+      await reachOpenChannel();
+      expect(accessibility.controlCalls, isEmpty, reason: 'CONNECTING');
+
+      await activate();
+      expect(accessibility.controlCalls, [('open', 1, testRemoteSessionId)]);
+
+      remoteSessionRepository.currentQueue.add(noRemoteSession);
+      remoteSessionBloc.add(const RemoteSessionCloseRequested());
+      await settle();
+
+      expect(accessibility.controlOpen, isFalse);
+      expect(
+        accessibility.controlCalls,
+        contains(('close', testRemoteSessionId)),
+      );
+    });
+
+    test(
+      'P45: a socket drop closes the native gate before any read answers',
+      () async {
+        await reachOpenChannel();
+        await activate();
+        expect(accessibility.controlOpen, isTrue);
+
+        await client.emit(const RealtimeServerDisconnected());
+        await settle();
+
+        expect(accessibility.controlOpen, isFalse);
+        expect(accessibility.controlCalls.last, ('close', null));
+      },
+    );
+
     test(
       'pressing FINALIZAR stops the gestures before the backend answers',
       () async {

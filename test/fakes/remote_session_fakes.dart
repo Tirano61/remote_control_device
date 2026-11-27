@@ -206,10 +206,20 @@ class FakeEndedRemoteSessionStore implements EndedRemoteSessionStore {
   /// When true, every operation throws, as a store that cannot be reached.
   bool failing = false;
 
+  /// When true, only writes and clears throw: the store reads, but cannot
+  /// record anything new (A3 of the Prompt 44 audit).
+  bool failingWrites = false;
+
+  /// When true, only reads throw.
+  bool failingReads = false;
+
+  bool get _readFails => failing || failingReads;
+  bool get _writeFails => failing || failingWrites;
+
   @override
   Future<EndedRemoteSessionMarker?> read() async {
     calls.add('read');
-    if (failing) throw const EndedRemoteSessionStoreException('test');
+    if (_readFails) throw const EndedRemoteSessionStoreException('test');
     final id = value;
     return id == null
         ? null
@@ -219,7 +229,7 @@ class FakeEndedRemoteSessionStore implements EndedRemoteSessionStore {
   @override
   Future<void> write(EndedRemoteSessionMarker marker) async {
     calls.add(('write', marker.remoteSessionId));
-    if (failing) throw const EndedRemoteSessionStoreException('test');
+    if (_writeFails) throw const EndedRemoteSessionStoreException('test');
     value = marker.remoteSessionId;
     closeOwed = marker.closeOwed;
   }
@@ -227,8 +237,37 @@ class FakeEndedRemoteSessionStore implements EndedRemoteSessionStore {
   @override
   Future<void> clear() async {
     calls.add('clear');
-    if (failing) throw const EndedRemoteSessionStoreException('test');
+    if (_writeFails) throw const EndedRemoteSessionStoreException('test');
     value = null;
     closeOwed = true;
+  }
+
+  /// The session recorded as held (see [EndedRemoteSessionStore.readHeld]), or
+  /// `null`. Kept apart from [value] and [calls], which are about the marker.
+  String? held;
+
+  /// Every operation on the held record, in order: `'readHeld'`,
+  /// `('writeHeld', id)` and `'clearHeld'`.
+  final List<Object> heldCalls = [];
+
+  @override
+  Future<String?> readHeld() async {
+    heldCalls.add('readHeld');
+    if (_readFails) throw const EndedRemoteSessionStoreException('test');
+    return held;
+  }
+
+  @override
+  Future<void> writeHeld(String remoteSessionId) async {
+    heldCalls.add(('writeHeld', remoteSessionId));
+    if (_writeFails) throw const EndedRemoteSessionStoreException('test');
+    held = remoteSessionId;
+  }
+
+  @override
+  Future<void> clearHeld() async {
+    heldCalls.add('clearHeld');
+    if (_writeFails) throw const EndedRemoteSessionStoreException('test');
+    held = null;
   }
 }

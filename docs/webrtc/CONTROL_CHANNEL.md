@@ -761,15 +761,24 @@ turn are kept for it: the latest position, and the release or cancel. A cancel
 before the turn comes means the finger never goes down.
 
 ```text
-                                     running gesture   running touch          queued commands
-session leaves ACTIVE                finishes          cancelled at once      dropped; session_not_active
-channel stops being open             finishes          cancelled at once      dropped; no ack possible
-peer connection failed or replaced   finishes          cancelled at once      dropped; no ack possible
+                                     running tap / long_press / swipe       running touch        queued commands
+session leaves ACTIVE (suspended,    cancelled on Android (API 26+);        cancelled at once    dropped; session_not_active
+  FINALIZAR, closed, heartbeat)        never acked ok: session_not_active
+channel stops being open             cancelled on Android; no ack possible  cancelled at once    dropped; no ack possible
+peer connection failed or replaced   cancelled on Android; no ack possible  cancelled at once    dropped; no ack possible
 ```
 
-A touch cannot be left to finish like a gesture, because it does not finish by
-itself: it is cancelled on the device before anything else is cleaned up. A gesture
-already handed to Android cannot be recalled. Nothing starts after it.
+Since Prompt 45 a gesture is not left to finish when its authority goes (A2 of the
+Prompt 44 audit: a 2 s swipe ran on for 1.67 s after the suspension and was acked
+`ok: true`). Dart mirrors the authority on a native gate (see
+[The native control gate](#the-native-control-gate)); closing it cancels the
+gesture Android is playing and answers it `revoked`, and the Dart queue never
+reports as done a command whose authority was withdrawn while it ran, whatever
+Android says about it afterwards. What cannot be cancelled is what Android has
+already acted on: a `back`, `home`, `recents`, `set_text` or `ime_enter` runs inside
+its own call, and a touch already recognised by the application under the finger
+(a long press that passed its timeout, a scroll that already moved) stays done.
+Nothing starts after it.
 Queued `back`, `home`, `recents`, `set_text` and `ime_enter` commands are dropped with
 the rest, so a queued `set_text` or `ime_enter` never looks at the window once the
 session has ended.
@@ -786,10 +795,13 @@ RTCDataChannelMessage
 RemoteControlInboundMessage
     │  WebRtcSessionBloc                    the gate above
     ▼
-RemoteControlCommandQueue                   one at a time; a touch_hold keeps its turn
+RemoteControlCommandQueue                   one at a time; a touch_hold keeps its turn;
+    │                                       nothing acked ok after a revocation
     │  RemoteTouchController (Dart)         the touch: binding, seq, what is owed
-    │  RemoteControlAccessibilityClient     port
+    │  RemoteControlAccessibilityClient     port; stamps every command with its grant
     │  remote_control/accessibility         MethodChannel
+    ▼
+RemoteControlGate.kt                        the grant open now, or none (Prompt 45)
     ▼
 RemoteGestureDispatcher.kt                  one gesture at a time, or one touch
     │  RemoteTouchController.kt             the finger: strokes, hold, watchdog
@@ -811,6 +823,9 @@ that knows where the finger is.
 ```text
 remote_control/accessibility
   isAccessibilityServiceAvailable  -> bool
+  openRemoteControl {grant, session}
+                                   -> "opened" | "stale" | "ended"
+  closeRemoteControl {ended?}      -> nothing
   performTap {x, y}                -> "completed" | "cancelled" | "rejected"
                                       | "busy" | "invalid" | "unavailable"
   performLongPress {x, y}          -> the same answers
@@ -836,6 +851,12 @@ remote_control/accessibility
   accessibilityServiceAvailabilityChanged (Android to Dart) bool
   remoteTouchEnded (Android to Dart) touch
 ```
+
+Every method that acts on the screen (`performTap` to `performImeEnter`,
+`startRemoteTouch`, `moveRemoteTouch`, `releaseRemoteTouch`) also carries `grant`,
+and answers `"revoked"` without reaching the service unless that grant is the one
+open. Dart maps `"revoked"` to `session_not_active`. `cancelRemoteTouch` and
+`abandonRemoteTouch` carry none: withdrawing never needs permission.
 
 `touch` on the bridge is not the sender's `touch`: it is an integer Dart chooses for
 each touch it starts, so a name a sender reuses on a new connection can never be taken
@@ -914,6 +935,75 @@ anything else, or no answer in time          ime_action_rejected
 `busy` only guards against a second `dispatchGesture` cancelling the first, and a
 global action, a `set_text` or an `ime_enter` starting under a running gesture. The queue runs one
 command at a time, so it should not happen in normal operation.
+
+### The native control gate
+
+Prompt 45 (A2 of the Prompt 44 audit). Dart decides whether a command may run, from
+the C2 authority of the remote session; the Android side now holds that decision as
+well, so that it can act on it where Dart cannot.
+
+```text
+WebRtcSessionBloc._syncControlGate     control authorised on the current peer
+                                       (ACTIVE, confirmed, this negotiation, this
+                                       generation, the screen not taken away)
+   authorised now, was not             openRemoteControl {grant: n+1, session}
+   not authorised now, was             closeRemoteControl {}          then the Dart
+                                                                      queue is revoked
+   no live session, one ended          closeRemoteControl {ended: id} FINALIZAR, or the
+                                                                      backend closed it
+```
+
+It is called synchronously from every handler that moves one of those inputs, like
+`_syncScreenTransmission` for the screen, and it is the same authority seen from the
+other side of the channel, not a second one: nothing but a confirmed authority opens
+it. A grant is a number Dart never reuses; the client stamps every command with the
+grant open when the command is sent, and method calls reach Android in the order
+they are made, so a command sent after a close always carries a closed grant.
+
+On the Android side (`RemoteControlGate`, owned by `RemoteControlAvailability`, one
+per process):
+
+```text
+command, grant open             runs
+command, any other grant        "revoked", nothing reaches the service
+open, grant <= last             "stale", the gate stays closed
+open, session reported ended    "ended", the gate stays closed (for the process)
+close                           the touch is let go (ACTION_CANCEL, never ACTION_UP);
+                                the tap / long press / swipe being played is answered
+                                "revoked" at once and Android is asked to cancel it;
+                                its later report is only logged
+engine attached or detached     closed, numbering reset; ended sessions kept
+```
+
+Cancelling a one-shot gesture. There is no public API for it. On Android 8.0 and
+later the service dispatches a gesture whose only stroke continues a stroke that was
+never dispatched. `MotionEventInjector.injectEventsMainThread` sees a continuation,
+cannot map the continued stroke (`prepareToContinueOldGesture`: "unknown continued
+stroke id") and, refusing it, runs `cancelAnyPendingInjectedEvents`: the events of
+the running gesture not yet played are removed, one `ACTION_CANCEL` goes to the
+pointer it holds, and both gestures are reported cancelled. No `ACTION_DOWN`,
+`ACTION_MOVE` or `ACTION_UP` is produced, and with no injected gesture in progress
+nothing reaches any application. Read in `frameworks/base` `main` and
+`android16-release`; seen on the T10A (Android 16) in Prompt 45. Below Android 8.0
+there is no such continuation: the gesture plays out (at most 4 s), still answered
+`revoked`.
+
+What the cancellation cannot do:
+
+```text
+already delivered        a MOVE already handed to the input pipeline still arrives
+                         (seen: one, 22 ms after the revocation)
+ACTION_CANCEL position   Android puts the gesture's last *scheduled* point on it,
+                         i.e. where the swipe would have ended. Native views ignore
+                         a cancel's position; Flutter turns it into a synthetic MOVE
+                         to that point before the cancel (seen on the T10A)
+already recognised       a long press past its timeout, a click already delivered
+```
+
+No lease: unlike the screen's transmission gate, this one does not expire by
+itself. A frame stream must stop if Dart stops vouching for it; a command only
+exists because Dart sent it, so a paused Dart sends none, and what it sent before is
+bounded here (a gesture by its duration, at most 4 s; a touch by its 1 s watchdog).
 
 ### From a position to a pixel
 
@@ -1502,6 +1592,13 @@ one contact across strokes   hold, move, move, release is one ACTION_DOWN ... on
 the mismatch cancel          a continuation started one pixel away is refused with one
                              ACTION_CANCEL, and nothing is dropped
 ```
+
+Prompt 45 (2026-11-27) saw both on the T10A, through a test build that printed
+every pointer event of its own window, with commands injected at protocol level
+from the web: hold, ten moves and a release arrived as one `DOWN`, 89 `MOVE`s and
+one `UP`; a touch let go by the control gate closing arrived as one `CANCEL` 37 ms
+after the revocation, with no `UP`. See "Seen on a device (Prompt 45)" in
+`docs/remote_session/LIFECYCLE.md`.
 
 What the validation with the web console has to show, on the picture and not with
 `getevent`:

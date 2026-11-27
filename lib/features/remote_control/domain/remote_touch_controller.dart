@@ -247,6 +247,7 @@ class RemoteTouchController {
         RemoteTouchStartOutcome.unavailable =>
           RemoteControlError.accessibilityUnavailable,
         RemoteTouchStartOutcome.ended => RemoteControlError.touchEnded,
+        RemoteTouchStartOutcome.revoked => RemoteControlError.sessionNotActive,
         RemoteTouchStartOutcome.rejected ||
         RemoteTouchStartOutcome.held => RemoteControlError.gestureRejected,
       }),

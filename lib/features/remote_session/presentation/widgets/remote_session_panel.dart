@@ -338,14 +338,39 @@ class RemoteSessionEndedPanel extends StatelessWidget {
       'Podrás solicitar una nueva asistencia cuando el servidor registre el '
       'cierre.';
 
+  /// The sentence shown for an assistance an earlier run of the application
+  /// took part in and this one does not resume (Prompt 45, A3).
+  static const String notResumableMessage =
+      'La aplicación se reinició y la asistencia anterior no se retoma por '
+      'seguridad.';
+
+  /// The line under [notResumableMessage]. As for [authorityLostMessage],
+  /// nothing is owed to the server, so there is no REINTENTAR.
+  static const String notResumableNextStep =
+      'Si todavía necesitás ayuda, solicitá una nueva asistencia cuando el '
+      'servidor registre el cierre.';
+
   final RemoteSessionEndedLocally state;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final lostAuthority =
-        state.reason == RemoteSessionLocalEndReason.authorityLost;
-    if (lostAuthority) return _buildAuthorityLost(theme);
+    switch (state.reason) {
+      case RemoteSessionLocalEndReason.authorityLost:
+        return _buildInterrupted(
+          theme,
+          authorityLostMessage,
+          authorityLostNextStep,
+        );
+      case RemoteSessionLocalEndReason.notResumable:
+        return _buildInterrupted(
+          theme,
+          notResumableMessage,
+          notResumableNextStep,
+        );
+      case RemoteSessionLocalEndReason.userRequest:
+        break;
+    }
     final unconfirmed = !state.confirming && state.lastFailure != null;
 
     return Column(
@@ -389,17 +414,22 @@ class RemoteSessionEndedPanel extends StatelessWidget {
     );
   }
 
-  /// The tablet stopped the assistance because it could not confirm it with
-  /// the server in time. Says it was the connection, not anybody's FINALIZAR,
-  /// and offers no action: nothing is owed to the server.
-  Widget _buildAuthorityLost(ThemeData theme) => Column(
+  /// The tablet stopped the assistance by itself: it could not confirm it with
+  /// the server in time, or an earlier run took part in it and this one does
+  /// not resume it. Says why — not anybody's FINALIZAR — and offers no action:
+  /// nothing is owed to the server.
+  Widget _buildInterrupted(
+    ThemeData theme,
+    String message,
+    String nextStep,
+  ) => Column(
     crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
       Text('Asistencia remota', style: theme.textTheme.titleMedium),
       const SizedBox(height: 8),
       Text('Asistencia interrumpida', style: theme.textTheme.headlineSmall),
       const SizedBox(height: 8),
-      Text(authorityLostMessage, style: theme.textTheme.bodyMedium),
+      Text(message, style: theme.textTheme.bodyMedium),
       const SizedBox(height: 8),
       Text(
         'El técnico ya no puede controlar esta tablet ni ver su pantalla.',
@@ -407,7 +437,7 @@ class RemoteSessionEndedPanel extends StatelessWidget {
       ),
       const SizedBox(height: 4),
       Text(
-        authorityLostNextStep,
+        nextStep,
         style: theme.textTheme.bodySmall?.copyWith(
           color: theme.colorScheme.outline,
         ),
