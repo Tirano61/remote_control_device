@@ -252,7 +252,19 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   );
 
   late final RemoteControlCommandQueue _commandQueue =
-      RemoteControlCommandQueue(_remoteControl, touches: _touches);
+      RemoteControlCommandQueue(_remoteControl, touches: _touches, log: _log);
+
+  /// The last grant given to the native control gate. Never reused.
+  int _controlGrant = 0;
+
+  /// What the native control gate is open for — the session and the
+  /// generation of the peer whose channel commands come on — or `null` while
+  /// it is closed. See [_syncControlGate].
+  (String, int)? _controlGateFor;
+
+  /// The generation [_peer] was built in. A peer of an older generation is
+  /// one being replaced: no command of it may start.
+  int? _peerGeneration;
 
   /// Bumped whenever a negotiation is abandoned or replaced. Everything a peer
   /// connection reports carries the generation it belongs to, and anything that
@@ -481,6 +493,10 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     // an ACTIVE session and confirmed authority, at the moment it arrives.
     _generation++;
     final generation = _generation;
+    // The old peer's grant closes here, before anything is awaited: what it
+    // left running on Android is cancelled, and its late answers are not
+    // reported as done.
+    _syncControlGate();
     _commandQueue.discardPending();
     _pendingRemoteIce.clear();
     _remoteDescriptionApplied = false;
@@ -513,7 +529,9 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     }
 
     _peer = peer;
+    _peerGeneration = generation;
     _bindPeer(peer, generation);
+    _syncControlGate();
 
     try {
       await peer.setRemoteDescription(
@@ -929,6 +947,13 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     if (_activeRemoteSessionId != null && _activeRemoteSessionId != sessionId) {
       _activeRemoteSessionId = null;
     }
+    // A session that is over is recorded as over on the Android side too, so
+    // nothing there can be opened for it again while this process lives.
+    _syncControlGate(
+      endedRemoteSessionId: sessionId == null
+          ? event.endedRemoteSessionId
+          : null,
+    );
     if (!_isControlAuthorized) _commandQueue.discardPending();
     // And the screen stops reaching anyone, before the peer and the capture
     // are taken down.
@@ -973,6 +998,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     Emitter<WebRtcSessionState> emit,
   ) async {
     _activeRemoteSessionId = event.remoteSessionId;
+    _syncControlGate();
     if (!_isControlAuthorized) _commandQueue.discardPending();
   }
 
@@ -1003,6 +1029,75 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
       _activeRemoteSessionId != null &&
       _activeRemoteSessionId == _negotiationSessionId &&
       _negotiationSessionId != _screenRevokedSessionId;
+
+  // ----------------------------------------------------- native control gate
+
+  /// What the native control gate should be open for right now, or `null`:
+  /// control authorised ([_isControlAuthorized]) on the current peer, the one
+  /// built in this generation. A peer being replaced, or none, closes it.
+  (String, int)? get _controlGateTarget {
+    final sessionId = _negotiationSessionId;
+    if (!_isControlAuthorized ||
+        sessionId == null ||
+        _peer == null ||
+        _peerGeneration != _generation) {
+      return null;
+    }
+    return (sessionId, _generation);
+  }
+
+  /// Brings the native control gate in line with [_controlGateTarget], the way
+  /// [_syncScreenTransmission] does for the screen. It is the same authority —
+  /// C2's confirmed `ACTIVE` session, through [_isControlAuthorized] — seen
+  /// from the other side of the channel, not a second one.
+  ///
+  /// Called synchronously from every handler that moves one of its inputs,
+  /// before anything is awaited. Closing is never waited on and never
+  /// refused: the Android side stops admitting commands, lets a remote touch
+  /// go, cancels the gesture it is playing where Android allows it, and
+  /// answers that gesture `revoked`; [RemoteControlCommandQueue.discardPending]
+  /// makes sure nothing of the old grant is reported done here either. An
+  /// opening is a new grant, never an old one again, so a command sent under
+  /// one opening cannot start under the next. Nothing but a confirmed
+  /// authority opens it, so a late answer of any kind cannot.
+  ///
+  /// [endedRemoteSessionId], given only once no session is live, records that
+  /// session as over on the Android side as well.
+  void _syncControlGate({String? endedRemoteSessionId}) {
+    final target = _controlGateTarget;
+    final ended = target == null ? endedRemoteSessionId : null;
+    if (target == _controlGateFor) {
+      if (ended != null) {
+        _remoteControl.closeControl(endedRemoteSessionId: ended);
+      }
+      return;
+    }
+    final previous = _controlGateFor;
+    _controlGateFor = target;
+    if (previous != null || ended != null) {
+      _remoteControl.closeControl(endedRemoteSessionId: ended);
+      _commandQueue.discardPending();
+      if (previous != null) {
+        _log(
+          'control withdrawn on android for ${previous.$1} '
+          '(grant $_controlGrant)',
+        );
+      }
+    }
+    if (target == null) return;
+    final grant = ++_controlGrant;
+    _log('control authorised on android for ${target.$1} (grant $grant)');
+    unawaited(
+      _remoteControl
+          .openControl(grant: grant, remoteSessionId: target.$1)
+          .then((outcome) {
+            if (outcome == RemoteControlOpenOutcome.opened) return;
+            // The gate stays shut: every command of this grant is refused
+            // there. Nothing here is reopened because of it.
+            _log('control grant $grant not opened on android: ${outcome.name}');
+          }),
+    );
+  }
 
   // ------------------------------------------------------ screen transmission
 
@@ -1221,6 +1316,7 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     }
 
     _screenRevokedSessionId = sessionId;
+    _syncControlGate();
     _commandQueue.discardPending();
     _screenCaptureSessionId = null;
     _captureAttachedGeneration = null;
@@ -1686,6 +1782,8 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   /// for.
   Future<void> _teardownPeer() async {
     _generation++;
+    // No command of the peer going away starts from here on.
+    _syncControlGate();
     // Cleared here and not in [_releasePeer]: the offer being negotiated is
     // what tells a repeat of it from a new one, and the release that happens
     // *inside* the offer flow must not erase the marker the flow just set.
@@ -1706,8 +1804,9 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
   /// already emptied the queue of everything older.
   Future<void> _releasePeer({bool keepRemoteIce = false}) async {
     // Before the channel goes: no queued command outlives the connection it
-    // came in on. A gesture already running cannot be recalled and is left to
-    // finish, and its ack finds the generation moved on. A remote touch is
+    // came in on. A gesture already running was cancelled on the Android side
+    // when the control gate closed (see [_syncControlGate]), as far as Android
+    // allows, and its ack finds the generation moved on. A remote touch is
     // cancelled first, since it would not finish by itself.
     _commandQueue.discardPending();
 
@@ -1723,6 +1822,8 @@ class WebRtcSessionBloc extends Bloc<WebRtcSessionEvent, WebRtcSessionState> {
     _controlChannel = null;
     _controlChannelState = null;
     _peer = null;
+    _peerGeneration = null;
+    _syncControlGate();
 
     _pendingLocalIce.clear();
     if (!keepRemoteIce) _pendingRemoteIce.clear();

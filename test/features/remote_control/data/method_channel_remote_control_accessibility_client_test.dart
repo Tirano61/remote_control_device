@@ -99,7 +99,7 @@ void main() {
       await client.tap(0.25, 0.75);
 
       expect(calls.single.method, 'performTap');
-      expect(calls.single.arguments, {'x': 0.25, 'y': 0.75});
+      expect(calls.single.arguments, {'x': 0.25, 'y': 0.75, 'grant': 0});
     });
 
     for (final (wire, outcome) in const [
@@ -143,7 +143,7 @@ void main() {
       await client.longPress(0.25, 0.75);
 
       expect(calls.single.method, 'performLongPress');
-      expect(calls.single.arguments, {'x': 0.25, 'y': 0.75});
+      expect(calls.single.arguments, {'x': 0.25, 'y': 0.75, 'grant': 0});
     });
 
     for (final (wire, outcome) in const [
@@ -228,6 +228,7 @@ void main() {
         'endX': 0.25,
         'endY': 0.125,
         'durationMs': 350,
+        'grant': 0,
       });
     });
 
@@ -292,13 +293,14 @@ void main() {
     ('performRecents', () => client.performRecents()),
   ]) {
     group(method, () {
-      test('sends no arguments: no position, and no Android code', () async {
+      test('sends nothing but its grant: no position, and no Android '
+          'code', () async {
         answerWith((_) => 'completed');
 
         await perform();
 
         expect(calls.single.method, method);
-        expect(calls.single.arguments, isNull);
+        expect(calls.single.arguments, {'grant': 0});
       });
 
       for (final (wire, outcome) in const [
@@ -341,7 +343,7 @@ void main() {
       await client.performSetText('Hola 👋\náéíóú ñ');
 
       expect(calls.single.method, 'performSetText');
-      expect(calls.single.arguments, {'text': 'Hola 👋\náéíóú ñ'});
+      expect(calls.single.arguments, {'text': 'Hola 👋\náéíóú ñ', 'grant': 0});
     });
 
     test('an empty text still crosses, as an empty text', () async {
@@ -349,7 +351,7 @@ void main() {
 
       await client.performSetText('');
 
-      expect(calls.single.arguments, {'text': ''});
+      expect(calls.single.arguments, {'text': '', 'grant': 0});
     });
 
     for (final (wire, outcome) in const [
@@ -390,13 +392,14 @@ void main() {
   });
 
   group('performImeEnter', () {
-    test('sends no arguments: no text, no key code, no action id', () async {
+    test('sends nothing but its grant: no text, no key code, no action '
+        'id', () async {
       answerWith((_) => 'completed');
 
       await client.performImeEnter();
 
       expect(calls.single.method, 'performImeEnter');
-      expect(calls.single.arguments, isNull);
+      expect(calls.single.arguments, {'grant': 0});
     });
 
     for (final (wire, outcome) in const [
@@ -447,6 +450,134 @@ void main() {
       answerWith((_) => throw PlatformException(code: 'BOOM'));
 
       await expectLater(client.openAccessibilitySettings(), completes);
+    });
+  });
+  group('the native control gate', () {
+    test('openRemoteControl sends the grant and the session', () async {
+      answerWith((_) => 'opened');
+
+      expect(
+        await client.openControl(grant: 4, remoteSessionId: 'rs-1'),
+        RemoteControlOpenOutcome.opened,
+      );
+
+      expect(calls.single.method, 'openRemoteControl');
+      expect(calls.single.arguments, {'grant': 4, 'session': 'rs-1'});
+    });
+
+    for (final (wire, outcome) in const [
+      ('opened', RemoteControlOpenOutcome.opened),
+      ('ended', RemoteControlOpenOutcome.ended),
+      ('stale', RemoteControlOpenOutcome.stale),
+      ('nonsense', RemoteControlOpenOutcome.stale),
+    ]) {
+      test('an opening answered $wire is ${outcome.name}', () async {
+        answerWith((_) => wire);
+
+        expect(
+          await client.openControl(grant: 1, remoteSessionId: 'rs-1'),
+          outcome,
+        );
+      });
+    }
+
+    test('an opening with no Android side is unavailable', () async {
+      answerWith((_) => throw MissingPluginException());
+
+      expect(
+        await client.openControl(grant: 1, remoteSessionId: 'rs-1'),
+        RemoteControlOpenOutcome.unavailable,
+      );
+    });
+
+    test('every command sent after the opening carries its grant, even before '
+        'the opening is answered', () async {
+      final opening = Completer<Object?>();
+      messenger.setMockMethodCallHandler(channel, (call) {
+        calls.add(call);
+        if (call.method == 'openRemoteControl') return opening.future;
+        return Future.value('completed');
+      });
+
+      unawaited(client.openControl(grant: 7, remoteSessionId: 'rs-1'));
+      await client.tap(0.5, 0.5);
+      await client.performBack();
+      await client.performSetText('hola');
+      await client.performImeEnter();
+      opening.complete('opened');
+
+      expect(calls.map((call) => call.method).toList(), [
+        'openRemoteControl',
+        'performTap',
+        'performBack',
+        'performSetText',
+        'performImeEnter',
+      ]);
+      for (final call in calls.skip(1)) {
+        expect((call.arguments as Map)['grant'], 7, reason: call.method);
+      }
+    });
+
+    test('closeRemoteControl is sent at once, and commands after it carry no '
+        'open grant', () async {
+      answerWith(
+        (call) => call.method == 'openRemoteControl' ? 'opened' : 'revoked',
+      );
+      await client.openControl(grant: 2, remoteSessionId: 'rs-1');
+
+      client.closeControl();
+      final outcome = await client.swipe(
+        startX: 0.5,
+        startY: 0.8,
+        endX: 0.5,
+        endY: 0.2,
+        durationMs: 300,
+      );
+
+      expect(calls[1].method, 'closeRemoteControl');
+      expect(calls[1].arguments, <String, Object>{});
+      expect((calls[2].arguments as Map)['grant'], 0);
+      expect(outcome, RemoteGestureOutcome.revoked);
+    });
+
+    test('closing with an ended session names it', () async {
+      answerWith((_) => null);
+
+      client.closeControl(endedRemoteSessionId: 'rs-1');
+      await Future<void>.delayed(Duration.zero);
+
+      expect(calls.single.method, 'closeRemoteControl');
+      expect(calls.single.arguments, {'ended': 'rs-1'});
+    });
+
+    test('closing never throws, with or without an Android side', () async {
+      answerWith((_) => throw PlatformException(code: 'BOOM'));
+      client.closeControl();
+      messenger.setMockMethodCallHandler(channel, null);
+      client.closeControl(endedRemoteSessionId: 'rs-1');
+      await Future<void>.delayed(Duration.zero);
+    });
+
+    test('revoked is understood for every kind of command', () async {
+      answerWith((_) => 'revoked');
+
+      expect(await client.tap(0.5, 0.5), RemoteGestureOutcome.revoked);
+      expect(await client.longPress(0.5, 0.5), RemoteGestureOutcome.revoked);
+      expect(await client.performRecents(), RemoteGestureOutcome.revoked);
+      expect(await client.performSetText('hola'), RemoteTextOutcome.revoked);
+      expect(await client.performImeEnter(), RemoteImeEnterOutcome.revoked);
+      expect(
+        await client.startTouch(touch: 1, x: 0.5, y: 0.5),
+        RemoteTouchStartOutcome.revoked,
+      );
+      expect(
+        await client.moveTouch(touch: 1, seq: 1, x: 0.5, y: 0.5),
+        RemoteTouchMoveOutcome.ended,
+      );
+      expect(
+        await client.releaseTouch(touch: 1, seq: 2, x: 0.5, y: 0.5),
+        RemoteTouchReleaseOutcome.ended,
+      );
     });
   });
 }

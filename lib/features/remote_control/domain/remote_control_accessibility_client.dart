@@ -16,6 +16,11 @@ enum RemoteGestureOutcome {
 
   /// The accessibility service is not connected.
   unavailable,
+
+  /// The native control gate was closed: the command arrived after the
+  /// authority it was sent under was withdrawn, or that authority was
+  /// withdrawn while Android ran it. Never a success, whatever Android did.
+  revoked,
 }
 
 /// What became of a `set_text`. Its own type because it fails differently from
@@ -34,6 +39,11 @@ enum RemoteTextOutcome {
 
   /// The accessibility service is not connected.
   unavailable,
+
+  /// The native control gate was closed: the command arrived after the
+  /// authority it was sent under was withdrawn, or that authority was
+  /// withdrawn while Android ran it. Never a success, whatever Android did.
+  revoked,
 }
 
 /// What became of an `ime_enter`. Its own type because, besides having no
@@ -56,6 +66,11 @@ enum RemoteImeEnterOutcome {
 
   /// The accessibility service is not connected.
   unavailable,
+
+  /// The native control gate was closed: the command arrived after the
+  /// authority it was sent under was withdrawn, or that authority was
+  /// withdrawn while Android ran it. Never a success, whatever Android did.
+  revoked,
 }
 
 /// What became of the hold that starts a remote touch.
@@ -77,6 +92,11 @@ enum RemoteTouchStartOutcome {
 
   /// The accessibility service is not connected.
   unavailable,
+
+  /// The native control gate was closed: the command arrived after the
+  /// authority it was sent under was withdrawn, or that authority was
+  /// withdrawn while Android ran it. Never a success, whatever Android did.
+  revoked,
 }
 
 /// What became of one move of a remote touch.
@@ -108,6 +128,22 @@ enum RemoteTouchReleaseOutcome {
 /// Nothing here can enable the service, because nothing can: Android requires
 /// the user to do it in its own settings, and [openAccessibilitySettings] only
 /// takes them there.
+/// What became of [RemoteControlAccessibilityClient.openControl].
+enum RemoteControlOpenOutcome {
+  /// The grant is open: commands sent under it may start.
+  opened,
+
+  /// The grant was not newer than one already opened. Nothing was opened.
+  stale,
+
+  /// The session was reported ended before: it is never opened again while
+  /// this process lives.
+  ended,
+
+  /// The Android side could not be reached. Nothing was opened.
+  unavailable,
+}
+
 abstract interface class RemoteControlAccessibilityClient {
   /// Every change of the service's status, starting with the next one.
   Stream<RemoteControlAccessibilityStatus> get statusChanges;
@@ -224,4 +260,26 @@ abstract interface class RemoteControlAccessibilityClient {
 
   /// Opens Android's accessibility settings. Never throws.
   Future<void> openAccessibilitySettings();
+
+  /// Mirrors on the Android side that control is authorised for
+  /// [remoteSessionId], under [grant]: a number this process never reuses.
+  ///
+  /// From the moment this is called — before it answers — every command this
+  /// client sends carries [grant], and the Android side lets a command start
+  /// only while the grant it carries is the one open. The decision itself is
+  /// Dart's (`WebRtcSessionBloc`, from the remote session's confirmed
+  /// authority); this only makes it hold on the other side of the channel.
+  Future<RemoteControlOpenOutcome> openControl({
+    required int grant,
+    required String remoteSessionId,
+  });
+
+  /// Closes whatever grant is open, at once and without waiting for anything:
+  /// nothing more starts, a remote touch is let go, and the gesture Android is
+  /// running is cancelled where Android allows it and answered `revoked`
+  /// either way. With [endedRemoteSessionId], that session can never be opened
+  /// again while this process lives.
+  ///
+  /// Commands sent after this carry no open grant and are refused there.
+  void closeControl({String? endedRemoteSessionId});
 }

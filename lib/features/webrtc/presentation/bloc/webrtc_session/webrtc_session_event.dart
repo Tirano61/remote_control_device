@@ -70,12 +70,21 @@ final class WebRtcSignalingAvailabilityChanged extends WebRtcSessionEvent {
 /// assistance that authorised it, and the backend is the only thing that says
 /// whether the assistance is still on.
 final class WebRtcRemoteSessionChanged extends WebRtcSessionEvent {
-  const WebRtcRemoteSessionChanged(this.remoteSessionId);
+  const WebRtcRemoteSessionChanged(
+    this.remoteSessionId, {
+    this.endedRemoteSessionId,
+  });
 
   final String? remoteSessionId;
 
+  /// The session that is over for this tablet — ended here, or closed by the
+  /// backend — when that is why none is live. A reset, an unreadable state or
+  /// no session at all leave it `null`. It only ever withdraws: the Android
+  /// side refuses to open control for it again while the process lives.
+  final String? endedRemoteSessionId;
+
   @override
-  List<Object?> get props => [remoteSessionId];
+  List<Object?> get props => [remoteSessionId, endedRemoteSessionId];
 }
 
 /// The session a control command may run in changed: [remoteSessionId] is the

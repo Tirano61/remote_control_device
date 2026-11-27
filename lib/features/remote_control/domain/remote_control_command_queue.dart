@@ -14,7 +14,12 @@ import 'package:remote_control_device/features/remote_control/domain/remote_touc
 ///
 /// It does not decide whether a command may run: the caller checks that before
 /// submitting, and calls [discardPending] the moment the answer changes. A
-/// gesture already running cannot be recalled, and is simply left to finish.
+/// gesture already running is cancelled on the Android side by the closing of
+/// the native control gate, where Android allows it; here, whatever its answer
+/// turns out to be, it is never reported as done once its authority was
+/// withdrawn while it ran (A2 of the Prompt 44 audit). It was sent under an
+/// authority that no longer holds, and what Android did with it in the
+/// meantime cannot be told apart from a race with the revocation.
 ///
 /// A `touch_hold` takes its turn like any command and keeps it until its touch
 /// has ended, which is later than its ack: [RemoteTouchController.run] is what
@@ -25,7 +30,9 @@ class RemoteControlCommandQueue {
   RemoteControlCommandQueue(
     this._accessibility, {
     RemoteTouchController? touches,
-  }) : touches = touches ?? RemoteTouchController(_accessibility);
+    void Function(String message)? log,
+  }) : touches = touches ?? RemoteTouchController(_accessibility),
+       _log = log ?? _silent;
 
   /// A browser that floods the channel gets refusals rather than taps that run
   /// long after anyone meant them.
@@ -37,8 +44,14 @@ class RemoteControlCommandQueue {
   /// `touch_move`, `touch_release` and `touch_cancel` go to directly.
   final RemoteTouchController touches;
 
+  final void Function(String message) _log;
+
   final Queue<_Pending> _pending = Queue<_Pending>();
   bool _draining = false;
+
+  /// Moves on every [discardPending]. A command that started under one value
+  /// and answers under another had its authority withdrawn while it ran.
+  int _revocations = 0;
 
   /// Queues [command]. [onAck] is called exactly once, with what became of it.
   ///
@@ -73,6 +86,7 @@ class RemoteControlCommandQueue {
   /// everything that has not started. Each of those is answered as refused,
   /// since nothing will run it.
   void discardPending() {
+    _revocations++;
     touches.abandon();
     while (_pending.isNotEmpty) {
       final pending = _pending.removeFirst();
@@ -97,9 +111,34 @@ class RemoteControlCommandQueue {
         await touches.run(hold, pending.onAck);
         continue;
       }
-      pending.onAck(await _execute(pending.command));
+      final startedUnder = _revocations;
+      final ack = await _execute(pending.command);
+      pending.onAck(
+        startedUnder == _revocations
+            ? ack
+            : _afterRevocation(pending.command, ack),
+      );
     }
     _draining = false;
+  }
+
+  /// What a command whose authority was withdrawn while it ran is reported
+  /// as. A failure stays what it was; a success becomes `session_not_active`,
+  /// because nothing can tell a gesture finished before the revocation from
+  /// one Android finished in the race with its cancellation.
+  RemoteControlAck _afterRevocation(
+    RemoteControlCommand command,
+    RemoteControlAck ack,
+  ) {
+    if (!ack.ok) return ack;
+    _log(
+      '${command.id} answered done after its authority was withdrawn: '
+      'reported not done (outcome unknown by race)',
+    );
+    return RemoteControlAck.failure(
+      command.id,
+      RemoteControlError.sessionNotActive,
+    );
   }
 
   Future<RemoteControlAck> _execute(RemoteControlCommand command) async {
@@ -149,6 +188,7 @@ class RemoteControlCommandQueue {
     RemoteGestureOutcome.rejected => RemoteControlError.gestureRejected,
     RemoteGestureOutcome.unavailable =>
       RemoteControlError.accessibilityUnavailable,
+    RemoteGestureOutcome.revoked => RemoteControlError.sessionNotActive,
   };
 
   Future<RemoteControlError?> _setText(
@@ -160,6 +200,7 @@ class RemoteControlCommandQueue {
     RemoteTextOutcome.rejected => RemoteControlError.textRejected,
     RemoteTextOutcome.unavailable =>
       RemoteControlError.accessibilityUnavailable,
+    RemoteTextOutcome.revoked => RemoteControlError.sessionNotActive,
   };
 
   Future<RemoteControlError?> _imeEnter(
@@ -173,8 +214,11 @@ class RemoteControlCommandQueue {
     RemoteImeEnterOutcome.rejected => RemoteControlError.imeActionRejected,
     RemoteImeEnterOutcome.unavailable =>
       RemoteControlError.accessibilityUnavailable,
+    RemoteImeEnterOutcome.revoked => RemoteControlError.sessionNotActive,
   };
 }
+
+void _silent(String _) {}
 
 class _Pending {
   const _Pending(this.command, this.onAck);

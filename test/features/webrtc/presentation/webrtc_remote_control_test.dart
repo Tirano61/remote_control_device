@@ -680,7 +680,8 @@ void main() {
         expect(accessibility.globalActions, isEmpty);
         expect(channel.sentAcks, const [
           RemoteControlAck.failure('b', RemoteControlError.sessionNotActive),
-          RemoteControlAck.success('a'),
+          // Running when its authority went: never reported done (A2).
+          RemoteControlAck.failure('a', RemoteControlError.sessionNotActive),
         ]);
       });
 
@@ -932,7 +933,8 @@ void main() {
       expect(accessibility.setTexts, isEmpty);
       expect(channel.sentAcks, const [
         RemoteControlAck.failure('b', RemoteControlError.sessionNotActive),
-        RemoteControlAck.success('a'),
+        // Running when its authority went: never reported done (A2).
+        RemoteControlAck.failure('a', RemoteControlError.sessionNotActive),
       ]);
     });
 
@@ -1217,7 +1219,8 @@ void main() {
       expect(accessibility.imeEnters, 0);
       expect(channel.sentAcks, const [
         RemoteControlAck.failure('b', RemoteControlError.sessionNotActive),
-        RemoteControlAck.success('a'),
+        // Running when its authority went: never reported done (A2).
+        RemoteControlAck.failure('a', RemoteControlError.sessionNotActive),
       ]);
     });
 
@@ -1483,7 +1486,8 @@ void main() {
       expect(accessibility.longPresses, isEmpty);
       expect(channel.sentAcks, const [
         RemoteControlAck.failure('b', RemoteControlError.sessionNotActive),
-        RemoteControlAck.success('a'),
+        // Running when its authority went: never reported done (A2).
+        RemoteControlAck.failure('a', RemoteControlError.sessionNotActive),
       ]);
     });
 
@@ -1636,7 +1640,8 @@ void main() {
       expect(accessibility.taps, hasLength(1));
       expect(channel.sentAcks, const [
         RemoteControlAck.failure('b', RemoteControlError.sessionNotActive),
-        RemoteControlAck.success('a'),
+        // Running when its authority went: never reported done (A2).
+        RemoteControlAck.failure('a', RemoteControlError.sessionNotActive),
       ]);
     });
 
@@ -1729,11 +1734,12 @@ void main() {
       expect(accessibility.swipes, isEmpty);
       expect(channel.sentAcks, const [
         RemoteControlAck.failure('b', RemoteControlError.sessionNotActive),
-        RemoteControlAck.success('a'),
+        // Running when its authority went: never reported done (A2).
+        RemoteControlAck.failure('a', RemoteControlError.sessionNotActive),
       ]);
     });
 
-    test('a running swipe is left to finish when the session ends', () async {
+    test('a running swipe is not reported done when the session ends', () async {
       final channel = await reachOpenChannel();
       accessibility.holdGestures = true;
       channel.pushSwipe('a');
@@ -1748,7 +1754,8 @@ void main() {
       expect(accessibility.swipes, hasLength(1));
       expect(channel.sentAcks, const [
         RemoteControlAck.failure('b', RemoteControlError.sessionNotActive),
-        RemoteControlAck.success('a'),
+        // Running when its authority went: never reported done (A2).
+        RemoteControlAck.failure('a', RemoteControlError.sessionNotActive),
       ]);
     });
 

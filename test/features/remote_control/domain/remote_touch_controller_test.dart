@@ -779,7 +779,8 @@ void main() {
 
       expect(acks, const [
         RemoteControlAck.failure('hold-7', RemoteControlError.sessionNotActive),
-        RemoteControlAck.success('tap'),
+        // Running when its authority went: never reported done (A2).
+        RemoteControlAck.failure('tap', RemoteControlError.sessionNotActive),
       ]);
       expect(accessibility.touchCalls, isEmpty);
       expect(touches.isActive, isFalse);
