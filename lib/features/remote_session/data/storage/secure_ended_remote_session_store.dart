@@ -10,12 +10,15 @@ import 'package:remote_control_device/features/remote_session/domain/storage/end
 /// credentials on a re-enrollment does not erase it: a session ended here stays
 /// refused even if this installation becomes a device again.
 ///
-/// Two keys:
+/// Three keys:
 ///
 /// ```text
 /// remote_session.ended_pending         the remoteSessionId
 /// remote_session.ended_pending_cause   absent: a close is owed (FINALIZAR)
 ///                                      "authorityLost": none is owed
+/// remote_session.held                  the remoteSessionId this tablet last
+///                                      took part in, written before it could
+///                                      be controlled (Prompt 45)
 /// ```
 ///
 /// A marker written by a build older than the second key reads as "close
@@ -28,6 +31,7 @@ class SecureEndedRemoteSessionStore implements EndedRemoteSessionStore {
   static const String endedRemoteSessionCauseKey =
       'remote_session.ended_pending_cause';
   static const String authorityLostCause = 'authorityLost';
+  static const String heldRemoteSessionKey = 'remote_session.held';
 
   final FlutterSecureStorage _storage;
 
@@ -68,6 +72,40 @@ class SecureEndedRemoteSessionStore implements EndedRemoteSessionStore {
     } on Exception catch (error) {
       throw EndedRemoteSessionStoreException(
         'write failed: ${error.runtimeType}',
+      );
+    }
+  }
+
+  @override
+  Future<String?> readHeld() async {
+    try {
+      final id = await _storage.read(key: heldRemoteSessionKey);
+      return id == null || id.isEmpty ? null : id;
+    } on Exception catch (error) {
+      throw EndedRemoteSessionStoreException(
+        'held read failed: ${error.runtimeType}',
+      );
+    }
+  }
+
+  @override
+  Future<void> writeHeld(String remoteSessionId) async {
+    try {
+      await _storage.write(key: heldRemoteSessionKey, value: remoteSessionId);
+    } on Exception catch (error) {
+      throw EndedRemoteSessionStoreException(
+        'held write failed: ${error.runtimeType}',
+      );
+    }
+  }
+
+  @override
+  Future<void> clearHeld() async {
+    try {
+      await _storage.delete(key: heldRemoteSessionKey);
+    } on Exception catch (error) {
+      throw EndedRemoteSessionStoreException(
+        'held delete failed: ${error.runtimeType}',
       );
     }
   }

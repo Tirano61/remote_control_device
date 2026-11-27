@@ -371,11 +371,12 @@ void main() {
     });
 
     test('a store that cannot be written does not stop the end here', () async {
-      store.failing = true;
+      store.failingWrites = true;
 
       await endWhileUnreachable();
 
-      // The restart guarantee is lost; the local revocation is not.
+      // The local revocation is not lost. Across a restart, see
+      // remote_session_restart_fail_closed_test.dart (Prompt 45).
       expect(bloc.state, endedUnconfirmed);
       repository.currentResult = activatedRemoteSession;
       await sync();
