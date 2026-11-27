@@ -61,7 +61,22 @@ class RemoteTouchChannelTest {
     }
 
     private fun call(method: String, arguments: Map<String, Any?>? = null) =
-        channel.onMethodCall(MethodCall(method, arguments), result)
+        channel.onMethodCall(MethodCall(method, withGrant(arguments)), result)
+
+    /**
+     * Every call here is made under an open grant, as Dart makes them; what the gate does with a
+     * missing or a closed one has its own tests, in [RemoteControlGateTest].
+     */
+    private fun withGrant(arguments: Map<String, Any?>?): Map<String, Any?> =
+        if (arguments?.containsKey("grant") == true) arguments else (arguments ?: emptyMap()) + ("grant" to OPEN_GRANT)
+
+    init {
+        availability.openControl(OPEN_GRANT.toLong(), "session-under-test")
+    }
+
+    private companion object {
+        const val OPEN_GRANT = 1
+    }
 
     private fun hold(touch: Any? = 3, x: Any? = 0.5, y: Any? = 0.5) =
         call("startRemoteTouch", mapOf("touch" to touch, "x" to x, "y" to y))

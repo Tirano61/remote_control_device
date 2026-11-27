@@ -112,6 +112,14 @@ enum class RemoteGestureOutcome(val wire: String) {
 
     /** The accessibility service is not connected. */
     UNAVAILABLE("unavailable"),
+
+    /**
+     * The authority it needed was withdrawn: it arrived with the [RemoteControlGate] closed, or the
+     * gate closed while Android was playing it. Never a success, whatever Android reports later:
+     * a gesture cancelled on the way, and one Android finished anyway in the race with the
+     * cancellation, both answer this. See [RemoteGestureDispatcher.revoke].
+     */
+    REVOKED("revoked"),
 }
 
 /**
@@ -145,6 +153,10 @@ enum class RemoteGestureOutcome(val wire: String) {
  * cancel its finger, and a global action, a `set_text` or an `ime_enter` would act under it. With no
  * [touchPort], or below Android 8.0, there are no remote touches and [startTouch] says so.
  *
+ * [cancelGesture] asks Android to stop the one-shot gesture it is playing, and is used by
+ * [revoke] and nothing else. `null`, or answering `false`, means it cannot be stopped: below
+ * Android 8.0 there is no way to do it without putting another finger down.
+ *
  * Pure, and main-thread only: the channel handler, the gesture callback and the service
  * lifecycle all run there.
  */
@@ -156,7 +168,8 @@ class RemoteGestureDispatcher(
     private val longPressTimeoutMs: () -> Long,
     touchPort: RemoteTouchPort? = null,
     onTouchEnded: (Int) -> Unit = {},
-    log: (String) -> Unit = {},
+    private val log: (String) -> Unit = {},
+    private val cancelGesture: (((Boolean) -> Unit) -> Boolean)? = null,
 ) {
     private var running: Running? = null
 
@@ -173,7 +186,7 @@ class RemoteGestureDispatcher(
     private val isBusy: Boolean get() = running != null || touches.isActive
 
     fun tap(normalizedX: Double, normalizedY: Double, answer: (RemoteGestureOutcome) -> Unit) =
-        press(normalizedX, normalizedY, answer) { TAP_DURATION_MS }
+        press("tap", normalizedX, normalizedY, answer) { TAP_DURATION_MS }
 
     /**
      * A tap held for as long as this device takes to read it as a long press. The stroke is the
@@ -181,7 +194,7 @@ class RemoteGestureDispatcher(
      * it before any gesture starts.
      */
     fun longPress(normalizedX: Double, normalizedY: Double, answer: (RemoteGestureOutcome) -> Unit) =
-        press(normalizedX, normalizedY, answer) {
+        press("long_press", normalizedX, normalizedY, answer) {
             longPressDurationMs(longPressTimeoutMs()) ?: error("long-press timeout out of range")
         }
 
@@ -190,12 +203,14 @@ class RemoteGestureDispatcher(
      * the screen has been read and nothing is running.
      */
     private fun press(
+        name: String,
         normalizedX: Double,
         normalizedY: Double,
         answer: (RemoteGestureOutcome) -> Unit,
         durationMs: () -> Long,
     ) {
         perform(
+            name = name,
             isValid = isNormalized(normalizedX) && isNormalized(normalizedY),
             answer = answer,
         ) { display ->
@@ -212,6 +227,7 @@ class RemoteGestureDispatcher(
         answer: (RemoteGestureOutcome) -> Unit,
     ) {
         perform(
+            name = "swipe",
             isValid = isNormalized(startX) && isNormalized(startY) &&
                 isNormalized(endX) && isNormalized(endY) &&
                 durationMs in MIN_SWIPE_DURATION_MS..MAX_SWIPE_DURATION_MS,
@@ -266,6 +282,7 @@ class RemoteGestureDispatcher(
 
     /** [strokeOn] answering `null` means the gesture makes no sense on the screen as it is. */
     private fun perform(
+        name: String,
         isValid: Boolean,
         answer: (RemoteGestureOutcome) -> Unit,
         strokeOn: (ScreenCaptureGeometry) -> GestureStroke?,
@@ -290,7 +307,7 @@ class RemoteGestureDispatcher(
             return
         }
 
-        val gesture = Running(answer)
+        val gesture = Running(name, answer)
         running = gesture
         val accepted = try {
             dispatch(stroke) { completed ->
@@ -334,14 +351,82 @@ class RemoteGestureDispatcher(
         running?.let { settle(it, RemoteGestureOutcome.CANCELLED) }
     }
 
-    /** Answers once: a late report about a gesture already answered finds nothing to answer. */
+    /**
+     * The [RemoteControlGate] closed: nothing that was started under it may go on, or be reported
+     * as done.
+     *
+     * ```text
+     * a remote touch is down        let go at once, ACTION_CANCEL (never ACTION_UP): abandoned
+     * a tap, long press or swipe    answered REVOKED now; Android asked to cancel it
+     *   is being played               ([cancelGesture]); whatever Android reports about it later
+     *                                 is logged and answers nothing
+     * a global action, a set_text   nothing: each ran, or was refused, inside its own call.
+     *   or an ime_enter               Android has already acted on it and it cannot be undone
+     * ```
+     *
+     * The cancelled gesture stays [running] until Android reports on it, so nothing starts on top
+     * of a stroke Android may still be playing: a command under a new grant answers busy until
+     * then.
+     */
+    fun revoke(): RemoteControlRevocation {
+        val touchAbandoned = touches.isActive
+        touches.abandon(TouchEndReason.REVOKED)
+
+        val gesture = running
+        if (gesture == null || gesture.revoked) {
+            return RemoteControlRevocation(
+                gestureRunning = gesture != null,
+                cancelRequested = false,
+                touchAbandoned = touchAbandoned,
+            )
+        }
+        gesture.revoked = true
+        gesture.answer(RemoteGestureOutcome.REVOKED)
+
+        val cancel = cancelGesture
+        val requested = cancel != null && try {
+            cancel { _ -> }
+        } catch (_: Exception) {
+            false
+        }
+        log(
+            if (requested) {
+                "${gesture.name} revoked while running: cancellation requested"
+            } else {
+                "${gesture.name} revoked while running: Android cannot cancel it here, it plays out"
+            },
+        )
+        return RemoteControlRevocation(
+            gestureRunning = true,
+            cancelRequested = requested,
+            touchAbandoned = touchAbandoned,
+        )
+    }
+
+    /**
+     * Answers once: a late report about a gesture already answered finds nothing to answer. A
+     * revoked gesture has been answered already; what Android says about it is only logged.
+     */
     private fun settle(gesture: Running, outcome: RemoteGestureOutcome) {
         if (running !== gesture) return
         running = null
+        if (gesture.revoked) {
+            log(
+                when (outcome) {
+                    RemoteGestureOutcome.COMPLETED ->
+                        "${gesture.name} revoked: Android completed it anyway (race with the cancellation)"
+                    else -> "${gesture.name} revoked: Android cancelled it"
+                },
+            )
+            return
+        }
         gesture.answer(outcome)
     }
 
-    private class Running(val answer: (RemoteGestureOutcome) -> Unit)
+    private class Running(val name: String, val answer: (RemoteGestureOutcome) -> Unit) {
+        /** The gate closed while it ran; it has been answered [RemoteGestureOutcome.REVOKED]. */
+        var revoked = false
+    }
 
     private companion object {
         /** Long enough to register as a touch, far short of a long press. */
@@ -378,6 +463,43 @@ class RemoteControlAvailability {
     }
 
     val isAvailable: Boolean get() = dispatcher != null
+
+    /**
+     * Whether a command may start, as Dart last said. It belongs to the process, not to the
+     * service: Android rebinding the service changes nothing about who may control the tablet.
+     */
+    val gate = RemoteControlGate()
+
+    /** Whether a command stamped with [grant] may start now. */
+    fun admits(grant: Long?): Boolean = gate.admits(grant)
+
+    /**
+     * Opens [grant] for [session]. A grant that was open before is closed first, and what it left
+     * running is revoked. A session reported ended, or a grant not newer than the last, is refused
+     * and leaves the gate closed.
+     */
+    fun openControl(grant: Long, session: String): RemoteControlOpenOutcome {
+        if (gate.isOpen) closeControl()
+        return gate.open(grant, session)
+    }
+
+    /**
+     * Closes the gate, at once: nothing more starts, a remote touch is let go, and the gesture
+     * Android is playing is asked to stop and answered revoked. With [endedSession], that session
+     * can never be opened again in this process. The revocation is reported only if a grant was
+     * open.
+     */
+    fun closeControl(endedSession: String? = null): RemoteControlRevocation? {
+        gate.close(endedSession) ?: return null
+        return dispatcher?.revoke()
+            ?: RemoteControlRevocation(gestureRunning = false, cancelRequested = false, touchAbandoned = false)
+    }
+
+    /** A Flutter engine came or went: whatever its Dart had opened is closed. */
+    fun resetControl() {
+        if (gate.isOpen) closeControl()
+        gate.reset()
+    }
 
     fun connected(next: RemoteGestureDispatcher) {
         dispatcher?.abandon()

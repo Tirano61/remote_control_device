@@ -51,6 +51,11 @@ class RemoteControlAccessibilityService : AccessibilityService() {
                 ),
                 onTouchEnded = availability::touchEnded,
                 log = { Log.i(TAG, it) },
+                cancelGesture = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    ::cancelInjectedGesture
+                } else {
+                    null
+                },
             ),
         )
     }
@@ -147,6 +152,41 @@ class RemoteControlAccessibilityService : AccessibilityService() {
         )
         if (accepted) touchStroke = if (segment.kind.willContinue) stroke else null
         return accepted
+    }
+
+    /**
+     * Stops the one-shot gesture Android is playing for this service, without touching the screen.
+     *
+     * **There is no public API that cancels a dispatched gesture.** This dispatches a gesture whose
+     * only stroke claims to continue a stroke that was never dispatched. `MotionEventInjector`
+     * (`injectEventsMainThread`) sees a gesture that tries to continue an old one, cannot map the
+     * continued stroke ("unknown continued stroke id" in `prepareToContinueOldGesture`), and on
+     * that refusal runs `cancelAnyPendingInjectedEvents`: the injected events not yet played are
+     * removed, one `ACTION_CANCEL` goes to the pointer that gesture holds down, and the gesture
+     * running is reported cancelled. Then the new one is reported cancelled too, and returned
+     * from before any event of it is built. No `ACTION_DOWN`, `ACTION_MOVE` or `ACTION_UP` is
+     * produced, and with no injected gesture running nothing at all reaches an application.
+     * Read in `android16-release` and `main` of `frameworks/base`; the same refusal is what
+     * [RemoteTouchController.cancelContinuedStrokeViaMismatch] relies on, which CTS
+     * (`testContinuedGesture_withLineDisconnect_isCancelled`) requires of every device.
+     *
+     * The stroke is placed at (0, 0) and never played. Used by [RemoteGestureDispatcher.revoke]
+     * and nothing else.
+     */
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun cancelInjectedGesture(onResult: (Boolean) -> Unit): Boolean {
+        val corner = Path().apply { moveTo(0f, 0f) }
+        val neverDispatched = GestureDescription.StrokeDescription(corner, 0L, 1L, true)
+        val orphan = neverDispatched.continueStroke(corner, 0L, 1L, false)
+        return dispatchGesture(
+            GestureDescription.Builder().addStroke(orphan).build(),
+            object : GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) = onResult(true)
+
+                override fun onCancelled(gestureDescription: GestureDescription?) = onResult(false)
+            },
+            null,
+        )
     }
 
     /** No event types are requested, so none arrive. */
